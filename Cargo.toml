@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["fleet"]
+
+[workspace.package]
+edition = "2024"
+license = "0BSD"
+repository = "https://github.com/halo-org/fleet"
+rust-version = "1.98"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+missing_panics_doc = "allow"
+multiple_crate_versions = "allow"
+
+alloc_instead_of_core = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+arithmetic_side_effects = "warn"
+cfg_not_test = "warn"
+cognitive_complexity = "warn"
+dbg_macro = "warn"
+deref_by_slicing = "warn"
+doc_paragraphs_missing_punctuation = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+field_scoped_visibility_modifiers = "warn"
+float_cmp_const = "warn"
+if_then_some_else_none = "warn"
+indexing_slicing = "warn"
+infinite_loop = "warn"
+integer_division = "warn"
+let_underscore_must_use = "warn"
+lossy_float_literal = "warn"
+mod_module_files = "warn"
+multiple_unsafe_ops_per_block = "warn"
+non_zero_suggestions = "warn"
+partial_pub_fields = "warn"
+precedence_bits = "warn"
+pub_without_shorthand = "warn"
+redundant_test_prefix = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+semicolon_inside_block = "warn"
+std_instead_of_core = "warn"
+str_to_string = "warn"
+string_lit_chars_any = "warn"
+string_slice = "warn"
+todo = "warn"
+try_err = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unseparated_literal_suffix = "warn"
+unused_result_ok = "warn"
+unused_trait_names = "warn"
+unwrap_used = "warn"
+use_debug = "warn"
