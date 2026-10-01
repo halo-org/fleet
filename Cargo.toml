@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["fleet"]
+members = ["fleet", "fleet-core"]
 
 [workspace.package]
 edition = "2024"
@@ -63,3 +63,6 @@ unused_result_ok = "warn"
 unused_trait_names = "warn"
 unwrap_used = "warn"
 use_debug = "warn"
+
+[workspace.dependencies]
+fleet-core.path = "fleet-core"

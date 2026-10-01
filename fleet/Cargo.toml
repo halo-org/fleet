@@ -9,3 +9,6 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+fleet-core.workspace = true
