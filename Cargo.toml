@@ -66,3 +66,5 @@ use_debug = "warn"
 
 [workspace.dependencies]
 fleet-core.path = "fleet-core"
+
+futures-util = { version = "0.3.34", default-features = false }
