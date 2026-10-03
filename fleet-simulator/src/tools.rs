@@ -341,7 +341,7 @@ fn string_object_schema(field: &str) -> JsonObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::MIN_CONTEXT_LIMIT;
+    use crate::models::MIN_CONTEXT_WINDOW;
     use fleet_core::Configured;
     use futures_util::FutureExt as _;
 
@@ -505,7 +505,7 @@ mod tests {
 
             lengths.insert(text.len());
             assert!(text.len() <= (1 << MAX_OUTPUT_TEXT_LENGTH_LOG2) * "👩‍💻".len());
-            assert!(format!("{output:?}").len() < MIN_CONTEXT_LIMIT);
+            assert!(format!("{output:?}").len() < MIN_CONTEXT_WINDOW);
             assert!(!output.is_error);
             assert!(output.structured_content.unwrap()["output"].is_string());
         }
@@ -552,7 +552,7 @@ mod tests {
             is_error: false,
         };
 
-        assert!(format!("{output:?}").len() < MIN_CONTEXT_LIMIT);
+        assert!(format!("{output:?}").len() < MIN_CONTEXT_WINDOW);
     }
 
     #[test]

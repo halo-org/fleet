@@ -116,7 +116,9 @@ pub struct Model {
     pub name: ModelName,
     /// The JSON schema for this model's config.
     pub config_schema: JsonObject,
-    /// The default input token count at which to compact.
+    /// The maximum number of combined input and output tokens this model supports.
+    pub context_window: u32,
+    /// The recommended number of input tokens at which to compact this model's input.
     pub compaction_threshold: u32,
 }
 
@@ -133,8 +135,6 @@ pub struct ModelContext {
     pub system_prompt: String,
     /// The tools available to the model.
     pub tools: Vec<ModelTool>,
-    /// The continuation to use.
-    pub continuation: Option<ModelContinuation>,
 }
 
 /// A model's view of a tool.

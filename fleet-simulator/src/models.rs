@@ -15,8 +15,8 @@ use std::{
     sync::Mutex,
 };
 
-/// The minimum context limit of generated models in bytes.
-pub const MIN_CONTEXT_LIMIT: usize = 8_192;
+/// The minimum context window of generated models in bytes.
+pub const MIN_CONTEXT_WINDOW: usize = 8_192;
 
 /// A simulated [`Models`] provider.
 pub struct ModelsSimulator<'sim> {
@@ -27,14 +27,9 @@ pub struct ModelsSimulator<'sim> {
 
 struct State {
     rng: Rng,
-    models: BTreeMap<ModelName, ModelState>,
+    models: BTreeMap<ModelName, Model>,
     continuations: BTreeMap<String, ContinuationState>,
     next_continuation_id: u64,
-}
-
-struct ModelState {
-    model: Model,
-    context_limit: usize,
 }
 
 struct ContinuationState {
@@ -56,7 +51,7 @@ enum ModelsSimulatorErrorInner {
 
 struct ModelsSimulatorConfig {
     model_count: usize,
-    context_limit: RangeInclusive<usize>,
+    context_window: RangeInclusive<usize>,
     output_content: ContentConfig,
     get: WrapConfig,
     generate_suspend: Probability,
@@ -131,7 +126,7 @@ impl Models for ModelsSimulator<'_> {
                     .expect("never poisoned")
                     .models
                     .get(name)
-                    .map(|state| state.model.clone());
+                    .cloned();
 
                 Ok(model)
             })
@@ -141,13 +136,15 @@ impl Models for ModelsSimulator<'_> {
     fn generate(
         &self,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
     ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send {
         #[expect(clippy::significant_drop_tightening, reason = "false positive")]
         let items_future = async move {
             let mut state = self.state.lock().expect("never poisoned");
 
-            let response = state.generate_response(self.scheduler, &self.config, context, input);
+            let response =
+                state.generate_response(self.scheduler, &self.config, context, continuation, input);
 
             match response {
                 Ok(response) => {
@@ -184,6 +181,7 @@ impl Models for ModelsSimulator<'_> {
     async fn compact(
         &self,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, Self::Error> {
@@ -193,6 +191,7 @@ impl Models for ModelsSimulator<'_> {
                     self.scheduler,
                     &self.config,
                     context,
+                    continuation,
                     input,
                     instructions,
                 )
@@ -207,6 +206,7 @@ impl State {
         scheduler: &Scheduler,
         config: &ModelsSimulatorConfig,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
     ) -> Result<ModelResponse, ModelsSimulatorError> {
         let provenance = ModelProvenance {
@@ -214,16 +214,17 @@ impl State {
             model_id: context.model.name.to_string(),
         };
 
-        let context_limit = self
+        let context_window = self
             .models
             .get(&context.model.name)
             .ok_or_else(|| ModelsSimulatorError::other("unknown model"))?
-            .context_limit;
+            .context_window;
+        let context_window = usize::try_from(context_window).expect("context window fits usize");
 
         let mut history = self.restore_history(
             scheduler,
             &provenance,
-            context.continuation.as_ref(),
+            continuation,
             config.generate_expire_continuation,
         )?;
 
@@ -231,12 +232,20 @@ impl State {
 
         validate_compactions(&provenance, &history)?;
 
-        if context_size(context, &history) > context_limit {
+        let input_size = context_size(context, &history);
+
+        if input_size > context_window {
             return Err(ModelsSimulatorError::context_too_long("context too long"));
         }
 
         let output = generate_output(scheduler, config, &mut self.rng, context, &history);
-        let usage = usage(context, &history, &output);
+        let output_size = format!("{output:?}").len();
+
+        if input_size.saturating_add(output_size) > context_window {
+            return Err(ModelsSimulatorError::context_too_long("context too long"));
+        }
+
+        let usage = usage(input_size, output_size);
 
         history.push(ModelInput::Assistant(provenance.clone(), output.clone()));
 
@@ -256,6 +265,7 @@ impl State {
         scheduler: &Scheduler,
         config: &ModelsSimulatorConfig,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, ModelsSimulatorError> {
@@ -264,16 +274,17 @@ impl State {
             model_id: context.model.name.to_string(),
         };
 
-        let context_limit = self
+        let context_window = self
             .models
             .get(&context.model.name)
             .ok_or_else(|| ModelsSimulatorError::other("unknown model"))?
-            .context_limit;
+            .context_window;
+        let context_window = usize::try_from(context_window).expect("context window fits usize");
 
         let mut history = self.restore_history(
             scheduler,
             &provenance,
-            context.continuation.as_ref(),
+            continuation,
             config.generate_expire_continuation,
         )?;
 
@@ -284,7 +295,7 @@ impl State {
         let input_size =
             context_size(context, &history).saturating_add(instructions.map_or(0, str::len));
 
-        if input_size > context_limit {
+        if input_size > context_window {
             return Err(ModelsSimulatorError::context_too_long("context too long"));
         }
 
@@ -325,12 +336,12 @@ impl State {
         }
 
         let summary = content::generate_text(&mut self.rng, &config.output_content);
-        let usage = ModelUsage {
-            input: u32::try_from(input_size).unwrap_or(u32::MAX),
-            output: u32::try_from(summary.len()).unwrap_or(u32::MAX),
-            cache_read: 0,
-            cache_write: 0,
-        };
+
+        if input_size.saturating_add(summary.len()) > context_window {
+            return Err(ModelsSimulatorError::context_too_long("context too long"));
+        }
+
+        let usage = usage(input_size, summary.len());
         let mut input = vec![ModelInput::Compaction(
             provenance,
             ModelCompaction {
@@ -475,8 +486,8 @@ impl ModelsSimulatorConfig {
     fn generate(rng: &mut Rng) -> Self {
         Self {
             model_count: rng.usize(1..=5),
-            context_limit: if rng.usize(0..5) == 0 {
-                (MIN_CONTEXT_LIMIT..=32_768).into()
+            context_window: if rng.usize(0..5) == 0 {
+                (MIN_CONTEXT_WINDOW..=32_768).into()
             } else {
                 (65_536..=262_144).into()
             },
@@ -608,10 +619,7 @@ fn context_size(context: &ModelContext, history: &[ModelInput]) -> usize {
     .len()
 }
 
-fn usage(context: &ModelContext, history: &[ModelInput], output: &[ModelOutput]) -> ModelUsage {
-    let input = context_size(context, history);
-    let output = format!("{output:?}").len();
-
+fn usage(input: usize, output: usize) -> ModelUsage {
     ModelUsage {
         input: u32::try_from(input).unwrap_or(u32::MAX),
         output: u32::try_from(output).unwrap_or(u32::MAX),
@@ -620,28 +628,20 @@ fn usage(context: &ModelContext, history: &[ModelInput], output: &[ModelOutput])
     }
 }
 
-fn generate_models(
-    rng: &mut Rng,
-    config: &ModelsSimulatorConfig,
-) -> BTreeMap<ModelName, ModelState> {
+fn generate_models(rng: &mut Rng, config: &ModelsSimulatorConfig) -> BTreeMap<ModelName, Model> {
     (0..config.model_count)
         .map(|index| {
-            let context_limit = rng.usize(config.context_limit);
-            let compaction_threshold = context_limit.saturating_sub(context_limit.div_ceil(4));
+            let context_window = rng.usize(config.context_window);
+            let compaction_threshold = context_window.saturating_sub(context_window.div_ceil(4));
             let model = Model {
                 name: format!("model-{index}").into(),
                 config_schema: JsonObject::new(),
+                context_window: u32::try_from(context_window).expect("context window fits u32"),
                 compaction_threshold: u32::try_from(compaction_threshold)
                     .expect("compaction threshold fits u32"),
             };
 
-            (
-                model.name.clone(),
-                ModelState {
-                    model,
-                    context_limit,
-                },
-            )
+            (model.name.clone(), model)
         })
         .collect()
 }
@@ -829,7 +829,6 @@ mod tests {
                 is_async: true,
                 input_schema: tools::input_schema(),
             }],
-            continuation: None,
         }
     }
 
@@ -838,7 +837,7 @@ mod tests {
         input: &[ModelInput],
     ) -> Vec<Result<ModelResponseChunk, ModelsSimulatorError>> {
         simulator
-            .generate(&context(), input)
+            .generate(&context(), None, input)
             .collect()
             .now_or_never()
             .unwrap()
@@ -903,11 +902,11 @@ mod tests {
         let first = chunks(&simulator, &input);
         let response = completed(&first);
         let calls = calls(response);
-        let mut context = context();
-        context.continuation = Some(ModelContinuation {
+        let context = context();
+        let continuation = ModelContinuation {
             token: response.continuation_token.clone().unwrap(),
             provenance: response.provenance.clone(),
-        });
+        };
         let result = ModelInput::ToolResult(ToolResult {
             call_id: calls[0].id.clone(),
             output: ToolOutput {
@@ -918,7 +917,12 @@ mod tests {
         });
 
         let compacted = simulator
-            .compact(&context, &[result], Some("Keep pending work."))
+            .compact(
+                &context,
+                Some(&continuation),
+                &[result],
+                Some("Keep pending work."),
+            )
             .now_or_never()
             .unwrap()
             .unwrap();
@@ -934,10 +938,9 @@ mod tests {
         );
         assert!(compacted.usage.input > response.usage.input);
 
-        context.continuation = None;
         simulator.config.generate_tool_call_limit = (0..=0).into();
         let resumed = simulator
-            .generate(&context, &compacted.input)
+            .generate(&context, None, &compacted.input)
             .collect::<Vec<_>>()
             .now_or_never()
             .unwrap();
@@ -969,7 +972,7 @@ mod tests {
         );
         assert_eq!(
             simulator
-                .compact(&context, &input, None)
+                .compact(&context, None, &input, None)
                 .now_or_never()
                 .unwrap(),
             Err(ModelsSimulatorError::invalid_compaction(
@@ -987,7 +990,7 @@ mod tests {
         completed(&chunks(&simulator, &input));
         assert!(
             simulator
-                .compact(&context, &input, None)
+                .compact(&context, None, &input, None)
                 .now_or_never()
                 .unwrap()
                 .is_ok()
@@ -998,7 +1001,7 @@ mod tests {
     fn compaction_counts_instructions_and_rejects_invalid_continuation() {
         let scheduler = Scheduler::new(0);
         let simulator = simulator(&scheduler);
-        let mut context = context();
+        let context = context();
         simulator
             .state
             .lock()
@@ -1006,27 +1009,27 @@ mod tests {
             .models
             .get_mut(&context.model.name)
             .unwrap()
-            .context_limit = 1_000;
+            .context_window = 1_000;
 
         assert_eq!(
             simulator
-                .compact(&context, &[], Some(&"x".repeat(1_000)))
+                .compact(&context, None, &[], Some(&"x".repeat(1_000)))
                 .now_or_never()
                 .unwrap(),
             Err(ModelsSimulatorError::context_too_long("context too long")),
         );
 
-        context.continuation = Some(ModelContinuation {
+        let continuation = ModelContinuation {
             token: "missing".into(),
             provenance: ModelProvenance {
                 provider_id: "fleet-simulator".into(),
                 model_id: context.model.name.to_string(),
             },
-        });
+        };
 
         assert_eq!(
             simulator
-                .compact(&context, &[], None)
+                .compact(&context, Some(&continuation), &[], None)
                 .now_or_never()
                 .unwrap(),
             Err(ModelsSimulatorError::invalid_continuation(
@@ -1206,7 +1209,98 @@ mod tests {
     }
 
     #[test]
-    fn context_limits_include_small_and_large_regimes() {
+    fn response_output_must_fit_context_window() {
+        let scheduler = Scheduler::new(0);
+        let mut simulator = simulator(&scheduler);
+        simulator.config.generate_commentary_limit = (1..=1).into();
+        simulator.config.generate_text = Probability::ALWAYS;
+        simulator.config.generate_reasoning = Probability::ALWAYS;
+        simulator.config.generate_tool_call_limit = (1..=1).into();
+        simulator.config.generate_save_continuation = Probability::ALWAYS;
+        let rng = simulator.state.lock().unwrap().rng.clone();
+        let first = chunks(&simulator, &[]);
+        let usage = completed(&first).usage;
+        let total = usage.input.checked_add(usage.output).unwrap();
+
+        assert!(usage.output > 0);
+
+        for (context_window, fits) in [(total.checked_sub(1).unwrap(), false), (total, true)] {
+            {
+                let mut state = simulator.state.lock().unwrap();
+                state.rng = rng.clone();
+                state
+                    .models
+                    .get_mut(&"model-0".into())
+                    .unwrap()
+                    .context_window = context_window;
+            }
+
+            let result = chunks(&simulator, &[]);
+
+            if fits {
+                assert_eq!(completed(&result).usage, usage);
+            } else {
+                assert_eq!(
+                    result,
+                    vec![Err(ModelsSimulatorError::context_too_long(
+                        "context too long"
+                    ))],
+                );
+                assert_eq!(simulator.state.lock().unwrap().continuations.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_output_must_fit_context_window() {
+        let scheduler = Scheduler::new(0);
+        let mut simulator = simulator(&scheduler);
+        simulator.config.output_content.text_length_log2 = (6..=6).into();
+        let context = context();
+        let input = [ModelInput::User(vec![ContentBlock::Text("history".into())])];
+        let rng = simulator.state.lock().unwrap().rng.clone();
+        let compacted = simulator
+            .compact(&context, None, &input, Some("Keep pending work."))
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        let total = compacted
+            .usage
+            .input
+            .checked_add(compacted.usage.output)
+            .unwrap();
+
+        assert!(compacted.usage.output > 0);
+
+        for (context_window, fits) in [(total.checked_sub(1).unwrap(), false), (total, true)] {
+            {
+                let mut state = simulator.state.lock().unwrap();
+                state.rng = rng.clone();
+                state
+                    .models
+                    .get_mut(&context.model.name)
+                    .unwrap()
+                    .context_window = context_window;
+            }
+
+            let result = simulator
+                .compact(&context, None, &input, Some("Keep pending work."))
+                .now_or_never()
+                .unwrap();
+
+            if fits {
+                assert_eq!(result.unwrap(), compacted);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ModelsSimulatorError::context_too_long("context too long")),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_windows_include_small_and_large_regimes() {
         let mut small = false;
         let mut large = false;
 
@@ -1217,10 +1311,10 @@ mod tests {
 
             assert_eq!(models.len(), config.model_count);
             for model in models.values() {
-                let threshold = usize::try_from(model.model.compaction_threshold).unwrap();
-                assert!(threshold > 0 && threshold < model.context_limit);
-                small |= model.context_limit <= 32_768;
-                large |= model.context_limit >= 65_536;
+                assert!(model.compaction_threshold > 0);
+                assert!(model.compaction_threshold < model.context_window);
+                small |= model.context_window <= 32_768;
+                large |= model.context_window >= 65_536;
             }
         }
 
@@ -1235,9 +1329,9 @@ mod tests {
             .models
             .get_mut(&"model-0".into())
             .unwrap()
-            .context_limit = MIN_CONTEXT_LIMIT;
+            .context_window = u32::try_from(MIN_CONTEXT_WINDOW).unwrap();
         let input = [ModelInput::User(vec![ContentBlock::Text(
-            "x".repeat(MIN_CONTEXT_LIMIT),
+            "x".repeat(MIN_CONTEXT_WINDOW),
         )])];
 
         let too_long = chunks(&simulator, &input);

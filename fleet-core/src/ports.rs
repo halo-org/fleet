@@ -1,6 +1,6 @@
 use crate::{
     Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, Model,
-    ModelCompactionResponse, ModelContext, ModelInput, ModelName, ModelResponse,
+    ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName, ModelResponse,
     ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName, Tool,
     ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
 };
@@ -64,6 +64,7 @@ pub trait Models {
     fn generate(
         &self,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
     ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send;
 
@@ -90,6 +91,7 @@ pub trait Models {
     fn compact(
         &self,
         context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
         instructions: Option<&str>,
     ) -> impl Future<Output = Result<ModelCompactionResponse, Self::Error>> + Send;
@@ -104,7 +106,7 @@ pub enum ModelsErrorKind {
     InvalidContinuation,
     /// The input contains compaction state that this model cannot use.
     InvalidCompaction,
-    /// The context of the conversation exceeds the model's maximum context window.
+    /// The context of the conversation exceeds the model's context window.
     ContextTooLong,
     /// An error not covered by any other kind.
     Other,
@@ -422,6 +424,8 @@ pub trait RuntimeStore {
 
     /// Appends a compaction to the agent's event log.
     ///
+    /// If the agent is parked at `expected_latest_event`, it remains parked at the new event.
+    ///
     /// # Errors
     ///
     /// Returns errors with the following error kinds:
@@ -646,18 +650,20 @@ macro_rules! impl_models_for_pointer {
             fn generate(
                 &self,
                 context: &ModelContext,
+                continuation: Option<&ModelContinuation>,
                 input: &[ModelInput],
             ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send {
-                (**self).generate(context, input)
+                (**self).generate(context, continuation, input)
             }
 
             fn compact(
                 &self,
                 context: &ModelContext,
+                continuation: Option<&ModelContinuation>,
                 input: &[ModelInput],
                 instructions: Option<&str>,
             ) -> impl Future<Output = Result<ModelCompactionResponse, Self::Error>> + Send {
-                (**self).compact(context, input, instructions)
+                (**self).compact(context, continuation, input, instructions)
             }
         }
     };
