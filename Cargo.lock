@@ -18,6 +18,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-simulator"
+version = "0.0.0"
+dependencies = [
+ "fleet-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
