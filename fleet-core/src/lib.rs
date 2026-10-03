@@ -5,12 +5,17 @@
 extern crate alloc;
 
 mod error;
+mod ports;
 #[cfg_attr(not(test), expect(dead_code, reason = "consumer not yet implemented"))]
 mod task;
 mod types;
 
 pub use self::{
     error::Error,
+    ports::{
+        ClientStore, ClientStoreErrorKind, ErrorHandler, IdleHandler, Models, ModelsErrorKind,
+        Roles, RuntimeStore, RuntimeStoreErrorKind, Tools, ToolsErrorKind,
+    },
     types::{
         Agent, AgentId, AgentParent, AgentState, Configured, ContentBlock, Event, EventCursor,
         EventPayload, JsonObject, JsonValue, Message, MessageId, MessageMode, Model, ModelContext,
