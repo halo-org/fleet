@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 futures-util = { workspace = true, features = ["alloc"] }
+serde_json = { workspace = true, features = ["alloc"] }

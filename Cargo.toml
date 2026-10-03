@@ -68,3 +68,4 @@ use_debug = "warn"
 fleet-core.path = "fleet-core"
 
 futures-util = { version = "0.3.34", default-features = false }
+serde_json = { version = "1.0.151", default-features = false }
