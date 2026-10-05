@@ -11,4 +11,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+fastrand.workspace = true
 fleet-core.workspace = true
+futures-util.workspace = true

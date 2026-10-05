@@ -68,5 +68,6 @@ use_debug = "warn"
 fleet-core.path = "fleet-core"
 fleet-simulator.path = "fleet-simulator"
 
+fastrand = { version = "2.5.0", default-features = false }
 futures-util = { version = "0.3.34", default-features = false }
 serde_json = { version = "1.0.151", default-features = false }
