@@ -8,6 +8,7 @@ mod error_handler;
 mod idle_handler;
 mod models;
 mod probability;
+mod prompts;
 mod random_error;
 mod roles;
 mod scheduler;
@@ -18,6 +19,7 @@ pub use self::{
     error_handler::ErrorHandlerSimulator,
     idle_handler::IdleHandlerSimulator,
     models::{ModelsSimulator, ModelsSimulatorError},
+    prompts::{PromptsSimulator, PromptsSimulatorError},
     roles::{RolesSimulator, RolesSimulatorError},
     scheduler::Scheduler,
     store::{AgentSnapshot, StoreSimulator, StoreSimulatorError, ToolCallSnapshot},
