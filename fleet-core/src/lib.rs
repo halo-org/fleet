@@ -14,14 +14,15 @@ pub use self::{
     error::Error,
     ports::{
         ClientStore, ClientStoreErrorKind, ErrorHandler, IdleHandler, Models, ModelsErrorKind,
-        Roles, RuntimeStore, RuntimeStoreErrorKind, Tools, ToolsErrorKind,
+        Prompts, Roles, RuntimeStore, RuntimeStoreErrorKind, Tools, ToolsErrorKind,
     },
     types::{
         Agent, AgentId, AgentParent, AgentState, Configured, ContentBlock, Event, EventCursor,
         EventPayload, JsonObject, JsonValue, Message, MessageId, MessageMode, Model, ModelContext,
         ModelContinuation, ModelInput, ModelName, ModelOutput, ModelProvenance, ModelReasoning,
-        ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Role, RoleName, RoleParameter,
-        RoleParameterName, RoleParameterTarget, Tool, ToolAlias, ToolCall, ToolCallId, ToolContext,
-        ToolName, ToolOutput, ToolResult, Wake,
+        ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext,
+        PromptName, PromptOutput, PromptResponse, Role, RoleName, RoleParameter, RoleParameterName,
+        RoleParameterTarget, Tool, ToolAlias, ToolCall, ToolCallId, ToolContext, ToolName,
+        ToolOutput, ToolResult, Wake,
     },
 };

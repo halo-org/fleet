@@ -335,6 +335,48 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+// === Prompts ===
+
+/// The metadata of a prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Prompt {
+    /// The name that uniquely identifies this prompt.
+    pub name: PromptName,
+    /// The JSON schema for this prompt's config.
+    pub config_schema: JsonObject,
+    /// The JSON schema for this prompt's input.
+    pub input_schema: JsonObject,
+}
+
+/// The name of a prompt.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PromptName(String);
+
+/// The context passed to a prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PromptContext {
+    /// The prompt name and config.
+    pub prompt: Configured<PromptName>,
+    /// The ID of the agent the prompt is being rendered for.
+    pub agent_id: AgentId,
+}
+
+/// A response from rendering a prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PromptResponse {
+    /// The response output items.
+    pub output: Vec<PromptOutput>,
+}
+
+/// A rendered prompt output.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PromptOutput {
+    /// Content attributed to the user.
+    User(Vec<ContentBlock>),
+    /// Content attributed to the assistant.
+    Assistant(Vec<ContentBlock>),
+}
+
 // === Configuration ===
 
 /// An item's name and config.
@@ -497,6 +539,7 @@ impl_newtype!(ModelName, String);
 impl_newtype!(ToolName, String);
 impl_newtype!(ToolAlias, String);
 impl_newtype!(ToolCallId, String);
+impl_newtype!(PromptName, String);
 impl_newtype!(MessageId, u128);
 impl_newtype!(EventCursor, u128);
 

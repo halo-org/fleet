@@ -1,7 +1,8 @@
 use crate::{
     Agent, AgentId, AgentState, Event, EventCursor, JsonObject, Message, Model, ModelContext,
-    ModelInput, ModelName, ModelResponse, ModelResponseChunk, Role, RoleName, Tool, ToolCall,
-    ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
+    ModelInput, ModelName, ModelResponse, ModelResponseChunk, Prompt, PromptContext, PromptName,
+    PromptResponse, Role, RoleName, Tool, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput,
+    ToolResult, Wake,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
@@ -141,6 +142,35 @@ pub enum ToolsErrorKind {
     UnsafeToRetry,
     /// An error not covered by any other kind.
     Other,
+}
+
+// === Prompts ===
+
+/// Provides access to prompts.
+pub trait Prompts {
+    /// The error type returned by this provider.
+    type Error: core::error::Error + 'static;
+
+    /// Returns the prompt with the given name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider fails to perform the lookup.
+    fn get(
+        &self,
+        name: &PromptName,
+    ) -> impl Future<Output = Result<Option<Prompt>, Self::Error>> + Send;
+
+    /// Renders a prompt using the provided input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider fails to render the prompt.
+    fn render(
+        &self,
+        context: &PromptContext,
+        input: &JsonObject,
+    ) -> impl Future<Output = Result<PromptResponse, Self::Error>> + Send;
 }
 
 // === Error Handler ===
@@ -610,6 +640,33 @@ macro_rules! impl_tools_for_pointer {
     };
 }
 
+macro_rules! impl_prompts_for_pointer {
+    ($t:ty) => {
+        #[warn(clippy::missing_trait_methods)]
+        impl<T> Prompts for $t
+        where
+            T: Prompts + ?Sized,
+        {
+            type Error = T::Error;
+
+            fn get(
+                &self,
+                name: &PromptName,
+            ) -> impl Future<Output = Result<Option<Prompt>, Self::Error>> + Send {
+                (**self).get(name)
+            }
+
+            fn render(
+                &self,
+                context: &PromptContext,
+                input: &JsonObject,
+            ) -> impl Future<Output = Result<PromptResponse, Self::Error>> + Send {
+                (**self).render(context, input)
+            }
+        }
+    };
+}
+
 macro_rules! impl_error_handler_for_pointer {
     ($t:ty) => {
         #[warn(clippy::missing_trait_methods)]
@@ -817,6 +874,12 @@ impl_tools_for_pointer!(&mut T);
 impl_tools_for_pointer!(Box<T>);
 impl_tools_for_pointer!(Rc<T>);
 impl_tools_for_pointer!(Arc<T>);
+
+impl_prompts_for_pointer!(&T);
+impl_prompts_for_pointer!(&mut T);
+impl_prompts_for_pointer!(Box<T>);
+impl_prompts_for_pointer!(Rc<T>);
+impl_prompts_for_pointer!(Arc<T>);
 
 impl_error_handler_for_pointer!(&T);
 impl_error_handler_for_pointer!(&mut T);
