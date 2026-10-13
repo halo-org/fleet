@@ -4,12 +4,16 @@ use crate::{
 use core::{fmt, range::RangeInclusive};
 use fastrand::Rng;
 use fleet_core::{
-    JsonObject, JsonValue, Model, ModelContext, ModelContinuation, ModelInput, ModelName,
-    ModelOutput, ModelProvenance, ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool,
-    ModelUsage, Models, ModelsErrorKind, ToolCall, ToolCallId,
+    JsonObject, JsonValue, Model, ModelCompaction, ModelCompactionResponse, ModelContext,
+    ModelContinuation, ModelInput, ModelName, ModelOutput, ModelProvenance, ModelReasoning,
+    ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Models, ModelsErrorKind, ToolCall,
+    ToolCallId,
 };
 use futures_util::{Stream, StreamExt as _, stream};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 /// The minimum context limit of generated models in bytes.
 pub const MIN_CONTEXT_LIMIT: usize = 8_192;
@@ -74,6 +78,7 @@ struct ModelsSimulatorConfig {
     generate_commentary_limit: RangeInclusive<usize>,
     generate_tool_call_limit: RangeInclusive<usize>,
     generate_tool_rounds_limit: usize,
+    compact: WrapConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -175,6 +180,25 @@ impl Models for ModelsSimulator<'_> {
                 .suspend_stream(self.config.generate_suspend, items)
         })
     }
+
+    async fn compact(
+        &self,
+        context: &ModelContext,
+        input: &[ModelInput],
+        instructions: Option<&str>,
+    ) -> Result<ModelCompactionResponse, Self::Error> {
+        self.scheduler
+            .wrap(&self.config.compact, ModelsSimulatorError::random, async {
+                self.state.lock().expect("never poisoned").compact(
+                    self.scheduler,
+                    &self.config,
+                    context,
+                    input,
+                    instructions,
+                )
+            })
+            .await
+    }
 }
 
 impl State {
@@ -205,6 +229,8 @@ impl State {
 
         history.extend_from_slice(input);
 
+        validate_compactions(&provenance, &history)?;
+
         if context_size(context, &history) > context_limit {
             return Err(ModelsSimulatorError::context_too_long("context too long"));
         }
@@ -223,6 +249,99 @@ impl State {
             provenance,
             continuation_token,
         })
+    }
+
+    fn compact(
+        &mut self,
+        scheduler: &Scheduler,
+        config: &ModelsSimulatorConfig,
+        context: &ModelContext,
+        input: &[ModelInput],
+        instructions: Option<&str>,
+    ) -> Result<ModelCompactionResponse, ModelsSimulatorError> {
+        let provenance = ModelProvenance {
+            provider_id: "fleet-simulator".into(),
+            model_id: context.model.name.to_string(),
+        };
+
+        let context_limit = self
+            .models
+            .get(&context.model.name)
+            .ok_or_else(|| ModelsSimulatorError::other("unknown model"))?
+            .context_limit;
+
+        let mut history = self.restore_history(
+            scheduler,
+            &provenance,
+            context.continuation.as_ref(),
+            config.generate_expire_continuation,
+        )?;
+
+        history.extend_from_slice(input);
+
+        validate_compactions(&provenance, &history)?;
+
+        let input_size =
+            context_size(context, &history).saturating_add(instructions.map_or(0, str::len));
+
+        if input_size > context_limit {
+            return Err(ModelsSimulatorError::context_too_long("context too long"));
+        }
+
+        let resolved_calls = history
+            .iter()
+            .filter_map(|input| match input {
+                ModelInput::ToolResult(result) => Some(&result.call_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+
+        let mut retained = Vec::new();
+
+        for input in &history {
+            let ModelInput::Assistant(provenance, output) = input else {
+                continue;
+            };
+
+            let mut pending = Vec::new();
+
+            for output in output {
+                if let ModelOutput::ToolCall(call) = output
+                    && !resolved_calls.contains(&call.id)
+                {
+                    if !call.is_async {
+                        return Err(ModelsSimulatorError::other(
+                            "unresolved synchronous tool call",
+                        ));
+                    }
+
+                    pending.push(output.clone());
+                }
+            }
+
+            if !pending.is_empty() {
+                retained.push(ModelInput::Assistant(provenance.clone(), pending));
+            }
+        }
+
+        let summary = content::generate_text(&mut self.rng, &config.output_content);
+        let usage = ModelUsage {
+            input: u32::try_from(input_size).unwrap_or(u32::MAX),
+            output: u32::try_from(summary.len()).unwrap_or(u32::MAX),
+            cache_read: 0,
+            cache_write: 0,
+        };
+        let mut input = vec![ModelInput::Compaction(
+            provenance,
+            ModelCompaction {
+                content: Some(summary),
+                redacted_content: None,
+                attestation: None,
+            },
+        )];
+        input.extend(retained);
+
+        Ok(ModelCompactionResponse { input, usage })
     }
 
     fn restore_history(
@@ -295,6 +414,12 @@ impl ModelsSimulatorError {
     const fn invalid_continuation(message: &'static str) -> Self {
         Self {
             inner: ModelsSimulatorErrorInner::Kind(ModelsErrorKind::InvalidContinuation, message),
+        }
+    }
+
+    const fn invalid_compaction(message: &'static str) -> Self {
+        Self {
+            inner: ModelsSimulatorErrorInner::Kind(ModelsErrorKind::InvalidCompaction, message),
         }
     }
 
@@ -380,6 +505,7 @@ impl ModelsSimulatorConfig {
             generate_commentary_limit: (0..=rng.usize(0..=5)).into(),
             generate_tool_call_limit: (0..=rng.usize(0..=5)).into(),
             generate_tool_rounds_limit: rng.usize(0..=25),
+            compact: WrapConfig::generate(rng),
         }
     }
 }
@@ -449,6 +575,31 @@ fn split_text(rng: &mut Rng, text: &str, split: Probability) -> impl Iterator<It
     chunks.into_iter()
 }
 
+fn validate_compactions(
+    provenance: &ModelProvenance,
+    history: &[ModelInput],
+) -> Result<(), ModelsSimulatorError> {
+    for input in history {
+        let ModelInput::Compaction(origin, compaction) = input else {
+            continue;
+        };
+
+        if compaction.content.is_none() && compaction.redacted_content.is_none() {
+            return Err(ModelsSimulatorError::invalid_compaction("empty compaction"));
+        }
+
+        if origin != provenance
+            && (compaction.redacted_content.is_some() || compaction.attestation.is_some())
+        {
+            return Err(ModelsSimulatorError::invalid_compaction(
+                "incompatible compaction provenance",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn context_size(context: &ModelContext, history: &[ModelInput]) -> usize {
     format!(
         "{:?} {:?} {history:?}",
@@ -475,16 +626,20 @@ fn generate_models(
 ) -> BTreeMap<ModelName, ModelState> {
     (0..config.model_count)
         .map(|index| {
+            let context_limit = rng.usize(config.context_limit);
+            let compaction_threshold = context_limit.saturating_sub(context_limit.div_ceil(4));
             let model = Model {
                 name: format!("model-{index}").into(),
                 config_schema: JsonObject::new(),
+                compaction_threshold: u32::try_from(compaction_threshold)
+                    .expect("compaction threshold fits u32"),
             };
 
             (
                 model.name.clone(),
                 ModelState {
                     model,
-                    context_limit: rng.usize(config.context_limit),
+                    context_limit,
                 },
             )
         })
@@ -634,7 +789,7 @@ fn generate_tool_input(rng: &mut Rng, config: &ModelsSimulatorConfig) -> JsonObj
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_core::{Configured, ContentBlock};
+    use fleet_core::{Configured, ContentBlock, ToolOutput, ToolResult};
     use futures_util::FutureExt as _;
     use std::collections::BTreeSet;
 
@@ -652,6 +807,12 @@ mod tests {
         config.generate_commentary_limit = (0..=0).into();
         config.generate_tool_call_limit = (0..=0).into();
         config.generate_tool_rounds_limit = 3;
+        config.compact = WrapConfig {
+            suspend_before: Probability::NEVER,
+            suspend_after: Probability::NEVER,
+            error: Probability::NEVER,
+            error_after: Probability::NEVER,
+        };
         simulator
     }
 
@@ -728,6 +889,150 @@ mod tests {
                 assert!(reasoning.attestation.is_some());
             }
         }
+    }
+
+    #[test]
+    fn compaction_restores_continuation_and_retains_pending_calls() {
+        let scheduler = Scheduler::new(0);
+        let mut simulator = simulator(&scheduler);
+        simulator.config.generate_save_continuation = Probability::ALWAYS;
+        simulator.config.generate_tool_call_limit = (2..=2).into();
+        let input = [ModelInput::User(vec![ContentBlock::Text(
+            "history".repeat(100),
+        )])];
+        let first = chunks(&simulator, &input);
+        let response = completed(&first);
+        let calls = calls(response);
+        let mut context = context();
+        context.continuation = Some(ModelContinuation {
+            token: response.continuation_token.clone().unwrap(),
+            provenance: response.provenance.clone(),
+        });
+        let result = ModelInput::ToolResult(ToolResult {
+            call_id: calls[0].id.clone(),
+            output: ToolOutput {
+                content: Vec::new(),
+                structured_content: None,
+                is_error: false,
+            },
+        });
+
+        let compacted = simulator
+            .compact(&context, &[result], Some("Keep pending work."))
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(compacted.input[0], ModelInput::Compaction(..)));
+        assert_eq!(compacted.input.len(), 2);
+        assert_eq!(
+            compacted.input[1],
+            ModelInput::Assistant(
+                response.provenance.clone(),
+                vec![ModelOutput::ToolCall(calls[1].clone())],
+            ),
+        );
+        assert!(compacted.usage.input > response.usage.input);
+
+        context.continuation = None;
+        simulator.config.generate_tool_call_limit = (0..=0).into();
+        let resumed = simulator
+            .generate(&context, &compacted.input)
+            .collect::<Vec<_>>()
+            .now_or_never()
+            .unwrap();
+        completed(&resumed);
+    }
+
+    #[test]
+    fn incompatible_compaction_is_reported_by_both_operations() {
+        let scheduler = Scheduler::new(0);
+        let simulator = simulator(&scheduler);
+        let context = context();
+        let mut input = [ModelInput::Compaction(
+            ModelProvenance {
+                provider_id: "other".into(),
+                model_id: "other".into(),
+            },
+            ModelCompaction {
+                content: None,
+                redacted_content: Some("opaque state".into()),
+                attestation: Some("id".into()),
+            },
+        )];
+
+        assert_eq!(
+            chunks(&simulator, &input),
+            vec![Err(ModelsSimulatorError::invalid_compaction(
+                "incompatible compaction provenance",
+            ))],
+        );
+        assert_eq!(
+            simulator
+                .compact(&context, &input, None)
+                .now_or_never()
+                .unwrap(),
+            Err(ModelsSimulatorError::invalid_compaction(
+                "incompatible compaction provenance",
+            )),
+        );
+
+        let ModelInput::Compaction(_, compaction) = &mut input[0] else {
+            unreachable!();
+        };
+        compaction.content = Some("portable summary".into());
+        compaction.redacted_content = None;
+        compaction.attestation = None;
+
+        completed(&chunks(&simulator, &input));
+        assert!(
+            simulator
+                .compact(&context, &input, None)
+                .now_or_never()
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn compaction_counts_instructions_and_rejects_invalid_continuation() {
+        let scheduler = Scheduler::new(0);
+        let simulator = simulator(&scheduler);
+        let mut context = context();
+        simulator
+            .state
+            .lock()
+            .unwrap()
+            .models
+            .get_mut(&context.model.name)
+            .unwrap()
+            .context_limit = 1_000;
+
+        assert_eq!(
+            simulator
+                .compact(&context, &[], Some(&"x".repeat(1_000)))
+                .now_or_never()
+                .unwrap(),
+            Err(ModelsSimulatorError::context_too_long("context too long")),
+        );
+
+        context.continuation = Some(ModelContinuation {
+            token: "missing".into(),
+            provenance: ModelProvenance {
+                provider_id: "fleet-simulator".into(),
+                model_id: context.model.name.to_string(),
+            },
+        });
+
+        assert_eq!(
+            simulator
+                .compact(&context, &[], None)
+                .now_or_never()
+                .unwrap(),
+            Err(ModelsSimulatorError::invalid_continuation(
+                "unknown or expired continuation"
+            )),
+        );
     }
 
     #[test]
@@ -912,6 +1217,8 @@ mod tests {
 
             assert_eq!(models.len(), config.model_count);
             for model in models.values() {
+                let threshold = usize::try_from(model.model.compaction_threshold).unwrap();
+                assert!(threshold > 0 && threshold < model.context_limit);
                 small |= model.context_limit <= 32_768;
                 large |= model.context_limit >= 65_536;
             }

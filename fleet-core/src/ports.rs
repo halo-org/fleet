@@ -1,8 +1,8 @@
 use crate::{
-    Agent, AgentId, AgentState, Event, EventCursor, JsonObject, Message, Model, ModelContext,
-    ModelInput, ModelName, ModelResponse, ModelResponseChunk, Prompt, PromptContext, PromptName,
-    PromptResponse, Role, RoleName, Tool, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput,
-    ToolResult, Wake,
+    Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, Model,
+    ModelCompactionResponse, ModelContext, ModelInput, ModelName, ModelResponse,
+    ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName, Tool,
+    ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
@@ -54,6 +54,8 @@ pub trait Models {
     ///
     /// - [`InvalidContinuation`](ModelsErrorKind::InvalidContinuation) when the conversation can't
     ///   be continued using the provided continuation token.
+    /// - [`InvalidCompaction`](ModelsErrorKind::InvalidCompaction) when the input contains
+    ///   compaction state that this model cannot use.
     /// - [`ContextTooLong`](ModelsErrorKind::ContextTooLong) when the context of the conversation
     ///   exceeds the model's maximum context window.
     /// - [`Other`](ModelsErrorKind::Other) when there are any other provider specific errors.
@@ -64,6 +66,33 @@ pub trait Models {
         context: &ModelContext,
         input: &[ModelInput],
     ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send;
+
+    /// Compacts the provided input.
+    ///
+    /// The `context` and `input` allow providers to reuse the cache from previous generations.
+    ///
+    /// Implementations may use native compaction or generate a summary. `instructions` overrides
+    /// the default summarization instructions.
+    ///
+    /// The returned input replaces the full context covered by this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`InvalidContinuation`](ModelsErrorKind::InvalidContinuation) when the provided
+    ///   continuation cannot be used for compaction.
+    /// - [`InvalidCompaction`](ModelsErrorKind::InvalidCompaction) when the input contains
+    ///   compaction state that this model cannot use.
+    /// - [`ContextTooLong`](ModelsErrorKind::ContextTooLong) when the context of the conversation
+    ///   exceeds the model's maximum context window.
+    /// - [`Other`](ModelsErrorKind::Other) when there are any other provider specific errors.
+    fn compact(
+        &self,
+        context: &ModelContext,
+        input: &[ModelInput],
+        instructions: Option<&str>,
+    ) -> impl Future<Output = Result<ModelCompactionResponse, Self::Error>> + Send;
 }
 
 /// The kind of error returned by a model provider.
@@ -73,6 +102,8 @@ pub enum ModelsErrorKind {
     ///
     /// This may be because it was issued by another model, or because it has expired.
     InvalidContinuation,
+    /// The input contains compaction state that this model cannot use.
+    InvalidCompaction,
     /// The context of the conversation exceeds the model's maximum context window.
     ContextTooLong,
     /// An error not covered by any other kind.
@@ -389,6 +420,29 @@ pub trait RuntimeStore {
         response: &ModelResponse,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Appends a compaction to the agent's event log.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Conflict`](RuntimeStoreErrorKind::Conflict) when:
+    ///   - there is no agent with the provided ID.
+    ///   - the event log's latest event doesn't match `expected_latest_event`.
+    ///   - the compaction's [`last_event`](Compaction::last_event) does not identify an event in
+    ///     the agent's log.
+    ///   - there are unresolved synchronous tool calls at the compaction's
+    ///     [`last_event`](Compaction::last_event).
+    ///   - the compaction's pending tool calls do not match the unresolved async tool calls at its
+    ///     [`last_event`](Compaction::last_event).
+    /// - [`Other`](RuntimeStoreErrorKind::Other) when there are any other provider specific errors.
+    fn append_compaction(
+        &self,
+        agent_id: AgentId,
+        expected_latest_event: EventCursor,
+        compaction: &Compaction,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Prepares a tool call.
     ///
     /// Returns whether the same tool call has previously been prepared. The first preparation for a
@@ -596,6 +650,15 @@ macro_rules! impl_models_for_pointer {
             ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send {
                 (**self).generate(context, input)
             }
+
+            fn compact(
+                &self,
+                context: &ModelContext,
+                input: &[ModelInput],
+                instructions: Option<&str>,
+            ) -> impl Future<Output = Result<ModelCompactionResponse, Self::Error>> + Send {
+                (**self).compact(context, input, instructions)
+            }
         }
     };
 }
@@ -790,6 +853,15 @@ macro_rules! impl_runtime_store_for_pointer {
                 (**self).append_model_response(agent_id, expected_latest_event, response)
             }
 
+            fn append_compaction(
+                &self,
+                agent_id: AgentId,
+                expected_latest_event: EventCursor,
+                compaction: &Compaction,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).append_compaction(agent_id, expected_latest_event, compaction)
+            }
+
             fn prepare_tool_call(
                 &self,
                 agent_id: AgentId,
@@ -909,6 +981,7 @@ impl fmt::Display for ModelsErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidContinuation => f.write_str("invalid continuation"),
+            Self::InvalidCompaction => f.write_str("invalid compaction"),
             Self::ContextTooLong => f.write_str("context too long"),
             Self::Other => f.write_str("other error"),
         }

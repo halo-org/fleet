@@ -5,9 +5,9 @@ use core::{
 };
 use fastrand::Rng;
 use fleet_core::{
-    Agent, AgentId, AgentParent, AgentState, ClientStore, ClientStoreErrorKind, Event, EventCursor,
-    EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse, ModelResponseChunk,
-    RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, Wake,
+    Agent, AgentId, AgentParent, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event,
+    EventCursor, EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse,
+    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -140,6 +140,7 @@ struct StoreSimulatorConfig {
     consume_messages: WrapConfig,
     publish_model_response_chunk: WrapConfig,
     append_model_response: WrapConfig,
+    append_compaction: WrapConfig,
     prepare_tool_call: WrapConfig,
     append_tool_result: WrapConfig,
     create_agent: WrapConfig,
@@ -422,6 +423,25 @@ impl RuntimeStore for StoreSimulator<'_> {
                 async {
                     self.mutate(|state| {
                         state.append_model_response(agent_id, expected_latest_event, response)
+                    })
+                },
+            )
+            .await
+    }
+
+    async fn append_compaction(
+        &self,
+        agent_id: AgentId,
+        expected_latest_event: EventCursor,
+        compaction: &Compaction,
+    ) -> Result<(), Self::Error> {
+        self.scheduler
+            .wrap(
+                &self.config.append_compaction,
+                StoreSimulatorError::random,
+                async {
+                    self.mutate(|state| {
+                        state.append_compaction(agent_id, expected_latest_event, compaction)
                     })
                 },
             )
@@ -856,6 +876,76 @@ impl State {
             cursor: expected_latest_event,
             status: ResponseStreamStatus::Superseded,
         });
+
+        Ok(())
+    }
+
+    fn append_compaction(
+        &mut self,
+        agent_id: AgentId,
+        expected_latest_event: EventCursor,
+        compaction: &Compaction,
+    ) -> Result<(), RuntimeError> {
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| RuntimeError::conflict("agent does not exist"))?;
+
+        agent.check_latest_event(Some(expected_latest_event))?;
+
+        if agent
+            .events
+            .binary_search_by_key(&compaction.last_event, |event| event.cursor)
+            .is_err()
+        {
+            return Err(RuntimeError::conflict("compaction cursor does not exist"));
+        }
+
+        let mut pending = BTreeMap::new();
+
+        for event in agent
+            .events
+            .iter()
+            .take_while(|event| event.cursor <= compaction.last_event)
+        {
+            match &event.payload {
+                EventPayload::ModelResponse(response) => {
+                    for output in &response.output {
+                        if let ModelOutput::ToolCall(call) = output {
+                            pending.insert(&call.id, call);
+                        }
+                    }
+                }
+                EventPayload::ToolResult(result) => {
+                    pending.remove(&result.call_id);
+                }
+                EventPayload::Input(..) | EventPayload::Compaction(_) => {}
+            }
+        }
+
+        if pending.values().any(|call| !call.is_async) {
+            return Err(RuntimeError::conflict(
+                "agent has unresolved synchronous tool calls",
+            ));
+        }
+
+        let provided = compaction
+            .pending_tool_calls
+            .iter()
+            .map(|call| (&call.id, call))
+            .collect::<BTreeMap<_, _>>();
+
+        if provided.len() != compaction.pending_tool_calls.len() || provided != pending {
+            return Err(RuntimeError::conflict("pending tool calls do not match"));
+        }
+
+        let was_parked = agent.parked_at == Some(expected_latest_event);
+
+        agent.append_event(EventPayload::Compaction(compaction.clone()));
+
+        if was_parked {
+            agent.parked_at = agent.latest_event();
+        }
 
         Ok(())
     }
@@ -1332,6 +1422,7 @@ impl StoreSimulatorConfig {
             consume_messages: WrapConfig::generate(rng),
             publish_model_response_chunk: WrapConfig::generate(rng),
             append_model_response: WrapConfig::generate(rng),
+            append_compaction: WrapConfig::generate(rng),
             prepare_tool_call: WrapConfig::generate(rng),
             append_tool_result: WrapConfig::generate(rng),
             create_agent: WrapConfig::generate(rng),
@@ -1355,7 +1446,8 @@ mod tests {
         task::Context,
     };
     use fleet_core::{
-        Configured, ContentBlock, JsonObject, ModelProvenance, ModelUsage, ToolCall, ToolOutput,
+        Configured, ContentBlock, JsonObject, ModelCompaction, ModelInput, ModelProvenance,
+        ModelUsage, ToolCall, ToolOutput,
     };
     use futures_util::task::{ArcWake, waker};
     use std::sync::Arc;
@@ -1433,6 +1525,36 @@ mod tests {
                 structured_content: None,
                 is_error: false,
             },
+        }
+    }
+
+    fn compaction(last_event: u128, calls: &[(&str, bool)]) -> Compaction {
+        let response = response(calls);
+        let pending_tool_calls = response
+            .output
+            .iter()
+            .filter_map(|output| match output {
+                ModelOutput::ToolCall(call) => Some(call.clone()),
+                _ => None,
+            })
+            .collect();
+
+        Compaction {
+            last_event: last_event.into(),
+            input: vec![
+                ModelInput::User(vec![ContentBlock::Text("retained input".into())]),
+                ModelInput::Compaction(
+                    response.provenance.clone(),
+                    ModelCompaction {
+                        content: None,
+                        redacted_content: Some("opaque state".into()),
+                        attestation: Some("id".into()),
+                    },
+                ),
+                ModelInput::Assistant(response.provenance, response.output),
+            ],
+            pending_tool_calls,
+            usage: response.usage,
         }
     }
 
@@ -1614,6 +1736,233 @@ mod tests {
         copied.interrupt_intent = true;
 
         assert_eq!(store.snapshot(), after);
+    }
+
+    #[test]
+    fn compaction_preserves_history_tool_state_and_parking() {
+        let scheduler = Scheduler::new(0);
+        let store = populated_store(&scheduler);
+        let before = store.snapshot();
+        let compaction = compaction(1, &[("a", true), ("b", true)]);
+
+        store
+            .mutate(|state| state.append_compaction(0.into(), 1.into(), &compaction))
+            .unwrap();
+
+        let after = store.snapshot();
+        let before = &before[&0.into()];
+        let after = &after[&0.into()];
+        assert_eq!(
+            &after.events[..before.events.len()],
+            before.events.as_slice()
+        );
+        assert_eq!(
+            after.events.last().unwrap().payload,
+            EventPayload::Compaction(compaction)
+        );
+        assert_eq!(after.events.len(), before.events.len() + 1);
+        assert_eq!(after.pending_messages, before.pending_messages);
+        assert_eq!(after.unresolved_tool_calls, before.unresolved_tool_calls);
+        assert_eq!(after.parked_at, Some(2.into()));
+        assert!(
+            store
+                .mutate(|state| state.prepare_tool_call(0.into(), &"a".into()))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .mutate(|state| state.prepare_tool_call(0.into(), &"b".into()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compaction_checkpoint_precedes_later_tool_activity() {
+        for is_async in [false, true] {
+            let scheduler = Scheduler::new(0);
+            let store = populated_store(&scheduler);
+            let compaction = compaction(1, &[("a", true), ("b", true)]);
+            store
+                .mutate(|state| state.append_tool_result(0.into(), &tool_result("a")))
+                .unwrap();
+            store
+                .mutate(|state| {
+                    state.append_model_response(0.into(), 2.into(), &response(&[("c", is_async)]))
+                })
+                .unwrap();
+            let before = store.snapshot();
+
+            store
+                .mutate(|state| state.append_compaction(0.into(), 3.into(), &compaction))
+                .unwrap();
+
+            let after = store.snapshot();
+            let after = &after[&0.into()];
+            assert_eq!(
+                after.unresolved_tool_calls,
+                before[&0.into()].unresolved_tool_calls
+            );
+            assert!(!after.unresolved_tool_calls.contains_key(&"a".into()));
+            assert!(after.unresolved_tool_calls.contains_key(&"b".into()));
+            assert!(after.unresolved_tool_calls.contains_key(&"c".into()));
+            assert_eq!(
+                after.events.last().unwrap().payload,
+                EventPayload::Compaction(compaction)
+            );
+            assert_eq!(after.parked_at, Some(1.into()));
+
+            store
+                .mutate(|state| state.append_tool_result(0.into(), &tool_result("c")))
+                .unwrap();
+            assert!(
+                !store.snapshot()[&0.into()]
+                    .unresolved_tool_calls
+                    .contains_key(&"c".into())
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_can_replace_an_existing_checkpoint() {
+        for different_provenance in [false, true] {
+            let scheduler = Scheduler::new(0);
+            let store = populated_store(&scheduler);
+            let mut compaction = compaction(1, &[("a", true), ("b", true)]);
+            store
+                .mutate(|state| state.append_compaction(0.into(), 1.into(), &compaction))
+                .unwrap();
+            let before = store.snapshot();
+
+            let ModelInput::Compaction(provenance, content) = &mut compaction.input[1] else {
+                unreachable!();
+            };
+            content.redacted_content = Some("replacement state".into());
+            if different_provenance {
+                provenance.provider_id = "other".into();
+            }
+
+            store
+                .mutate(|state| state.append_compaction(0.into(), 2.into(), &compaction))
+                .unwrap();
+
+            let after = store.snapshot();
+            let before = &before[&0.into()];
+            let after = &after[&0.into()];
+            assert_eq!(
+                &after.events[..before.events.len()],
+                before.events.as_slice()
+            );
+            assert_eq!(after.events.len(), before.events.len() + 1);
+            assert_eq!(
+                after.events.last().unwrap().payload,
+                EventPayload::Compaction(compaction)
+            );
+            assert_eq!(after.unresolved_tool_calls, before.unresolved_tool_calls);
+            assert_eq!(after.parked_at, Some(3.into()));
+        }
+    }
+
+    #[test]
+    fn invalid_compaction_checkpoints_leave_state_unchanged() {
+        let scheduler = Scheduler::new(0);
+        let store = populated_store(&scheduler);
+        let valid = compaction(1, &[("a", true), ("b", true)]);
+        let mut altered = valid.clone();
+        altered.pending_tool_calls[0]
+            .input
+            .insert("changed".into(), true.into());
+        let before = store.snapshot();
+
+        let cases = [
+            (1, 1, valid.clone()),
+            (0, 0, valid.clone()),
+            (0, 1, compaction(99, &[("a", true), ("b", true)])),
+            (0, 1, compaction(1, &[("a", true)])),
+            (
+                0,
+                1,
+                compaction(1, &[("a", true), ("a", true), ("b", true)]),
+            ),
+            (0, 1, altered),
+        ];
+
+        for (agent, latest, compaction) in cases {
+            assert!(
+                store
+                    .mutate(|state| state.append_compaction(
+                        agent.into(),
+                        latest.into(),
+                        &compaction
+                    ))
+                    .is_err()
+            );
+            assert_eq!(store.snapshot(), before);
+        }
+
+        store
+            .mutate(|state| state.append_compaction(0.into(), 1.into(), &valid))
+            .unwrap();
+        let before = store.snapshot();
+        assert!(
+            store
+                .mutate(|state| state.append_compaction(0.into(), 1.into(), &valid))
+                .is_err()
+        );
+        assert_eq!(store.snapshot(), before);
+
+        store
+            .mutate(|state| {
+                state.append_compaction(
+                    0.into(),
+                    2.into(),
+                    &compaction(2, &[("a", true), ("b", true)]),
+                )
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn compaction_rejects_unresolved_synchronous_calls_at_the_checkpoint() {
+        let scheduler = Scheduler::new(0);
+        let store = populated_store(&scheduler);
+        store
+            .mutate(|state| state.append_tool_result(0.into(), &tool_result("a")))
+            .unwrap();
+        store
+            .mutate(|state| state.append_tool_result(0.into(), &tool_result("b")))
+            .unwrap();
+        store
+            .mutate(|state| {
+                state.append_model_response(0.into(), 3.into(), &response(&[("sync", false)]))
+            })
+            .unwrap();
+        let before = store.snapshot();
+
+        assert!(
+            store
+                .mutate(|state| state.append_compaction(
+                    0.into(),
+                    4.into(),
+                    &compaction(4, &[("sync", false)])
+                ))
+                .is_err()
+        );
+        assert_eq!(store.snapshot(), before);
+
+        store
+            .mutate(|state| state.append_tool_result(0.into(), &tool_result("sync")))
+            .unwrap();
+        let before = store.snapshot();
+        assert!(
+            store
+                .mutate(|state| state.append_compaction(
+                    0.into(),
+                    5.into(),
+                    &compaction(4, &[("sync", false)])
+                ))
+                .is_err()
+        );
+        assert_eq!(store.snapshot(), before);
     }
 
     #[test]

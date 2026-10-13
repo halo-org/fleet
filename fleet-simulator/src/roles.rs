@@ -130,6 +130,7 @@ fn generate_roles(
                 },
                 tools,
                 system_prompt: content::generate_text(rng, &config.prompt),
+                compaction: None,
             };
 
             (role.name.clone(), role)

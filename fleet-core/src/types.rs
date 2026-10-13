@@ -61,6 +61,10 @@ pub struct Role {
     pub tools: BTreeMap<ToolAlias, Configured<ToolName>>,
     /// The system prompt to pass to the model.
     pub system_prompt: String,
+    /// The compaction settings for this role.
+    ///
+    /// When `None`, the model's default compaction settings are used.
+    pub compaction: Option<RoleCompaction>,
 }
 
 /// The name of a role.
@@ -90,6 +94,19 @@ pub enum RoleParameterTarget {
     Tool(ToolAlias, Vec<String>),
 }
 
+/// The compaction settings of a role.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoleCompaction {
+    /// The input token count that triggers compaction.
+    ///
+    /// When `None`, [`Model::compaction_threshold`] is used.
+    pub threshold: Option<u32>,
+    /// Custom summarization instructions.
+    ///
+    /// When `None`, the model provider uses its default instructions.
+    pub instructions: Option<String>,
+}
+
 // === Models ===
 
 /// The metadata of a model.
@@ -99,6 +116,8 @@ pub struct Model {
     pub name: ModelName,
     /// The JSON schema for this model's config.
     pub config_schema: JsonObject,
+    /// The default input token count at which to compact.
+    pub compaction_threshold: u32,
 }
 
 /// The name of a model.
@@ -140,6 +159,8 @@ pub enum ModelInput {
     Assistant(ModelProvenance, Vec<ModelOutput>),
     /// Content of a tool result.
     ToolResult(ToolResult),
+    /// Compacted context from a model.
+    Compaction(ModelProvenance, ModelCompaction),
 }
 
 /// A response from a model.
@@ -199,6 +220,30 @@ pub struct ModelReasoning {
     /// This is opaque to us, but can be read by the model on future turns.
     pub redacted_content: Option<String>,
     /// An attestation of this reasoning output.
+    ///
+    /// Depending on the model, this may be a signature or an ID.
+    pub attestation: Option<String>,
+}
+
+/// A response from compacting model input.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelCompactionResponse {
+    /// The input that replaces the compacted context.
+    pub input: Vec<ModelInput>,
+    /// How many tokens were used for compaction.
+    pub usage: ModelUsage,
+}
+
+/// Compaction output from a model.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelCompaction {
+    /// Readable summary.
+    pub content: Option<String>,
+    /// Redacted content.
+    ///
+    /// This is opaque to us, but can be read by the model on future turns.
+    pub redacted_content: Option<String>,
+    /// An attestation of this compaction output.
     ///
     /// Depending on the model, this may be a signature or an ID.
     pub attestation: Option<String>,
@@ -429,6 +474,24 @@ pub enum MessageMode {
     Queue,
 }
 
+// === Compaction ===
+
+/// A compaction of an agent's model context.
+///
+/// This replaces model input through the given cursor. The original events remain in the log.
+/// Retained input is not new conversation activity and must not be displayed or executed again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Compaction {
+    /// The last event included in this compaction.
+    pub last_event: EventCursor,
+    /// The input that replaces the compacted context.
+    pub input: Vec<ModelInput>,
+    /// All unresolved async tool calls from before this compaction.
+    pub pending_tool_calls: Vec<ToolCall>,
+    /// How many tokens were used for compaction.
+    pub usage: ModelUsage,
+}
+
 // === Events ===
 
 /// An immutable agent event.
@@ -455,6 +518,8 @@ pub enum EventPayload {
     ModelResponse(ModelResponse),
     /// Result of a tool called by the agent.
     ToolResult(ToolResult),
+    /// Replacement model context and pending tool calls.
+    Compaction(Compaction),
 }
 
 // === Wakes ===
@@ -542,15 +607,3 @@ impl_newtype!(ToolCallId, String);
 impl_newtype!(PromptName, String);
 impl_newtype!(MessageId, u128);
 impl_newtype!(EventCursor, u128);
-
-impl From<EventPayload> for ModelInput {
-    fn from(payload: EventPayload) -> Self {
-        match payload {
-            EventPayload::Input(_, content) => Self::User(content),
-            EventPayload::ModelResponse(response) => {
-                Self::Assistant(response.provenance, response.output)
-            }
-            EventPayload::ToolResult(result) => Self::ToolResult(result),
-        }
-    }
-}
