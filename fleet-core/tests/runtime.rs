@@ -34,8 +34,9 @@ fn run_returns_when_store_is_empty() {
 
         let scheduler = Scheduler::new(seed);
         let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
 
-        scheduler.run(simulator.run());
+        scheduler.run(simulator.run(partition));
         assert_eq!(simulator.store.snapshot(), BTreeMap::new());
     }
 }
@@ -47,6 +48,7 @@ fn run_processes_a_message() {
 
         let scheduler = Scheduler::new(seed);
         let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
         let agent = agent(simulator.roles.role_names()[0].clone());
         let message = message();
 
@@ -59,7 +61,7 @@ fn run_processes_a_message() {
                 assert_eq!(error.kind(), ClientStoreErrorKind::Other);
             }
 
-            simulator.run().await;
+            simulator.run(partition).await;
         });
 
         let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();

@@ -17,11 +17,28 @@ use std::{
 
 /// An in-memory simulator for [`RuntimeStore`] and [`ClientStore`].
 ///
+/// Agents are assigned to explicitly added wake partitions. Use [`Self::partition`] to get a
+/// [`RuntimeStore`] for one.
+///
 /// Errors may be injected before or after a mutation. A failed operation may have changed state.
 pub struct StoreSimulator<'sim> {
     scheduler: &'sim Scheduler,
     config: StoreSimulatorConfig,
     state: Mutex<State>,
+}
+
+/// The ID of a wake partition in a [`StoreSimulator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PartitionId(u64);
+
+/// A [`RuntimeStore`] view of a [`StoreSimulator`] partition.
+///
+/// Each wake stream independently receives wakes for the agents assigned to this partition.
+/// New streams replay prior releases before yielding current outstanding work.
+#[derive(Clone, Copy)]
+pub struct StorePartition<'store, 'sim> {
+    store: &'store StoreSimulator<'sim>,
+    id: PartitionId,
 }
 
 /// An owned copy of an agent's state in the store simulator.
@@ -53,14 +70,15 @@ pub struct ToolCallSnapshot {
 struct State {
     idempotency_keys: BTreeMap<String, ClientRequest>,
     agents: BTreeMap<AgentId, AgentRecord>,
-    wake_subscriptions: BTreeMap<u64, WakeSubscriptionState>,
+    partitions: BTreeMap<PartitionId, PartitionState>,
+    next_partition_id: u64,
     next_subscription_id: u64,
     ready_wakers: Vec<Waker>,
 }
 
 struct AgentRecord {
     agent: Agent,
-    wake_owner: Option<u64>,
+    wake_owner: Option<PartitionId>,
     events: Vec<Event>,
     pending_messages: Vec<Message>,
     parked_at: Option<EventCursor>,
@@ -99,6 +117,12 @@ enum ResponseStreamStatus {
     Superseded,
 }
 
+struct PartitionState {
+    is_member: bool,
+    released_agents: BTreeSet<AgentId>,
+    subscriptions: BTreeMap<u64, WakeSubscriptionState>,
+}
+
 struct WakeSubscriptionState {
     waker: Option<Waker>,
     pending_wakes: VecDeque<Wake>,
@@ -106,6 +130,7 @@ struct WakeSubscriptionState {
 
 struct WakeSubscription<'store, 'sim> {
     simulator: &'store StoreSimulator<'sim>,
+    partition: PartitionId,
     id: u64,
     is_idle: bool,
 }
@@ -165,10 +190,81 @@ impl<'sim> StoreSimulator<'sim> {
             state: Mutex::new(State {
                 idempotency_keys: BTreeMap::new(),
                 agents: BTreeMap::new(),
-                wake_subscriptions: BTreeMap::new(),
+                partitions: BTreeMap::new(),
+                next_partition_id: 0,
                 next_subscription_id: 0,
                 ready_wakers: Vec::new(),
             }),
+        }
+    }
+
+    /// Adds a wake partition and rebalances agents across all partitions.
+    pub fn add_partition(&self) -> PartitionId {
+        self.mutate(|state| {
+            let id = PartitionId(state.next_partition_id);
+            state.next_partition_id = id.0.checked_add(1).expect("IDs never overflow");
+
+            state.partitions.insert(
+                id,
+                PartitionState {
+                    is_member: true,
+                    released_agents: BTreeSet::new(),
+                    subscriptions: BTreeMap::new(),
+                },
+            );
+
+            state.rebalance_wakes();
+
+            id
+        })
+    }
+
+    /// Removes a wake partition and rebalances its agents across the remaining partitions.
+    ///
+    /// The partition's wake streams still yield releases for its agents, but it receives no new
+    /// agents.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the partition was never added or has already been removed.
+    pub fn remove_partition(&self, partition: PartitionId) {
+        let is_removed = self.mutate(|state| {
+            let Some(partition) = state
+                .partitions
+                .get_mut(&partition)
+                .filter(|partition| partition.is_member)
+            else {
+                return false;
+            };
+
+            partition.is_member = false;
+            state.rebalance_wakes();
+
+            true
+        });
+
+        assert!(is_removed, "partition exists and has not been removed");
+    }
+
+    /// Returns a [`RuntimeStore`] view of the store for the given partition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the partition was never added.
+    #[must_use]
+    pub fn partition(&self, partition: PartitionId) -> StorePartition<'_, 'sim> {
+        assert!(
+            self.state
+                .lock()
+                .expect("never poisoned")
+                .partitions
+                .contains_key(&partition),
+            "partition exists"
+        );
+
+        StorePartition {
+            store: self,
+            id: partition,
         }
     }
 
@@ -195,12 +291,12 @@ impl<'sim> StoreSimulator<'sim> {
             .collect()
     }
 
-    /// Moves one randomly selected agent to another wake consumer.
+    /// Moves one randomly selected agent to another wake partition.
     ///
-    /// Does nothing when faults are disabled, without agents, or with fewer than two consumers.
+    /// Does nothing when faults are disabled, without agents, or with fewer than two partitions.
     pub fn repartition(&self) {
         self.mutate(|state| {
-            if state.agents.is_empty() || state.wake_subscriptions.len() < 2 {
+            if state.agents.is_empty() || state.member_partitions().count() < 2 {
                 return;
             }
 
@@ -234,49 +330,12 @@ impl<'sim> StoreSimulator<'sim> {
 
         result
     }
-}
 
-impl RuntimeStore for StoreSimulator<'_> {
-    type Error = RuntimeError;
-
-    async fn agent(&self, agent_id: AgentId) -> Result<Option<Agent>, Self::Error> {
-        self.scheduler
-            .wrap(&self.config.agent, StoreSimulatorError::random, async {
-                let agent = self
-                    .state
-                    .lock()
-                    .expect("never poisoned")
-                    .agents
-                    .get(&agent_id)
-                    .map(|record| record.agent.clone());
-
-                Ok(agent)
-            })
-            .await
-    }
-
-    async fn agent_state(&self, agent_id: AgentId) -> Result<Option<AgentState>, Self::Error> {
-        self.scheduler
-            .wrap(
-                &self.config.agent_state,
-                StoreSimulatorError::random,
-                async {
-                    let agent_state = self
-                        .state
-                        .lock()
-                        .expect("never poisoned")
-                        .agents
-                        .get(&agent_id)
-                        .map(AgentRecord::state);
-
-                    Ok(agent_state)
-                },
-            )
-            .await
-    }
-
-    fn wakes(&self) -> impl Stream<Item = Result<Wake, Self::Error>> + Send {
-        let subscription_future = async { WakeSubscription::new(self) };
+    fn partition_wakes(
+        &self,
+        partition: PartitionId,
+    ) -> impl Stream<Item = Result<Wake, RuntimeError>> + Send {
+        let subscription_future = async move { WakeSubscription::new(self, partition) };
 
         stream::once(subscription_future).flat_map(|subscription| {
             stream::unfold(Some(subscription), async |subscription| {
@@ -293,6 +352,58 @@ impl RuntimeStore for StoreSimulator<'_> {
             })
         })
     }
+}
+
+impl RuntimeStore for StorePartition<'_, '_> {
+    type Error = RuntimeError;
+
+    async fn agent(&self, agent_id: AgentId) -> Result<Option<Agent>, Self::Error> {
+        self.store
+            .scheduler
+            .wrap(
+                &self.store.config.agent,
+                StoreSimulatorError::random,
+                async {
+                    let agent = self
+                        .store
+                        .state
+                        .lock()
+                        .expect("never poisoned")
+                        .agents
+                        .get(&agent_id)
+                        .map(|record| record.agent.clone());
+
+                    Ok(agent)
+                },
+            )
+            .await
+    }
+
+    async fn agent_state(&self, agent_id: AgentId) -> Result<Option<AgentState>, Self::Error> {
+        self.store
+            .scheduler
+            .wrap(
+                &self.store.config.agent_state,
+                StoreSimulatorError::random,
+                async {
+                    let agent_state = self
+                        .store
+                        .state
+                        .lock()
+                        .expect("never poisoned")
+                        .agents
+                        .get(&agent_id)
+                        .map(AgentRecord::state);
+
+                    Ok(agent_state)
+                },
+            )
+            .await
+    }
+
+    fn wakes(&self) -> impl Stream<Item = Result<Wake, Self::Error>> + Send {
+        self.store.partition_wakes(self.id)
+    }
 
     fn events(
         &self,
@@ -302,7 +413,7 @@ impl RuntimeStore for StoreSimulator<'_> {
     ) -> impl Stream<Item = Result<Event, Self::Error>> + Send {
         #[expect(clippy::significant_drop_tightening, reason = "false positive")]
         let items_future = async move {
-            let state = self.state.lock().expect("never poisoned");
+            let state = self.store.state.lock().expect("never poisoned");
 
             let Some(agent) = state.agents.get(&agent_id) else {
                 return Vec::from([Err(RuntimeError::conflict("agent does not exist"))]);
@@ -324,8 +435,9 @@ impl RuntimeStore for StoreSimulator<'_> {
                 .collect::<Vec<_>>();
 
             if let Some(position) = self
+                .store
                 .scheduler
-                .sample_fault_position(self.config.events_error, 0..=items.len())
+                .sample_fault_position(self.store.config.events_error, 0..=items.len())
             {
                 items.truncate(position);
                 items.push(Err(RuntimeError::random()));
@@ -335,8 +447,9 @@ impl RuntimeStore for StoreSimulator<'_> {
         };
 
         stream::once(items_future).flat_map(|items| {
-            self.scheduler
-                .suspend_stream(self.config.events_suspend, items)
+            self.store
+                .scheduler
+                .suspend_stream(self.store.config.events_suspend, items)
         })
     }
 
@@ -346,12 +459,13 @@ impl RuntimeStore for StoreSimulator<'_> {
         expected_latest_event: Option<EventCursor>,
         tool_results: &[ToolResult],
     ) -> Result<(), Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.settle_interrupt,
+                &self.store.config.settle_interrupt,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate(|state| {
+                    self.store.mutate(|state| {
                         state.settle_interrupt(agent_id, expected_latest_event, tool_results)
                     })
                 },
@@ -364,10 +478,16 @@ impl RuntimeStore for StoreSimulator<'_> {
         agent_id: AgentId,
         expected_latest_event: Option<EventCursor>,
     ) -> Result<(), Self::Error> {
-        self.scheduler
-            .wrap(&self.config.park, StoreSimulatorError::random, async {
-                self.mutate(|state| state.park(agent_id, expected_latest_event))
-            })
+        self.store
+            .scheduler
+            .wrap(
+                &self.store.config.park,
+                StoreSimulatorError::random,
+                async {
+                    self.store
+                        .mutate(|state| state.park(agent_id, expected_latest_event))
+                },
+            )
             .await
     }
 
@@ -377,12 +497,13 @@ impl RuntimeStore for StoreSimulator<'_> {
         expected_latest_event: Option<EventCursor>,
         allow_queued: bool,
     ) -> Result<bool, Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.consume_messages,
+                &self.store.config.consume_messages,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate(|state| {
+                    self.store.mutate(|state| {
                         state.consume_messages(agent_id, expected_latest_event, allow_queued)
                     })
                 },
@@ -397,12 +518,13 @@ impl RuntimeStore for StoreSimulator<'_> {
         sequence: u32,
         chunk: &ModelResponseChunk,
     ) -> Result<(), Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.publish_model_response_chunk,
+                &self.store.config.publish_model_response_chunk,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate(|state| {
+                    self.store.mutate(|state| {
                         state.publish_model_response_chunk(agent_id, input_cursor, sequence, chunk)
                     })
                 },
@@ -416,12 +538,13 @@ impl RuntimeStore for StoreSimulator<'_> {
         expected_latest_event: EventCursor,
         response: &ModelResponse,
     ) -> Result<(), Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.append_model_response,
+                &self.store.config.append_model_response,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate(|state| {
+                    self.store.mutate(|state| {
                         state.append_model_response(agent_id, expected_latest_event, response)
                     })
                 },
@@ -435,12 +558,13 @@ impl RuntimeStore for StoreSimulator<'_> {
         expected_latest_event: EventCursor,
         compaction: &Compaction,
     ) -> Result<(), Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.append_compaction,
+                &self.store.config.append_compaction,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate(|state| {
+                    self.store.mutate(|state| {
                         state.append_compaction(agent_id, expected_latest_event, compaction)
                     })
                 },
@@ -453,11 +577,15 @@ impl RuntimeStore for StoreSimulator<'_> {
         agent_id: AgentId,
         call_id: &ToolCallId,
     ) -> Result<bool, Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.prepare_tool_call,
+                &self.store.config.prepare_tool_call,
                 StoreSimulatorError::random,
-                async { self.mutate(|state| state.prepare_tool_call(agent_id, call_id)) },
+                async {
+                    self.store
+                        .mutate(|state| state.prepare_tool_call(agent_id, call_id))
+                },
             )
             .await
     }
@@ -467,11 +595,15 @@ impl RuntimeStore for StoreSimulator<'_> {
         agent_id: AgentId,
         result: &ToolResult,
     ) -> Result<(), Self::Error> {
-        self.scheduler
+        self.store
+            .scheduler
             .wrap(
-                &self.config.append_tool_result,
+                &self.store.config.append_tool_result,
                 StoreSimulatorError::random,
-                async { self.mutate(|state| state.append_tool_result(agent_id, result)) },
+                async {
+                    self.store
+                        .mutate(|state| state.append_tool_result(agent_id, result))
+                },
             )
             .await
     }
@@ -600,8 +732,8 @@ impl State {
         let wake_owner = self
             .agents
             .len()
-            .checked_rem(self.wake_subscriptions.len())
-            .and_then(|index| self.wake_subscriptions.keys().nth(index).copied());
+            .checked_rem(self.member_partitions().count())
+            .and_then(|index| self.member_partitions().nth(index));
 
         agent_record.wake_owner = wake_owner;
 
@@ -1035,16 +1167,22 @@ impl State {
         Ok(())
     }
 
-    fn enqueue_wake(&mut self, owner: u64, wake: Wake) {
-        let subscription = self
-            .wake_subscriptions
-            .get_mut(&owner)
-            .expect("consumer exists");
+    fn member_partitions(&self) -> impl Iterator<Item = PartitionId> + Clone {
+        self.partitions
+            .iter()
+            .filter(|(_, partition)| partition.is_member)
+            .map(|(id, _)| *id)
+    }
 
-        subscription.pending_wakes.push_back(wake);
+    fn enqueue_wake(&mut self, owner: PartitionId, wake: Wake) {
+        let partition = self.partitions.get_mut(&owner).expect("partition exists");
 
-        if let Some(waker) = subscription.waker.take() {
-            self.ready_wakers.push(waker);
+        for subscription in partition.subscriptions.values_mut() {
+            subscription.pending_wakes.push_back(wake);
+
+            if let Some(waker) = subscription.waker.take() {
+                self.ready_wakers.push(waker);
+            }
         }
     }
 
@@ -1056,25 +1194,25 @@ impl State {
     ) {
         let owner = self.agents.get(&agent_id).expect("agent exists").wake_owner;
 
-        let mut candidates = self
-            .wake_subscriptions
-            .keys()
-            .copied()
-            .filter(|id| Some(*id) != owner);
+        let owner = {
+            let mut candidates = self.member_partitions().filter(|id| Some(*id) != owner);
+            let candidate_count = candidates.clone().count();
 
-        let candidate_count = candidates.clone().count();
+            if candidate_count == 0 {
+                return;
+            }
 
-        if candidate_count == 0 {
-            return;
-        }
+            scheduler
+                .sample_fault_position(probability, 0..candidate_count)
+                .map(|index| candidates.nth(index).expect("selected partition exists"))
+        };
 
-        if let Some(index) = scheduler.sample_fault_position(probability, 0..candidate_count) {
-            let owner = candidates.nth(index).expect("selected consumer exists");
+        if let Some(owner) = owner {
             self.move_agent(agent_id, Some(owner));
         }
     }
 
-    fn move_agent(&mut self, agent_id: AgentId, owner: Option<u64>) {
+    fn move_agent(&mut self, agent_id: AgentId, owner: Option<PartitionId>) {
         let agent = self.agents.get_mut(&agent_id).expect("agent exists");
         let previous = agent.wake_owner;
 
@@ -1084,20 +1222,20 @@ impl State {
 
         agent.wake_owner = owner;
 
-        let initial_wake = if agent.is_idle() {
-            None
-        } else if agent.interrupt_intent {
-            Some(Wake::Interrupt(agent_id))
-        } else {
-            Some(Wake::Reconcile(agent_id))
-        };
+        let initial_wake = agent.initial_wake();
 
-        if let Some(previous) = previous
-            && let Some(subscription) = self.wake_subscriptions.get_mut(&previous)
-        {
-            subscription.pending_wakes.retain(|wake| {
-                !matches!(wake, Wake::Reconcile(id) | Wake::Interrupt(id) if *id == agent_id)
-            });
+        if let Some(previous) = previous {
+            let partition = self
+                .partitions
+                .get_mut(&previous)
+                .expect("partition exists");
+            partition.released_agents.insert(agent_id);
+
+            for subscription in partition.subscriptions.values_mut() {
+                subscription.pending_wakes.retain(|wake| {
+                    !matches!(wake, Wake::Reconcile(id) | Wake::Interrupt(id) if *id == agent_id)
+                });
+            }
 
             self.enqueue_wake(previous, Wake::Release(agent_id));
         }
@@ -1110,13 +1248,14 @@ impl State {
     }
 
     fn rebalance_wakes(&mut self) {
-        let mut owners = self.wake_subscriptions.keys().copied().cycle();
+        let assignments = {
+            let mut owners = self.member_partitions().cycle();
 
-        let assignments = self
-            .agents
-            .keys()
-            .map(|id| (*id, owners.next()))
-            .collect::<Vec<_>>();
+            self.agents
+                .keys()
+                .map(|id| (*id, owners.next()))
+                .collect::<Vec<_>>()
+        };
 
         for (agent_id, owner) in assignments {
             self.move_agent(agent_id, owner);
@@ -1183,6 +1322,16 @@ impl AgentRecord {
             && self.unresolved_tool_calls.is_empty()
     }
 
+    fn initial_wake(&self) -> Option<Wake> {
+        if self.is_idle() {
+            None
+        } else if self.interrupt_intent {
+            Some(Wake::Interrupt(self.agent.id))
+        } else {
+            Some(Wake::Reconcile(self.agent.id))
+        }
+    }
+
     fn push_pending_message(&mut self, message: Message) {
         assert!(self.message_ids.insert(message.id), "message ID is new");
         self.pending_messages.push(message);
@@ -1207,26 +1356,41 @@ impl AgentRecord {
 }
 
 impl<'store, 'sim> WakeSubscription<'store, 'sim> {
-    fn new(simulator: &'store StoreSimulator<'sim>) -> Self {
-        let subscription_id = simulator.mutate(|state| {
-            let subscription_id = state.allocate_subscription_id();
+    fn new(simulator: &'store StoreSimulator<'sim>, partition: PartitionId) -> Self {
+        let id = simulator.mutate(|state| {
+            let id = state.allocate_subscription_id();
+            let initial_wakes = state
+                .agents
+                .values()
+                .filter(|agent| agent.wake_owner == Some(partition))
+                .filter_map(AgentRecord::initial_wake);
+            let partition = state
+                .partitions
+                .get_mut(&partition)
+                .expect("partition exists");
+            let pending_wakes = partition
+                .released_agents
+                .iter()
+                .copied()
+                .map(Wake::Release)
+                .chain(initial_wakes)
+                .collect();
 
-            state.wake_subscriptions.insert(
-                subscription_id,
+            partition.subscriptions.insert(
+                id,
                 WakeSubscriptionState {
                     waker: None,
-                    pending_wakes: VecDeque::new(),
+                    pending_wakes,
                 },
             );
 
-            state.rebalance_wakes();
-
-            subscription_id
+            id
         });
 
         Self {
             simulator,
-            id: subscription_id,
+            partition,
+            id,
             is_idle: false,
         }
     }
@@ -1237,7 +1401,10 @@ impl<'store, 'sim> WakeSubscription<'store, 'sim> {
             let mut state = self.simulator.state.lock().expect("never poisoned");
 
             let subscription = state
-                .wake_subscriptions
+                .partitions
+                .get_mut(&self.partition)
+                .expect("partition exists")
+                .subscriptions
                 .get_mut(&self.id)
                 .expect("subscription exists");
 
@@ -1263,8 +1430,12 @@ impl<'store, 'sim> WakeSubscription<'store, 'sim> {
 impl Drop for WakeSubscription<'_, '_> {
     fn drop(&mut self) {
         self.simulator.mutate(|state| {
-            state.wake_subscriptions.remove(&self.id);
-            state.rebalance_wakes();
+            state
+                .partitions
+                .get_mut(&self.partition)
+                .expect("partition exists")
+                .subscriptions
+                .remove(&self.id);
         });
     }
 }
@@ -1449,7 +1620,10 @@ mod tests {
         Configured, ContentBlock, JsonObject, ModelCompaction, ModelInput, ModelProvenance,
         ModelUsage, ToolCall, ToolOutput,
     };
-    use futures_util::task::{ArcWake, waker};
+    use futures_util::{
+        FutureExt as _,
+        task::{ArcWake, waker},
+    };
     use std::sync::Arc;
 
     struct WakeFlag(AtomicBool);
@@ -2320,8 +2494,19 @@ mod tests {
         assert_eq!(poll_wake(wakes.as_mut()), Poll::Pending);
     }
 
+    fn connect<'store>(
+        store: &'store StoreSimulator<'_>,
+        partition: PartitionId,
+    ) -> Pin<Box<impl Stream<Item = Result<Wake, RuntimeError>> + 'store>> {
+        Box::pin(store.partition_wakes(partition))
+    }
+
+    fn next_wake(subscription: &mut WakeSubscription<'_, '_>) -> Poll<Wake> {
+        pin!(subscription.next()).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
     #[test]
-    fn consumers_partition_existing_and_new_agents() {
+    fn partitions_split_existing_and_new_agents() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
 
@@ -2338,10 +2523,11 @@ mod tests {
             .mutate(|state| state.interrupt_agent(1.into(), None))
             .unwrap();
 
-        let mut first = Box::pin(store.wakes());
+        let first = store.add_partition();
+        let mut first_wakes = connect(&store, first);
 
         assert_wakes(
-            first.as_mut(),
+            first_wakes.as_mut(),
             &[
                 Wake::Reconcile(0.into()),
                 Wake::Interrupt(1.into()),
@@ -2349,10 +2535,14 @@ mod tests {
             ],
         );
 
-        let mut second = Box::pin(store.wakes());
+        let second = store.add_partition();
+        let mut second_wakes = connect(&store, second);
 
-        assert_wakes(second.as_mut(), &[Wake::Interrupt(1.into()), Wake::Idle]);
-        assert_wakes(first.as_mut(), &[Wake::Release(1.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Interrupt(1.into()), Wake::Idle],
+        );
+        assert_wakes(first_wakes.as_mut(), &[Wake::Release(1.into()), Wake::Idle]);
 
         store
             .mutate(|state| state.send_message(2.into(), &message(0)))
@@ -2365,39 +2555,56 @@ mod tests {
             .unwrap();
 
         assert_wakes(
-            first.as_mut(),
+            first_wakes.as_mut(),
             &[
                 Wake::Reconcile(2.into()),
                 Wake::Reconcile(4.into()),
                 Wake::Idle,
             ],
         );
-        assert_wakes(second.as_mut(), &[Wake::Reconcile(3.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(3.into()), Wake::Idle],
+        );
     }
 
     #[test]
     fn handoff_removes_queued_work() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
-        let mut first = Box::pin(store.wakes());
-        let mut second = Box::pin(store.wakes());
+        let first = store.add_partition();
+        let second = store.add_partition();
+        let mut first_wakes = connect(&store, first);
+        let mut duplicate_wakes = connect(&store, first);
+        let mut second_wakes = connect(&store, second);
 
-        assert_wakes(first.as_mut(), &[Wake::Idle]);
-        assert_wakes(second.as_mut(), &[Wake::Idle]);
+        assert_wakes(first_wakes.as_mut(), &[Wake::Idle]);
+        assert_wakes(duplicate_wakes.as_mut(), &[Wake::Idle]);
+        assert_wakes(second_wakes.as_mut(), &[Wake::Idle]);
 
         store
             .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
             .unwrap();
 
-        assert_wakes(first.as_mut(), &[Wake::Reconcile(0.into()), Wake::Idle]);
+        assert_wakes(
+            first_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
 
         store
             .mutate(|state| state.send_message(0.into(), &message(1)))
             .unwrap();
-        store.mutate(|state| state.move_agent(0.into(), Some(1)));
+        store.mutate(|state| state.move_agent(0.into(), Some(second)));
 
-        assert_wakes(second.as_mut(), &[Wake::Reconcile(0.into()), Wake::Idle]);
-        assert_wakes(first.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
+        assert_wakes(first_wakes.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
+        assert_wakes(
+            duplicate_wakes.as_mut(),
+            &[Wake::Release(0.into()), Wake::Idle],
+        );
 
         store
             .mutate(|state| state.create_agent(&agent(1), None))
@@ -2406,61 +2613,81 @@ mod tests {
             .mutate(|state| state.create_agent(&agent(2), Some(&message(0))))
             .unwrap();
 
-        assert_wakes(first.as_mut(), &[Wake::Reconcile(2.into()), Wake::Idle]);
-        assert_eq!(poll_wake(second.as_mut()), Poll::Pending);
+        assert_wakes(
+            first_wakes.as_mut(),
+            &[Wake::Reconcile(2.into()), Wake::Idle],
+        );
+        assert_wakes(
+            duplicate_wakes.as_mut(),
+            &[Wake::Reconcile(2.into()), Wake::Idle],
+        );
+        assert_eq!(poll_wake(second_wakes.as_mut()), Poll::Pending);
     }
 
     #[test]
     fn rapid_handoffs_preserve_release_before_reacquisition() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
-        let mut first = Box::pin(store.wakes());
-        let mut second = Box::pin(store.wakes());
+        let first = store.add_partition();
+        let second = store.add_partition();
+        let mut first_wakes = connect(&store, first);
+        let mut second_wakes = connect(&store, second);
 
-        assert_wakes(first.as_mut(), &[Wake::Idle]);
-        assert_wakes(second.as_mut(), &[Wake::Idle]);
+        assert_wakes(first_wakes.as_mut(), &[Wake::Idle]);
+        assert_wakes(second_wakes.as_mut(), &[Wake::Idle]);
 
         store
             .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
             .unwrap();
 
-        assert_wakes(first.as_mut(), &[Wake::Reconcile(0.into()), Wake::Idle]);
+        assert_wakes(
+            first_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
 
-        store.mutate(|state| state.move_agent(0.into(), Some(1)));
-        store.mutate(|state| state.move_agent(0.into(), Some(0)));
+        store.mutate(|state| state.move_agent(0.into(), Some(second)));
+        store.mutate(|state| state.move_agent(0.into(), Some(first)));
 
         assert_wakes(
-            first.as_mut(),
+            first_wakes.as_mut(),
             &[
                 Wake::Release(0.into()),
                 Wake::Reconcile(0.into()),
                 Wake::Idle,
             ],
         );
-        assert_wakes(second.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Release(0.into()), Wake::Idle],
+        );
     }
 
     #[test]
-    fn departing_consumer_wakes_survivor_during_recovery() {
+    fn removed_partition_hands_off_to_survivor_during_recovery() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
-        let mut first = Box::pin(store.wakes());
-        let mut second = Box::pin(store.wakes());
+        let first = store.add_partition();
+        let second = store.add_partition();
+        let mut first_wakes = connect(&store, first);
+        let mut second_wakes = connect(&store, second);
 
-        assert_wakes(first.as_mut(), &[Wake::Idle]);
-        assert_wakes(second.as_mut(), &[Wake::Idle]);
+        assert_wakes(first_wakes.as_mut(), &[Wake::Idle]);
+        assert_wakes(second_wakes.as_mut(), &[Wake::Idle]);
 
         store
             .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
             .unwrap();
 
-        assert_wakes(first.as_mut(), &[Wake::Reconcile(0.into()), Wake::Idle]);
+        assert_wakes(
+            first_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
 
         let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
         let task_waker = waker(flag.clone());
 
         assert_eq!(
-            second
+            second_wakes
                 .as_mut()
                 .poll_next(&mut Context::from_waker(&task_waker)),
             Poll::Pending
@@ -2468,27 +2695,48 @@ mod tests {
 
         let before = store.snapshot();
         scheduler.begin_recovery();
-        drop(first);
+        store.remove_partition(first);
 
         assert!(flag.0.load(Ordering::Relaxed));
-        assert_wakes(second.as_mut(), &[Wake::Reconcile(0.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
+        assert_wakes(first_wakes.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
 
-        drop(second);
+        store
+            .mutate(|state| state.create_agent(&agent(1), Some(&message(0))))
+            .unwrap();
 
-        let mut reconnected = Box::pin(store.wakes());
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(1.into()), Wake::Idle],
+        );
+        assert_eq!(poll_wake(first_wakes.as_mut()), Poll::Pending);
+
+        drop(second_wakes);
+
+        let mut reconnected = connect(&store, second);
 
         assert_wakes(
             reconnected.as_mut(),
-            &[Wake::Reconcile(0.into()), Wake::Idle],
+            &[
+                Wake::Reconcile(0.into()),
+                Wake::Reconcile(1.into()),
+                Wake::Idle,
+            ],
         );
-        assert_eq!(store.snapshot(), before);
+        assert_eq!(store.snapshot()[&0.into()], before[&0.into()]);
     }
 
     #[test]
-    fn failed_wake_stream_reassigns_its_agents() {
+    fn failed_wake_stream_preserves_its_partition() {
         let scheduler = Scheduler::new(0);
         let mut store = store(&scheduler);
         store.config.wakes.error = Probability::ALWAYS;
+
+        let first = store.add_partition();
+        let second = store.add_partition();
 
         for id in 0..2 {
             store
@@ -2496,33 +2744,191 @@ mod tests {
                 .unwrap();
         }
 
-        let mut survivor = WakeSubscription::new(&store);
+        let mut survivor = WakeSubscription::new(&store, first);
+        let mut duplicate = WakeSubscription::new(&store, second);
 
-        for id in 0..2 {
-            assert_eq!(
-                pin!(survivor.next()).poll(&mut Context::from_waker(Waker::noop())),
-                Poll::Ready(Wake::Reconcile(id.into())),
-            );
-        }
+        assert_eq!(
+            next_wake(&mut survivor),
+            Poll::Ready(Wake::Reconcile(0.into()))
+        );
 
-        let mut failing = Box::pin(store.wakes());
+        let mut failing = connect(&store, second);
 
-        assert!(matches!(
-            poll_wake(failing.as_mut()),
-            Poll::Ready(Some(Err(_)))
-        ));
+        let error = failing.next().now_or_never().unwrap().unwrap().unwrap_err();
+        assert_eq!(error, RuntimeError::random());
         assert_eq!(poll_wake(failing.as_mut()), Poll::Ready(None));
 
-        for wake in [
-            Wake::Release(1.into()),
-            Wake::Reconcile(1.into()),
-            Wake::Idle,
-        ] {
-            assert_eq!(
-                pin!(survivor.next()).poll(&mut Context::from_waker(Waker::noop())),
-                Poll::Ready(wake),
-            );
+        assert_eq!(next_wake(&mut survivor), Poll::Ready(Wake::Idle));
+        assert_eq!(next_wake(&mut survivor), Poll::Pending);
+        assert_eq!(
+            next_wake(&mut duplicate),
+            Poll::Ready(Wake::Reconcile(1.into()))
+        );
+        assert_eq!(next_wake(&mut duplicate), Poll::Ready(Wake::Idle));
+
+        let mut reconnected = WakeSubscription::new(&store, second);
+
+        assert_eq!(
+            next_wake(&mut reconnected),
+            Poll::Ready(Wake::Reconcile(1.into()))
+        );
+        assert_eq!(next_wake(&mut reconnected), Poll::Ready(Wake::Idle));
+
+        store
+            .mutate(|state| state.send_message(1.into(), &message(1)))
+            .unwrap();
+
+        assert_eq!(
+            next_wake(&mut duplicate),
+            Poll::Ready(Wake::Reconcile(1.into()))
+        );
+        assert_eq!(
+            next_wake(&mut reconnected),
+            Poll::Ready(Wake::Reconcile(1.into()))
+        );
+    }
+
+    #[test]
+    fn reconnecting_yields_releases_and_current_work() {
+        let scheduler = Scheduler::new(0);
+        let store = store(&scheduler);
+        let first = store.add_partition();
+        let second = store.add_partition();
+
+        store
+            .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
+            .unwrap();
+
+        let mut first_wakes = connect(&store, first);
+
+        assert_wakes(
+            first_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
+
+        drop(first_wakes);
+        store.mutate(|state| state.move_agent(0.into(), Some(second)));
+
+        let mut first_wakes = connect(&store, first);
+        let mut second_wakes = connect(&store, second);
+
+        assert_wakes(first_wakes.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
+
+        drop(second_wakes);
+
+        for id in 1..3 {
+            store
+                .mutate(|state| state.send_message(0.into(), &message(id)))
+                .unwrap();
         }
+
+        let mut second_wakes = connect(&store, second);
+
+        assert_wakes(
+            second_wakes.as_mut(),
+            &[Wake::Reconcile(0.into()), Wake::Idle],
+        );
+    }
+
+    #[test]
+    fn subscribers_receive_initial_work_and_new_activity() {
+        let scheduler = Scheduler::new(0);
+        let store = store(&scheduler);
+        let partition = store.add_partition();
+        let agent = agent(0);
+        let first_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let second_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let first_waker = waker(first_flag.clone());
+        let second_waker = waker(second_flag.clone());
+
+        store
+            .mutate(|state| state.create_agent(&agent, Some(&message(0))))
+            .unwrap();
+
+        let mut first = connect(&store, partition);
+        let mut second = connect(&store, partition);
+
+        assert_wakes(first.as_mut(), &[Wake::Reconcile(agent.id), Wake::Idle]);
+        assert_wakes(second.as_mut(), &[Wake::Reconcile(agent.id), Wake::Idle]);
+        assert_eq!(
+            first
+                .as_mut()
+                .poll_next(&mut Context::from_waker(&first_waker)),
+            Poll::Pending
+        );
+        assert_eq!(
+            second
+                .as_mut()
+                .poll_next(&mut Context::from_waker(&second_waker)),
+            Poll::Pending
+        );
+
+        store
+            .mutate(|state| state.interrupt_agent(agent.id, None))
+            .unwrap();
+
+        assert!(first_flag.0.load(Ordering::Relaxed));
+        assert!(second_flag.0.load(Ordering::Relaxed));
+        assert_wakes(first.as_mut(), &[Wake::Interrupt(agent.id), Wake::Idle]);
+        assert_wakes(second.as_mut(), &[Wake::Interrupt(agent.id), Wake::Idle]);
+
+        drop(first);
+        store
+            .mutate(|state| state.send_message(agent.id, &message(1)))
+            .unwrap();
+
+        assert_wakes(second.as_mut(), &[Wake::Reconcile(agent.id), Wake::Idle]);
+    }
+
+    #[test]
+    fn reconnecting_replays_releases_before_current_work() {
+        let scheduler = Scheduler::new(0);
+        let store = store(&scheduler);
+        let first = store.add_partition();
+        let second = store.add_partition();
+        let agent = agent(0);
+
+        store
+            .mutate(|state| state.create_agent(&agent, Some(&message(0))))
+            .unwrap();
+
+        let mut wakes = connect(&store, first);
+        let mut duplicate = connect(&store, first);
+
+        assert_wakes(wakes.as_mut(), &[Wake::Reconcile(agent.id), Wake::Idle]);
+        assert_wakes(duplicate.as_mut(), &[Wake::Reconcile(agent.id), Wake::Idle]);
+
+        drop(wakes);
+        store.mutate(|state| state.move_agent(agent.id, Some(second)));
+        store.mutate(|state| state.move_agent(agent.id, Some(first)));
+
+        let expected = [
+            Wake::Release(agent.id),
+            Wake::Reconcile(agent.id),
+            Wake::Idle,
+        ];
+
+        assert_wakes(duplicate.as_mut(), &expected);
+
+        let mut reconnected = connect(&store, first);
+
+        assert_wakes(reconnected.as_mut(), &expected);
+        assert_eq!(poll_wake(duplicate.as_mut()), Poll::Pending);
+    }
+
+    #[test]
+    #[should_panic(expected = "partition exists and has not been removed")]
+    fn removing_a_partition_twice_panics() {
+        let scheduler = Scheduler::new(0);
+        let store = store(&scheduler);
+        let partition = store.add_partition();
+
+        store.remove_partition(partition);
+        store.remove_partition(partition);
     }
 
     #[test]
@@ -2544,11 +2950,13 @@ mod tests {
                     error_after: Probability::NEVER,
                 };
 
-                let mut first = Box::pin(store.wakes());
-                let mut second = Box::pin(store.wakes());
+                let first = store.add_partition();
+                let second = store.add_partition();
+                let mut first_wakes = connect(&store, first);
+                let mut second_wakes = connect(&store, second);
 
-                assert_wakes(first.as_mut(), &[Wake::Idle]);
-                assert_wakes(second.as_mut(), &[Wake::Idle]);
+                assert_wakes(first_wakes.as_mut(), &[Wake::Idle]);
+                assert_wakes(second_wakes.as_mut(), &[Wake::Idle]);
 
                 store
                     .mutate(|state| state.create_agent(&agent(0), None))
@@ -2576,11 +2984,11 @@ mod tests {
                 );
 
                 if probability == Probability::ALWAYS {
-                    assert_wakes(second.as_mut(), &[wake, Wake::Idle]);
-                    assert_wakes(first.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
+                    assert_wakes(second_wakes.as_mut(), &[wake, Wake::Idle]);
+                    assert_wakes(first_wakes.as_mut(), &[Wake::Release(0.into()), Wake::Idle]);
                 } else {
-                    assert_wakes(first.as_mut(), &[wake, Wake::Idle]);
-                    assert_eq!(poll_wake(second.as_mut()), Poll::Pending);
+                    assert_wakes(first_wakes.as_mut(), &[wake, Wake::Idle]);
+                    assert_eq!(poll_wake(second_wakes.as_mut()), Poll::Pending);
                 }
 
                 assert_eq!(
@@ -2594,8 +3002,8 @@ mod tests {
                     Poll::Ready(Err(_)),
                 ));
 
-                assert_eq!(poll_wake(first.as_mut()), Poll::Pending);
-                assert_eq!(poll_wake(second.as_mut()), Poll::Pending);
+                assert_eq!(poll_wake(first_wakes.as_mut()), Poll::Pending);
+                assert_eq!(poll_wake(second_wakes.as_mut()), Poll::Pending);
 
                 scheduler.begin_recovery();
                 store.repartition();
@@ -2607,11 +3015,11 @@ mod tests {
                 );
 
                 if probability == Probability::ALWAYS {
-                    assert_wakes(second.as_mut(), &[wake, Wake::Idle]);
-                    assert_eq!(poll_wake(first.as_mut()), Poll::Pending);
+                    assert_wakes(second_wakes.as_mut(), &[wake, Wake::Idle]);
+                    assert_eq!(poll_wake(first_wakes.as_mut()), Poll::Pending);
                 } else {
-                    assert_wakes(first.as_mut(), &[wake, Wake::Idle]);
-                    assert_eq!(poll_wake(second.as_mut()), Poll::Pending);
+                    assert_wakes(first_wakes.as_mut(), &[wake, Wake::Idle]);
+                    assert_eq!(poll_wake(second_wakes.as_mut()), Poll::Pending);
                 }
             }
         }
@@ -2632,10 +3040,11 @@ mod tests {
 
         store.repartition();
 
-        let mut first = Box::pin(store.wakes());
+        let first = store.add_partition();
+        let mut first_wakes = connect(&store, first);
 
         assert_wakes(
-            first.as_mut(),
+            first_wakes.as_mut(),
             &[
                 Wake::Reconcile(0.into()),
                 Wake::Reconcile(1.into()),
@@ -2647,12 +3056,13 @@ mod tests {
 
         store.repartition();
 
-        assert_eq!(poll_wake(first.as_mut()), Poll::Pending);
+        assert_eq!(poll_wake(first_wakes.as_mut()), Poll::Pending);
 
-        let mut second = Box::pin(store.wakes());
+        let second = store.add_partition();
+        let mut second_wakes = connect(&store, second);
 
         assert_wakes(
-            second.as_mut(),
+            second_wakes.as_mut(),
             &[
                 Wake::Reconcile(1.into()),
                 Wake::Reconcile(3.into()),
@@ -2660,7 +3070,7 @@ mod tests {
             ],
         );
         assert_wakes(
-            first.as_mut(),
+            first_wakes.as_mut(),
             &[Wake::Release(1.into()), Wake::Release(3.into()), Wake::Idle],
         );
 
@@ -2702,6 +3112,7 @@ mod tests {
         for recover in [false, true] {
             let scheduler = Scheduler::new(0);
             let store = store(&scheduler);
+            let partition = store.add_partition();
             let idle = agent(0);
             let first = agent(1);
             let second = agent(2);
@@ -2718,7 +3129,7 @@ mod tests {
                 .mutate(|state| state.create_agent(&second, Some(&message(0))))
                 .unwrap();
 
-            let mut wakes = Box::pin(store.wakes());
+            let mut wakes = connect(&store, partition);
 
             assert_eq!(
                 poll_wake(wakes.as_mut()),
@@ -2741,7 +3152,7 @@ mod tests {
 
             drop(wakes);
 
-            let mut reconnected = pin!(store.wakes());
+            let mut reconnected = connect(&store, partition);
 
             assert_wakes(
                 reconnected.as_mut(),
@@ -2758,6 +3169,7 @@ mod tests {
     fn client_activity_wakes_waiting_consumer() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
+        let partition = store.add_partition();
         let parked = agent(0);
         let active = agent(1);
 
@@ -2769,7 +3181,7 @@ mod tests {
             .mutate(|state| state.create_agent(&active, Some(&message(0))))
             .unwrap();
 
-        let mut wakes = pin!(store.wakes());
+        let mut wakes = connect(&store, partition);
 
         assert_wakes(
             wakes.as_mut(),
@@ -2812,12 +3224,13 @@ mod tests {
     fn queued_wakes_remain_after_work_finishes() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
+        let partition = store.add_partition();
 
         store
             .mutate(|state| state.create_agent(&agent(0), None))
             .unwrap();
 
-        let mut wakes = pin!(store.wakes());
+        let mut wakes = connect(&store, partition);
 
         assert_wakes(wakes.as_mut(), &[Wake::Idle]);
 
@@ -2851,7 +3264,8 @@ mod tests {
     fn empty_and_idle_stores_yield_only_idle() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
-        let mut empty = Box::pin(store.wakes());
+        let partition = store.add_partition();
+        let mut empty = connect(&store, partition);
 
         assert_wakes(empty.as_mut(), &[Wake::Idle]);
 
@@ -2863,7 +3277,7 @@ mod tests {
             .mutate(|state| state.create_agent(&idle, None))
             .unwrap();
 
-        let mut wakes = pin!(store.wakes());
+        let mut wakes = connect(&store, partition);
 
         assert_wakes(wakes.as_mut(), &[Wake::Idle]);
     }

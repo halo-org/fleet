@@ -1,6 +1,6 @@
 use crate::{
-    ErrorHandlerSimulator, IdleHandlerSimulator, ModelsSimulator, RolesSimulator, Scheduler,
-    StoreSimulator, ToolsSimulator,
+    ErrorHandlerSimulator, IdleHandlerSimulator, ModelsSimulator, PartitionId, RolesSimulator,
+    Scheduler, StoreSimulator, ToolsSimulator,
 };
 use fastrand::Rng;
 
@@ -43,12 +43,16 @@ impl<'sim> Simulator<'sim> {
         }
     }
 
-    /// Runs the runtime using the simulated providers.
-    pub fn run(&self) -> impl Future<Output = ()> {
+    /// Runs the runtime for a store partition using the simulated providers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the partition was never added to the store.
+    pub fn run(&self, partition: PartitionId) -> impl Future<Output = ()> {
         fleet_core::run(
             &self.idle_handler,
             &self.error_handler,
-            &self.store,
+            self.store.partition(partition),
             &self.roles,
             &self.models,
             &self.tools,

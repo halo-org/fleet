@@ -24,7 +24,10 @@ pub use self::{
     roles::{RolesSimulator, RolesSimulatorError},
     scheduler::Scheduler,
     simulator::Simulator,
-    store::{AgentSnapshot, StoreSimulator, StoreSimulatorError, ToolCallSnapshot},
+    store::{
+        AgentSnapshot, PartitionId, StorePartition, StoreSimulator, StoreSimulatorError,
+        ToolCallSnapshot,
+    },
     tools::{ToolsSimulator, ToolsSimulatorError},
 };
 pub(crate) use self::{
