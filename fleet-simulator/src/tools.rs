@@ -456,7 +456,7 @@ mod tests {
                 .unwrap();
 
             assert!(output.is_error);
-            assert!(!output.content.is_empty());
+            assert_ne!(output.content, []);
             assert!(output.structured_content.is_none());
         }
 
@@ -483,7 +483,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(empty.content.is_empty());
+        assert_eq!(empty.content, []);
         assert!(empty.structured_content.is_none());
         assert!(!empty.is_error);
 

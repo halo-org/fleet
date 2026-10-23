@@ -213,7 +213,7 @@ mod tests {
             let second = simulator(&scheduler, seed);
             let names = first.prompt_names();
 
-            assert!(!names.is_empty());
+            assert_ne!(names, []);
             assert!(names.is_sorted());
             assert_eq!(names, second.prompt_names());
 

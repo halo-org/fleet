@@ -1899,9 +1899,9 @@ mod tests {
 
         let after = store.snapshot();
 
-        assert!(before[&0.into()].events.is_empty());
+        assert_eq!(before[&0.into()].events, []);
         assert_eq!(before[&0.into()].pending_messages, [message(5)]);
-        assert!(after[&0.into()].pending_messages.is_empty());
+        assert_eq!(after[&0.into()].pending_messages, []);
         assert_eq!(after[&0.into()].events.len(), 1);
 
         let copied = before.get_mut(&0.into()).unwrap();

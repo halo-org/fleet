@@ -877,7 +877,7 @@ mod tests {
             let response = completed(&chunks);
 
             if reasoning == Probability::NEVER {
-                assert!(response.output.is_empty());
+                assert_eq!(response.output, []);
                 assert_eq!(chunks.len(), 1);
             } else {
                 let [ModelOutput::Reasoning(reasoning)] = response.output.as_slice() else {
@@ -1171,7 +1171,10 @@ mod tests {
         );
 
         simulator.config.generate_tool_rounds_limit = 1;
-        assert!(calls(completed(&chunks(&simulator, &history))).is_empty());
+        assert_eq!(
+            calls(completed(&chunks(&simulator, &history))),
+            Vec::<&ToolCall>::new()
+        );
     }
 
     #[test]
