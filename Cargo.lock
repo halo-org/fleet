@@ -19,6 +19,7 @@ dependencies = [
 name = "fleet-core"
 version = "0.0.0"
 dependencies = [
+ "fleet-simulator",
  "futures-executor",
  "futures-util",
  "serde_json",
@@ -30,6 +31,7 @@ version = "0.0.0"
 dependencies = [
  "fastrand",
  "fleet-core",
+ "futures-executor",
  "futures-util",
 ]
 

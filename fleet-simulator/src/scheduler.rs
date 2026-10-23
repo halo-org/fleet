@@ -1,16 +1,24 @@
 use crate::Probability;
 use core::{
+    future,
     ops::RangeBounds,
-    pin::Pin,
+    pin::{Pin, pin},
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll, Waker},
 };
 use fastrand::Rng;
 use futures_util::{Stream, StreamExt as _, stream};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    task::Wake,
+};
+
+const MAX_RUN_STEPS: usize = 100_000;
 
 /// Controls simulated scheduling and faults.
 ///
-/// Poll work and call [`Self::release`] to resume suspended operations.
+/// Use [`Self::run`] to drive work or [`Self::release`] to resume suspended operations manually.
 pub struct Scheduler {
     state: Mutex<State>,
 }
@@ -39,6 +47,10 @@ struct State {
 struct PendingSuspension {
     priority: u64,
     waker: Waker,
+}
+
+struct RunWaker {
+    notified: AtomicBool,
 }
 
 /// The suspension and error probabilities for [`Scheduler::try_suspend`].
@@ -91,6 +103,42 @@ impl Scheduler {
         Self {
             state: Mutex::new(State::new(rng, policy)),
         }
+    }
+
+    /// Runs a future and releases its simulated suspensions until it completes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation stalls or exceeds 100,000 steps.
+    pub fn run<F: Future>(&self, future: F) -> F::Output {
+        let mut future = pin!(future);
+        let wake = Arc::new(RunWaker {
+            notified: AtomicBool::new(true),
+        });
+        let waker = Waker::from(wake.clone());
+        let mut steps = 0;
+
+        futures_executor::block_on(future::poll_fn(|cx| {
+            assert!(steps < MAX_RUN_STEPS, "simulation exceeded its step limit");
+            steps = steps.saturating_add(1);
+
+            if wake.notified.swap(false, Ordering::AcqRel)
+                && let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker))
+            {
+                return Poll::Ready(output);
+            }
+
+            if !wake.notified.load(Ordering::Acquire) {
+                assert!(
+                    self.release(),
+                    "simulation stalled without a wake or suspension"
+                );
+            }
+
+            cx.waker().wake_by_ref();
+
+            Poll::Pending
+        }))
     }
 
     /// Stops sampling new faults.
@@ -296,6 +344,16 @@ impl Scheduler {
     }
 }
 
+impl Wake for RunWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+    }
+}
+
 impl State {
     const fn new(rng: Rng, policy: SchedulerPolicy) -> Self {
         Self {
@@ -417,6 +475,61 @@ mod tests {
         } else {
             Probability::NEVER
         }
+    }
+
+    #[test]
+    fn run_returns_output_after_suspensions() {
+        let scheduler = Scheduler::new(0);
+        let first = async {
+            scheduler.suspend().await;
+            42
+        };
+        let second = async {
+            scheduler.suspend().await;
+            43
+        };
+
+        let result = scheduler.run(futures_util::future::join(first, second));
+        assert_eq!(result, (42, 43));
+        assert!(!scheduler.release());
+    }
+
+    #[test]
+    fn run_polls_self_woken_futures() {
+        let scheduler = Scheduler::new(0);
+        let mut polled = false;
+        let future = future::poll_fn(|cx| {
+            if polled {
+                Poll::Ready(42)
+            } else {
+                polled = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        });
+
+        let result = scheduler.run(future);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "simulation stalled without a wake or suspension")]
+    fn run_panics_when_future_stalls() {
+        let scheduler = Scheduler::new(0);
+
+        scheduler.run(future::pending::<()>());
+    }
+
+    #[test]
+    #[should_panic(expected = "simulation exceeded its step limit")]
+    fn run_panics_when_step_limit_is_exceeded() {
+        let scheduler = Scheduler::new(0);
+        let future = future::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            Poll::<()>::Pending
+        });
+
+        scheduler.run(future);
     }
 
     #[test]

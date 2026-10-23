@@ -15,4 +15,5 @@ futures-util = { workspace = true, features = ["alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
+fleet-simulator.workspace = true
 futures-executor = { workspace = true, features = ["std"] }

@@ -12,6 +12,7 @@ mod prompts;
 mod random_error;
 mod roles;
 mod scheduler;
+mod simulator;
 mod store;
 mod tools;
 
@@ -22,6 +23,7 @@ pub use self::{
     prompts::{PromptsSimulator, PromptsSimulatorError},
     roles::{RolesSimulator, RolesSimulatorError},
     scheduler::Scheduler,
+    simulator::Simulator,
     store::{AgentSnapshot, StoreSimulator, StoreSimulatorError, ToolCallSnapshot},
     tools::{ToolsSimulator, ToolsSimulatorError},
 };
