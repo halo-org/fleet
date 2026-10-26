@@ -471,6 +471,7 @@ pub enum MessageMode {
     ///
     /// This will cause the message to be added to the conversation after the current turn finishes.
     /// Only one queued message will be added at a time. Others will wait for their turn.
+    /// Outstanding async tool calls do not delay the next turn.
     Queue,
 }
 
@@ -490,6 +491,26 @@ pub struct Compaction {
     pub pending_tool_calls: Vec<ToolCall>,
     /// How many tokens were used for compaction.
     pub usage: ModelUsage,
+}
+
+// === Turns ===
+
+/// The end of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TurnEnd {
+    /// The cursor of the event that ended the turn.
+    pub cursor: EventCursor,
+    /// Why the turn ended.
+    pub reason: TurnEndReason,
+}
+
+/// Why a turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TurnEndReason {
+    /// The agent finished responding.
+    Completed,
+    /// The turn was interrupted.
+    Interrupted,
 }
 
 // === Events ===
@@ -520,6 +541,8 @@ pub enum EventPayload {
     ToolResult(ToolResult),
     /// Replacement model context and pending tool calls.
     Compaction(Compaction),
+    /// The end of a turn.
+    TurnEnd(TurnEndReason),
 }
 
 // === Wakes ===

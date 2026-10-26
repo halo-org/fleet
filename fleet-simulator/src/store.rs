@@ -1,13 +1,15 @@
 use crate::{Probability, RandomError, Scheduler, TrySuspendConfig, WrapConfig};
 use core::{
     fmt, mem,
+    ops::Bound,
     task::{Poll, Waker},
 };
 use fastrand::Rng;
 use fleet_core::{
     Agent, AgentId, AgentParent, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event,
     EventCursor, EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse,
-    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, Wake,
+    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd,
+    TurnEndReason, Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -83,11 +85,12 @@ struct AgentRecord {
     pending_messages: Vec<Message>,
     parked_at: Option<EventCursor>,
     interrupt_intent: bool,
-    message_ids: BTreeSet<MessageId>,
+    message_cursors: BTreeMap<MessageId, Option<EventCursor>>,
+    turn_ends: BTreeMap<EventCursor, TurnEndReason>,
     tool_call_ids: BTreeSet<ToolCallId>,
     unresolved_tool_calls: BTreeMap<ToolCallId, ToolCallSnapshot>,
     response_stream: Option<ResponseStreamState>,
-    idle_subscriptions: BTreeMap<u64, Waker>,
+    turn_subscriptions: BTreeMap<u64, Waker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,10 +138,11 @@ struct WakeSubscription<'store, 'sim> {
     is_idle: bool,
 }
 
-struct IdleSubscription<'store, 'sim> {
+struct TurnSubscription<'store, 'sim> {
     simulator: &'store StoreSimulator<'sim>,
     id: Option<u64>,
     agent_id: AgentId,
+    message_id: MessageId,
 }
 
 /// An error returned by [`StoreSimulator`].
@@ -171,7 +175,7 @@ struct StoreSimulatorConfig {
     create_agent: WrapConfig,
     interrupt_agent: WrapConfig,
     send_message: WrapConfig,
-    wait_until_idle: WrapConfig,
+    wait_for_turn_end: WrapConfig,
     wakes: TrySuspendConfig,
     wakes_repartition: Probability,
     events_suspend: Probability,
@@ -536,6 +540,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
         &self,
         agent_id: AgentId,
         expected_latest_event: EventCursor,
+        ends_turn: bool,
         response: &ModelResponse,
     ) -> Result<(), Self::Error> {
         self.store
@@ -545,7 +550,12 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 StoreSimulatorError::random,
                 async {
                     self.store.mutate(|state| {
-                        state.append_model_response(agent_id, expected_latest_event, response)
+                        state.append_model_response(
+                            agent_id,
+                            expected_latest_event,
+                            ends_turn,
+                            response,
+                        )
                     })
                 },
             )
@@ -693,12 +703,20 @@ impl ClientStore for StoreSimulator<'_> {
             .await
     }
 
-    async fn wait_until_idle(&self, agent_id: AgentId) -> Result<(), Self::Error> {
+    async fn wait_for_turn_end(
+        &self,
+        agent_id: AgentId,
+        message_id: MessageId,
+    ) -> Result<TurnEnd, Self::Error> {
         self.scheduler
             .wrap(
-                &self.config.wait_until_idle,
+                &self.config.wait_for_turn_end,
                 StoreSimulatorError::random,
-                async { IdleSubscription::new(self, agent_id).wait().await },
+                async {
+                    TurnSubscription::new(self, agent_id, message_id)
+                        .wait()
+                        .await
+                },
             )
             .await
     }
@@ -763,7 +781,7 @@ impl State {
             .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
 
         if let Some(message) = message {
-            if agent.message_ids.contains(&message.id) {
+            if agent.message_cursors.contains_key(&message.id) {
                 return Err(ClientError::conflict("message ID already exists"));
             }
 
@@ -785,7 +803,7 @@ impl State {
             .get_mut(&agent_id)
             .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
 
-        if agent.message_ids.contains(&message.id) {
+        if agent.message_cursors.contains_key(&message.id) {
             return Err(ClientError::conflict("message ID already exists"));
         }
 
@@ -836,10 +854,11 @@ impl State {
             agent.append_tool_result(result);
         }
 
+        agent.append_event(EventPayload::TurnEnd(TurnEndReason::Interrupted));
         agent.interrupt_intent = false;
         agent.parked_at = agent.latest_event();
 
-        self.notify_idle(agent_id);
+        self.notify_turn_end(agent_id);
 
         Ok(())
     }
@@ -856,8 +875,6 @@ impl State {
 
         agent.check_latest_event(expected_latest_event)?;
         agent.parked_at = agent.latest_event();
-
-        self.notify_idle(agent_id);
 
         Ok(())
     }
@@ -949,6 +966,7 @@ impl State {
         &mut self,
         agent_id: AgentId,
         expected_latest_event: EventCursor,
+        ends_turn: bool,
         response: &ModelResponse,
     ) -> Result<(), RuntimeError> {
         let agent = self
@@ -1009,6 +1027,11 @@ impl State {
             status: ResponseStreamStatus::Superseded,
         });
 
+        if ends_turn {
+            agent.append_event(EventPayload::TurnEnd(TurnEndReason::Completed));
+            self.notify_turn_end(agent_id);
+        }
+
         Ok(())
     }
 
@@ -1051,7 +1074,9 @@ impl State {
                 EventPayload::ToolResult(result) => {
                     pending.remove(&result.call_id);
                 }
-                EventPayload::Input(..) | EventPayload::Compaction(_) => {}
+                EventPayload::Input(..)
+                | EventPayload::Compaction(_)
+                | EventPayload::TurnEnd(_) => {}
             }
         }
 
@@ -1262,13 +1287,10 @@ impl State {
         }
     }
 
-    fn notify_idle(&mut self, agent_id: AgentId) {
+    fn notify_turn_end(&mut self, agent_id: AgentId) {
         let agent = self.agents.get_mut(&agent_id).expect("agent exists");
-
-        if agent.is_idle() {
-            let subscriptions = mem::take(&mut agent.idle_subscriptions);
-            self.ready_wakers.extend(subscriptions.into_values());
-        }
+        let subscriptions = mem::take(&mut agent.turn_subscriptions);
+        self.ready_wakers.extend(subscriptions.into_values());
     }
 
     const fn allocate_subscription_id(&mut self) -> u64 {
@@ -1287,11 +1309,12 @@ impl AgentRecord {
             pending_messages: Vec::new(),
             parked_at: None,
             interrupt_intent: false,
-            message_ids: BTreeSet::new(),
+            message_cursors: BTreeMap::new(),
+            turn_ends: BTreeMap::new(),
             tool_call_ids: BTreeSet::new(),
             unresolved_tool_calls: BTreeMap::new(),
             response_stream: None,
-            idle_subscriptions: BTreeMap::new(),
+            turn_subscriptions: BTreeMap::new(),
         }
     }
 
@@ -1333,17 +1356,28 @@ impl AgentRecord {
     }
 
     fn push_pending_message(&mut self, message: Message) {
-        assert!(self.message_ids.insert(message.id), "message ID is new");
+        assert!(
+            self.message_cursors.insert(message.id, None).is_none(),
+            "message ID is new"
+        );
         self.pending_messages.push(message);
     }
 
     fn append_event(&mut self, payload: EventPayload) {
-        self.events.push(Event {
-            cursor: EventCursor::from(
-                u128::try_from(self.events.len()).expect("event count fits u128"),
-            ),
-            payload,
-        });
+        let cursor =
+            EventCursor::from(u128::try_from(self.events.len()).expect("event count fits u128"));
+
+        match &payload {
+            EventPayload::Input(id, _) => {
+                *self.message_cursors.get_mut(id).expect("message exists") = Some(cursor);
+            }
+            EventPayload::TurnEnd(reason) => {
+                self.turn_ends.insert(cursor, *reason);
+            }
+            _ => {}
+        }
+
+        self.events.push(Event { cursor, payload });
     }
 
     fn append_tool_result(&mut self, result: &ToolResult) {
@@ -1440,16 +1474,21 @@ impl Drop for WakeSubscription<'_, '_> {
     }
 }
 
-impl<'store, 'sim> IdleSubscription<'store, 'sim> {
-    const fn new(simulator: &'store StoreSimulator<'sim>, agent_id: AgentId) -> Self {
+impl<'store, 'sim> TurnSubscription<'store, 'sim> {
+    const fn new(
+        simulator: &'store StoreSimulator<'sim>,
+        agent_id: AgentId,
+        message_id: MessageId,
+    ) -> Self {
         Self {
             simulator,
             id: None,
             agent_id,
+            message_id,
         }
     }
 
-    async fn wait(mut self) -> Result<(), ClientError> {
+    async fn wait(mut self) -> Result<TurnEnd, ClientError> {
         future::poll_fn(|cx| {
             let mut state = self.simulator.state.lock().expect("never poisoned");
 
@@ -1457,8 +1496,22 @@ impl<'store, 'sim> IdleSubscription<'store, 'sim> {
                 return Poll::Ready(Err(ClientError::agent_not_found("agent does not exist")));
             };
 
-            if agent.is_idle() {
-                return Poll::Ready(Ok(()));
+            let Some(input_cursor) = agent.message_cursors.get(&self.message_id) else {
+                return Poll::Ready(Err(ClientError::message_not_found(
+                    "message does not exist",
+                )));
+            };
+
+            if let Some(input_cursor) = input_cursor
+                && let Some((cursor, reason)) = agent
+                    .turn_ends
+                    .range((Bound::Excluded(*input_cursor), Bound::Unbounded))
+                    .next()
+            {
+                return Poll::Ready(Ok(TurnEnd {
+                    cursor: *cursor,
+                    reason: *reason,
+                }));
             }
 
             let id = *self
@@ -1469,7 +1522,7 @@ impl<'store, 'sim> IdleSubscription<'store, 'sim> {
                 .agents
                 .get_mut(&self.agent_id)
                 .expect("agent exists")
-                .idle_subscriptions
+                .turn_subscriptions
                 .insert(id, cx.waker().clone());
 
             Poll::Pending
@@ -1478,7 +1531,7 @@ impl<'store, 'sim> IdleSubscription<'store, 'sim> {
     }
 }
 
-impl Drop for IdleSubscription<'_, '_> {
+impl Drop for TurnSubscription<'_, '_> {
     fn drop(&mut self) {
         let Some(id) = self.id else {
             return;
@@ -1492,7 +1545,7 @@ impl Drop for IdleSubscription<'_, '_> {
             .agents
             .get_mut(&self.agent_id)
         {
-            agent.idle_subscriptions.remove(&id);
+            agent.turn_subscriptions.remove(&id);
         }
     }
 }
@@ -1538,6 +1591,12 @@ impl StoreSimulatorError<ClientStoreErrorKind> {
     const fn agent_not_found(message: &'static str) -> Self {
         Self {
             inner: StoreSimulatorErrorInner::Kind(ClientStoreErrorKind::AgentNotFound, message),
+        }
+    }
+
+    const fn message_not_found(message: &'static str) -> Self {
+        Self {
+            inner: StoreSimulatorErrorInner::Kind(ClientStoreErrorKind::MessageNotFound, message),
         }
     }
 }
@@ -1599,7 +1658,7 @@ impl StoreSimulatorConfig {
             create_agent: WrapConfig::generate(rng),
             interrupt_agent: WrapConfig::generate(rng),
             send_message: WrapConfig::generate(rng),
-            wait_until_idle: WrapConfig::generate(rng),
+            wait_for_turn_end: WrapConfig::generate(rng),
             wakes: TrySuspendConfig::generate(rng),
             events_suspend: Probability::generate(rng),
             events_error: Probability::generate_for_faults(rng),
@@ -1641,6 +1700,12 @@ mod tests {
             error: Probability::NEVER,
         };
         store.config.wakes_repartition = Probability::NEVER;
+        store.config.wait_for_turn_end = WrapConfig {
+            suspend_before: Probability::NEVER,
+            suspend_after: Probability::NEVER,
+            error: Probability::NEVER,
+            error_after: Probability::NEVER,
+        };
 
         store
     }
@@ -1749,6 +1814,7 @@ mod tests {
                 state.append_model_response(
                     agent.id,
                     0.into(),
+                    false,
                     &response(&[("a", true), ("b", true)]),
                 )
             })
@@ -1797,7 +1863,7 @@ mod tests {
 
         store
             .mutate(|state| {
-                state.append_model_response(child.id, 0.into(), &response(&[("a", false)]))
+                state.append_model_response(child.id, 0.into(), false, &response(&[("a", false)]))
             })
             .unwrap();
 
@@ -1961,7 +2027,12 @@ mod tests {
                 .unwrap();
             store
                 .mutate(|state| {
-                    state.append_model_response(0.into(), 2.into(), &response(&[("c", is_async)]))
+                    state.append_model_response(
+                        0.into(),
+                        2.into(),
+                        false,
+                        &response(&[("c", is_async)]),
+                    )
                 })
                 .unwrap();
             let before = store.snapshot();
@@ -2107,7 +2178,12 @@ mod tests {
             .unwrap();
         store
             .mutate(|state| {
-                state.append_model_response(0.into(), 3.into(), &response(&[("sync", false)]))
+                state.append_model_response(
+                    0.into(),
+                    3.into(),
+                    false,
+                    &response(&[("sync", false)]),
+                )
             })
             .unwrap();
         let before = store.snapshot();
@@ -2140,26 +2216,27 @@ mod tests {
     }
 
     #[test]
-    fn becoming_idle_wakes_all_subscribers() {
-        for settle_interrupt in [false, true] {
+    fn wait_for_turn_end_wakes_all_subscribers() {
+        for reason in [TurnEndReason::Completed, TurnEndReason::Interrupted] {
             let scheduler = Scheduler::new(0);
-            let mut store = store(&scheduler);
-            store.config.wait_until_idle = WrapConfig {
-                suspend_before: Probability::NEVER,
-                suspend_after: Probability::NEVER,
-                error: Probability::NEVER,
-                error_after: Probability::NEVER,
-            };
+            let store = store(&scheduler);
+            let mut queued = message(2);
+            queued.mode = MessageMode::Queue;
 
             store
                 .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
                 .unwrap();
-
             store
-                .mutate(|state| state.consume_messages(0.into(), None, true))
+                .mutate(|state| state.send_message(0.into(), &message(1)))
+                .unwrap();
+            store
+                .mutate(|state| state.send_message(0.into(), &queued))
+                .unwrap();
+            store
+                .mutate(|state| state.consume_messages(0.into(), None, false))
                 .unwrap();
 
-            if settle_interrupt {
+            if reason == TurnEndReason::Interrupted {
                 store
                     .mutate(|state| state.interrupt_agent(0.into(), None))
                     .unwrap();
@@ -2171,8 +2248,8 @@ mod tests {
             ];
             let wakers = flags.each_ref().map(|flag| waker(flag.clone()));
             let mut waiters = [
-                Box::pin(store.wait_until_idle(0.into())),
-                Box::pin(store.wait_until_idle(0.into())),
+                Box::pin(store.wait_for_turn_end(0.into(), 0.into())),
+                Box::pin(store.wait_for_turn_end(0.into(), 1.into())),
             ];
 
             for (waiter, task_waker) in waiters.iter_mut().zip(&wakers) {
@@ -2182,26 +2259,121 @@ mod tests {
                 );
             }
 
-            if settle_interrupt {
-                store
-                    .mutate(|state| state.settle_interrupt(0.into(), Some(0.into()), &[]))
-                    .unwrap();
-            } else {
-                store
-                    .mutate(|state| state.park(0.into(), Some(0.into())))
-                    .unwrap();
-            }
+            let cursor = match reason {
+                TurnEndReason::Completed => {
+                    store
+                        .mutate(|state| {
+                            state.append_model_response(0.into(), 1.into(), true, &response(&[]))
+                        })
+                        .unwrap();
+                    EventCursor::from(3)
+                }
+                TurnEndReason::Interrupted => {
+                    store
+                        .mutate(|state| state.settle_interrupt(0.into(), Some(1.into()), &[]))
+                        .unwrap();
+                    EventCursor::from(2)
+                }
+            };
 
             for flag in &flags {
                 assert!(flag.0.load(Ordering::Relaxed));
             }
 
-            for (waiter, task_waker) in waiters.iter_mut().zip(&wakers) {
-                assert_eq!(
-                    waiter.as_mut().poll(&mut Context::from_waker(task_waker)),
-                    Poll::Ready(Ok(()))
-                );
+            for waiter in waiters {
+                let turn_end = waiter.now_or_never().unwrap().unwrap();
+                assert_eq!(turn_end, TurnEnd { cursor, reason });
             }
+
+            let snapshot = store.snapshot();
+            assert_eq!(
+                snapshot[&0.into()].events.last().unwrap().payload,
+                EventPayload::TurnEnd(reason)
+            );
+            assert_eq!(snapshot[&0.into()].pending_messages, [queued]);
+            assert!(
+                store
+                    .wait_for_turn_end(0.into(), 2.into())
+                    .now_or_never()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn wait_for_turn_end_is_stable_after_later_activity() {
+        let scheduler = Scheduler::new(0);
+        let store = store(&scheduler);
+
+        store
+            .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
+            .unwrap();
+        store
+            .mutate(|state| state.consume_messages(0.into(), None, true))
+            .unwrap();
+        store
+            .mutate(|state| {
+                state.append_model_response(
+                    0.into(),
+                    0.into(),
+                    false,
+                    &response(&[("async", true)]),
+                )
+            })
+            .unwrap();
+        store
+            .mutate(|state| state.append_model_response(0.into(), 1.into(), true, &response(&[])))
+            .unwrap();
+
+        let turn_end = store
+            .wait_for_turn_end(0.into(), 0.into())
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            turn_end,
+            TurnEnd {
+                cursor: 3.into(),
+                reason: TurnEndReason::Completed,
+            }
+        );
+        assert_eq!(store.snapshot()[&0.into()].unresolved_tool_calls.len(), 1);
+
+        store
+            .mutate(|state| state.append_tool_result(0.into(), &tool_result("async")))
+            .unwrap();
+        store
+            .mutate(|state| state.send_message(0.into(), &message(1)))
+            .unwrap();
+        store
+            .mutate(|state| state.consume_messages(0.into(), Some(4.into()), true))
+            .unwrap();
+        store
+            .mutate(|state| state.interrupt_agent(0.into(), None))
+            .unwrap();
+        store
+            .mutate(|state| state.settle_interrupt(0.into(), Some(5.into()), &[]))
+            .unwrap();
+        store
+            .mutate(|state| state.append_compaction(0.into(), 6.into(), &compaction(6, &[])))
+            .unwrap();
+
+        for (id, cursor, reason) in [
+            (0, 3, TurnEndReason::Completed),
+            (1, 6, TurnEndReason::Interrupted),
+        ] {
+            let turn_end = store
+                .wait_for_turn_end(0.into(), id.into())
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                turn_end,
+                TurnEnd {
+                    cursor: cursor.into(),
+                    reason,
+                }
+            );
         }
     }
 
@@ -2249,7 +2421,7 @@ mod tests {
 
         store
             .mutate(|state| {
-                state.append_model_response(child.id, 0.into(), &response(&[("a", false)]))
+                state.append_model_response(child.id, 0.into(), false, &response(&[("a", false)]))
             })
             .unwrap();
 
@@ -2265,13 +2437,13 @@ mod tests {
 
         store
             .mutate(|state| {
-                state.append_model_response(id, 2.into(), &response(&[("sync", false)]))
+                state.append_model_response(id, 2.into(), false, &response(&[("sync", false)]))
             })
             .unwrap();
 
         assert!(
             store
-                .mutate(|state| state.append_model_response(id, 3.into(), &response(&[])))
+                .mutate(|state| state.append_model_response(id, 3.into(), true, &response(&[])))
                 .is_err()
         );
 
@@ -2298,11 +2470,11 @@ mod tests {
         assert!(!store.state.lock().unwrap().agents[&id].is_idle());
 
         store
-            .mutate(|state| state.consume_messages(id, Some(5.into()), true))
+            .mutate(|state| state.consume_messages(id, Some(6.into()), true))
             .unwrap();
 
         store
-            .mutate(|state| state.park(id, Some(8.into())))
+            .mutate(|state| state.park(id, Some(9.into())))
             .unwrap();
 
         assert!(store.state.lock().unwrap().agents[&id].is_idle());

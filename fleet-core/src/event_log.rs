@@ -1,4 +1,4 @@
-use crate::{Event, EventPayload, ModelOutput};
+use crate::{Event, EventPayload};
 use alloc::{boxed::Box, vec::Vec};
 use core::pin::Pin;
 use futures_util::{TryStream, TryStreamExt as _};
@@ -38,15 +38,8 @@ where
     pub async fn is_turn_finished(&mut self) -> Result<bool, S::Error> {
         for index in 0.. {
             match self.get(index).await?.map(|event| &event.payload) {
-                Some(EventPayload::ModelResponse(response)) => {
-                    let has_tool_calls = response
-                        .output
-                        .iter()
-                        .any(|output| matches!(output, ModelOutput::ToolCall(_)));
-
-                    return Ok(!has_tool_calls);
-                }
                 Some(EventPayload::Compaction(_)) => {}
+                Some(EventPayload::TurnEnd(_)) => return Ok(true),
                 _ => break,
             }
         }
@@ -63,7 +56,11 @@ where
                     ));
                 }
                 Some(EventPayload::Compaction(_)) | None => break,
-                Some(EventPayload::Input(..) | EventPayload::ToolResult(_)) => {}
+                Some(
+                    EventPayload::Input(..)
+                    | EventPayload::ToolResult(_)
+                    | EventPayload::TurnEnd(_),
+                ) => {}
             }
         }
 
@@ -75,8 +72,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        Compaction, ContentBlock, JsonObject, ModelProvenance, ModelReasoning, ModelResponse,
-        ModelUsage, ToolCall, ToolOutput, ToolResult,
+        Compaction, ContentBlock, ModelOutput, ModelProvenance, ModelResponse, ModelUsage,
+        ToolOutput, ToolResult, TurnEndReason,
     };
     use alloc::vec;
     use core::{cell::Cell, fmt, task::Poll};
@@ -134,6 +131,13 @@ mod tests {
                 pending_tool_calls: Vec::new(),
                 usage: USAGE,
             }),
+        }
+    }
+
+    fn turn_end(cursor: u128, reason: TurnEndReason) -> Event {
+        Event {
+            cursor: cursor.into(),
+            payload: EventPayload::TurnEnd(reason),
         }
     }
 
@@ -257,8 +261,12 @@ mod tests {
     }
 
     #[test]
-    fn is_turn_finished_returns_false_without_model_responses() {
-        let cases = [vec![], vec![compaction(3), compaction(2)]];
+    fn is_turn_finished_returns_false_without_turn_end() {
+        let cases = [
+            vec![],
+            vec![compaction(1)],
+            vec![model_response(1, vec![], USAGE)],
+        ];
 
         for events in cases {
             let stream = stream::iter(events.into_iter().map(Ok::<_, fmt::Error>));
@@ -273,22 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn is_turn_finished_returns_true_without_tool_calls() {
-        let outputs = [
-            vec![],
-            vec![ModelOutput::Text("response".into())],
-            vec![
-                ModelOutput::Reasoning(ModelReasoning {
-                    content: Some("reasoning".into()),
-                    redacted_content: None,
-                    attestation: None,
-                }),
-                ModelOutput::Text("response".into()),
-            ],
-        ];
-
-        for output in outputs {
-            let event = model_response(1, output, USAGE);
+    fn is_turn_finished_returns_true_at_turn_end() {
+        for reason in [TurnEndReason::Completed, TurnEndReason::Interrupted] {
+            let event = turn_end(1, reason);
 
             let stream = stream::iter([Ok(event), Err(fmt::Error)]);
 
@@ -302,35 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn is_turn_finished_returns_false_with_tool_calls() {
-        for is_async in [false, true] {
-            let output = vec![
-                ModelOutput::Text("response".into()),
-                ModelOutput::ToolCall(ToolCall {
-                    id: "call-1".into(),
-                    tool: "tool".into(),
-                    is_async,
-                    input: JsonObject::new(),
-                }),
-            ];
-            let event = model_response(1, output, USAGE);
-
-            let stream = stream::iter([Ok(event), Err(fmt::Error)]);
-
-            let mut event_log = EventLog::new(stream);
-
-            futures_executor::block_on(async {
-                let is_turn_finished = event_log.is_turn_finished().await.unwrap();
-                assert!(!is_turn_finished);
-            });
-        }
-    }
-
-    #[test]
     fn is_turn_finished_skips_compactions() {
         let event_a = compaction(4);
         let event_b = compaction(3);
-        let event_c = model_response(2, vec![], USAGE);
+        let event_c = turn_end(2, TurnEndReason::Completed);
 
         let stream = stream::iter([Ok(event_a), Ok(event_b), Ok(event_c), Err(fmt::Error)]);
 
@@ -343,9 +313,9 @@ mod tests {
     }
 
     #[test]
-    fn is_turn_finished_returns_false_after_input_or_tool_result() {
-        for event_a in [input(2), tool_result(2)] {
-            let event_b = model_response(1, vec![], USAGE);
+    fn is_turn_finished_returns_false_after_new_activity() {
+        for event_a in [input(2), tool_result(2), model_response(2, vec![], USAGE)] {
+            let event_b = turn_end(1, TurnEndReason::Completed);
 
             let stream = stream::iter([event_a, event_b].map(Ok::<_, fmt::Error>));
 
@@ -412,12 +382,19 @@ mod tests {
     }
 
     #[test]
-    fn last_token_count_skips_inputs_and_tool_results() {
-        let event_a = input(3);
-        let event_b = tool_result(2);
-        let event_c = model_response(1, vec![], USAGE);
+    fn last_token_count_skips_events_without_usage() {
+        let event_a = input(4);
+        let event_b = tool_result(3);
+        let event_c = turn_end(2, TurnEndReason::Completed);
+        let event_d = model_response(1, vec![], USAGE);
 
-        let stream = stream::iter([Ok(event_a), Ok(event_b), Ok(event_c), Err(fmt::Error)]);
+        let stream = stream::iter([
+            Ok(event_a),
+            Ok(event_b),
+            Ok(event_c),
+            Ok(event_d),
+            Err(fmt::Error),
+        ]);
 
         let mut event_log = EventLog::new(stream);
 

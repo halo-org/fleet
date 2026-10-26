@@ -416,7 +416,7 @@ where
             }
 
             match event.payload {
-                EventPayload::Input(..) => {}
+                EventPayload::Input(..) | EventPayload::TurnEnd(_) => {}
                 EventPayload::ModelResponse(response) => {
                     for output in response.output {
                         if let ModelOutput::ToolCall(tool_call) = output
@@ -889,14 +889,20 @@ where
         let agent_id = agent_role.agent.id;
 
         let result = match model_result {
-            ModelResult::Response(response) => self
-                .store
-                .append_model_response(agent_id, latest_event, &response)
-                .await
-                .map_err(|source| OperationError::AppendModelResponse {
-                    model: agent_role.role.model.name.clone(),
-                    source,
-                }),
+            ModelResult::Response(response) => {
+                let ends_turn = !response
+                    .output
+                    .iter()
+                    .any(|output| matches!(output, ModelOutput::ToolCall(call) if !call.is_async));
+
+                self.store
+                    .append_model_response(agent_id, latest_event, ends_turn, &response)
+                    .await
+                    .map_err(|source| OperationError::AppendModelResponse {
+                        model: agent_role.role.model.name.clone(),
+                        source,
+                    })
+            }
             ModelResult::Compaction(response) => {
                 let compaction = Compaction {
                     last_event: latest_event,

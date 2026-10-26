@@ -170,6 +170,7 @@ where
                         input = compaction.input.clone();
                     }
                 }
+                EventPayload::TurnEnd(_) => {}
             }
         }
 
@@ -188,7 +189,7 @@ mod tests {
     use super::*;
     use crate::{
         Compaction, Configured, ContentBlock, JsonObject, ModelCompaction, ModelProvenance,
-        ModelResponse, ModelUsage,
+        ModelResponse, ModelUsage, TurnEndReason,
     };
     use alloc::vec;
     use core::fmt;
@@ -264,13 +265,17 @@ mod tests {
     #[test]
     fn prepare_orders_input_chronologically() {
         let event_a = input(1, "first");
-        let event_b = input(2, "second");
+        let event_b = Event {
+            cursor: 2.into(),
+            payload: EventPayload::TurnEnd(TurnEndReason::Completed),
+        };
+        let event_c = input(3, "second");
         let expected = [
             ModelInput::User(vec![ContentBlock::Text("first".into())]),
             ModelInput::User(vec![ContentBlock::Text("second".into())]),
         ];
 
-        let events = [event_b, event_a].map(Ok::<_, fmt::Error>);
+        let events = [event_c, event_b, event_a].map(Ok::<_, fmt::Error>);
         let stream = stream::iter(events);
 
         let mut event_log = EventLog::new(stream);

@@ -1,8 +1,9 @@
 use crate::{
-    Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, Model,
-    ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName, ModelResponse,
-    ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName, Tool,
-    ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
+    Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, MessageId,
+    Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName,
+    ModelResponse, ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role,
+    RoleName, Tool, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, TurnEnd,
+    Wake,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
@@ -314,8 +315,9 @@ pub trait RuntimeStore {
 
     /// Settles an agent's interrupt intent.
     ///
-    /// This will atomically clear the agent's interrupt intent, append the provided tool results to
-    /// its event log, and park the agent at the resulting latest event.
+    /// Atomically appends the provided tool results and a [`TurnEnd`](crate::EventPayload::TurnEnd)
+    /// with an [`Interrupted`](crate::TurnEndReason::Interrupted) reason, clears the interrupt
+    /// intent, and parks the agent at the turn end.
     ///
     /// # Errors
     ///
@@ -402,7 +404,9 @@ pub trait RuntimeStore {
 
     /// Appends a model response to the agent's event log.
     ///
-    /// The response supersedes any live preview for `expected_latest_event`.
+    /// The response supersedes any live preview for `expected_latest_event`. When `ends_turn` is
+    /// true, atomically appends a [`TurnEnd`](crate::EventPayload::TurnEnd) with a
+    /// [`Completed`](crate::TurnEndReason::Completed) reason after the response.
     ///
     /// # Errors
     ///
@@ -419,6 +423,7 @@ pub trait RuntimeStore {
         &self,
         agent_id: AgentId,
         expected_latest_event: EventCursor,
+        ends_turn: bool,
         response: &ModelResponse,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -580,21 +585,24 @@ pub trait ClientStore {
         message: &Message,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Waits until the agent is idle.
+    /// Waits for the turn containing the message to end.
     ///
-    /// An agent is idle when it is parked and has no pending messages, interrupt intent, or
-    /// unresolved tool calls.
+    /// Repeated waits return the same turn end, even after later activity. Other pending messages
+    /// and outstanding async tool calls do not delay completion.
     ///
     /// # Errors
     ///
     /// Returns errors with the following error kinds:
     ///
     /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the agent does not exist.
+    /// - [`MessageNotFound`](ClientStoreErrorKind::MessageNotFound) when the message does not exist
+    ///   for the agent.
     /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
-    fn wait_until_idle(
+    fn wait_for_turn_end(
         &self,
         agent_id: AgentId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+        message_id: MessageId,
+    ) -> impl Future<Output = Result<TurnEnd, Self::Error>> + Send;
 }
 
 /// The kind of error returned by a client store provider.
@@ -606,6 +614,8 @@ pub enum ClientStoreErrorKind {
     IdempotencyConflict,
     /// The agent does not exist.
     AgentNotFound,
+    /// The message does not exist.
+    MessageNotFound,
     /// An error not covered by any other kind.
     Other,
 }
@@ -854,9 +864,10 @@ macro_rules! impl_runtime_store_for_pointer {
                 &self,
                 agent_id: AgentId,
                 expected_latest_event: EventCursor,
+                ends_turn: bool,
                 response: &ModelResponse,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-                (**self).append_model_response(agent_id, expected_latest_event, response)
+                (**self).append_model_response(agent_id, expected_latest_event, ends_turn, response)
             }
 
             fn append_compaction(
@@ -923,11 +934,12 @@ macro_rules! impl_client_store_for_pointer {
                 (**self).send_message(idempotency_key, agent_id, message)
             }
 
-            fn wait_until_idle(
+            fn wait_for_turn_end(
                 &self,
                 agent_id: AgentId,
-            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-                (**self).wait_until_idle(agent_id)
+                message_id: MessageId,
+            ) -> impl Future<Output = Result<TurnEnd, Self::Error>> + Send {
+                (**self).wait_for_turn_end(agent_id, message_id)
             }
         }
     };
@@ -1018,6 +1030,7 @@ impl fmt::Display for ClientStoreErrorKind {
             Self::Conflict => f.write_str("conflict"),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::AgentNotFound => f.write_str("agent not found"),
+            Self::MessageNotFound => f.write_str("message not found"),
             Self::Other => f.write_str("other error"),
         }
     }
