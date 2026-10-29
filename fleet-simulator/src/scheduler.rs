@@ -1,6 +1,6 @@
 use crate::Probability;
 use core::{
-    future,
+    future, mem,
     ops::RangeBounds,
     pin::{Pin, pin},
     sync::atomic::{AtomicBool, Ordering},
@@ -39,6 +39,7 @@ enum SchedulerPolicy {
 struct State {
     rng: Rng,
     policy: SchedulerPolicy,
+    suspensions_enabled: bool,
     faults_enabled: bool,
     suspensions: BTreeMap<u64, PendingSuspension>,
     next_suspension_id: u64,
@@ -88,7 +89,7 @@ struct Suspension<'scheduler> {
 impl Scheduler {
     /// Creates a scheduler from the given seed.
     ///
-    /// Faults start enabled. The seed selects the release policy.
+    /// Suspensions and faults start enabled. The seed selects the release policy.
     #[must_use]
     pub fn new(seed: u64) -> Self {
         let mut rng = Rng::with_seed(seed);
@@ -139,6 +140,19 @@ impl Scheduler {
 
             Poll::Pending
         }))
+    }
+
+    /// Disables simulated suspensions and wakes suspended operations.
+    pub fn disable_suspensions(&self) {
+        let suspensions = {
+            let mut state = self.state.lock().expect("never poisoned");
+            state.suspensions_enabled = false;
+            mem::take(&mut state.suspensions)
+        };
+
+        for suspension in suspensions.into_values() {
+            suspension.waker.wake();
+        }
     }
 
     /// Stops sampling new faults.
@@ -359,6 +373,7 @@ impl State {
         Self {
             rng,
             policy,
+            suspensions_enabled: true,
             faults_enabled: true,
             suspensions: BTreeMap::new(),
             next_suspension_id: 0,
@@ -406,6 +421,10 @@ impl Future for Suspension<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let mut state = this.scheduler.state.lock().expect("never poisoned");
+
+        if !state.suspensions_enabled {
+            return Poll::Ready(());
+        }
 
         let Some(id) = this.id else {
             let id = state.next_suspension_id;
@@ -456,6 +475,7 @@ mod tests {
         pin::pin,
         task::{Context, Poll, Waker},
     };
+    use futures_util::FutureExt as _;
 
     impl Scheduler {
         const fn with_policy(seed: u64, policy: SchedulerPolicy) -> Self {
@@ -630,6 +650,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn disable_suspensions_preserves_faults() {
+        let scheduler = Scheduler::new(0);
+        let config = TrySuspendConfig {
+            suspend: Probability::ALWAYS,
+            error: Probability::ALWAYS,
+        };
+
+        scheduler.disable_suspensions();
+
+        let error = scheduler
+            .try_suspend(&config, || "injected")
+            .now_or_never()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, "injected");
+        assert!(!scheduler.release());
+    }
+
+    #[test]
+    fn disable_suspensions_wakes_pending_operations() {
+        let scheduler = Scheduler::new(0);
+        let wake = Arc::new(RunWaker {
+            notified: AtomicBool::new(false),
+        });
+        let waker = Waker::from(wake.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut suspensions = [scheduler.suspend(), scheduler.suspend()];
+
+        for suspension in &mut suspensions {
+            assert_eq!(Pin::new(suspension).poll(&mut cx), Poll::Pending);
+        }
+
+        scheduler.disable_suspensions();
+
+        assert!(wake.notified.load(Ordering::Relaxed));
+        assert!(!scheduler.release());
+
+        for suspension in &mut suspensions {
+            assert_eq!(Pin::new(suspension).poll(&mut cx), Poll::Ready(()));
+        }
+    }
+
+    #[test]
+    fn disable_suspensions_preserves_pending_futures() {
+        let scheduler = Scheduler::new(0);
+        let mut cx = Context::from_waker(Waker::noop());
+        let config = WrapConfig {
+            suspend_before: Probability::ALWAYS,
+            suspend_after: Probability::ALWAYS,
+            error: Probability::NEVER,
+            error_after: Probability::NEVER,
+        };
+
+        scheduler.disable_suspensions();
+
+        let future = future::pending::<Result<(), _>>();
+        let mut future = pin!(scheduler.wrap(&config, || "injected", future));
+
+        assert_eq!(future.as_mut().poll(&mut cx), Poll::Pending);
+        assert!(!scheduler.release());
     }
 
     #[test]
