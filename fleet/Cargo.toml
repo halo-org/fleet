@@ -17,6 +17,8 @@ futures-util = { workspace = true, features = ["std"] }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "tokio"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]

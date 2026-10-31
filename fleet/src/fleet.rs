@@ -40,7 +40,6 @@ struct State {
     tools: ToolsSimulator<'static>,
 }
 
-#[expect(dead_code, reason = "HTTP routes are not implemented yet")]
 impl Fleet {
     /// Creates a fleet with simulated providers.
     #[must_use]
@@ -172,6 +171,7 @@ impl Fleet {
     /// # Errors
     ///
     /// Returns an error if the agent or message is missing, or the store fails.
+    #[expect(dead_code, reason = "turn queries are not implemented yet")]
     pub async fn wait_for_turn_end(
         &self,
         agent_id: AgentId,

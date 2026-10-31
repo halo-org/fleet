@@ -1,19 +1,11 @@
 use crate::Fleet;
-use core::{convert::Infallible, error::Error, net::SocketAddr, pin::pin, time::Duration};
+use core::{net::SocketAddr, pin::pin, time::Duration};
 use futures_util::future::{self, Either};
-use http_body_util::combinators::UnsyncBoxBody;
-use hyper::{
-    Request, Response, StatusCode,
-    body::{Bytes, Incoming},
-    service,
-};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::graceful::GracefulShutdown,
 };
 use std::io;
-
-type ResponseBody = UnsyncBoxBody<Bytes, Box<dyn Error + Send + Sync>>;
 
 /// Runs the HTTP server.
 pub async fn run(
@@ -63,7 +55,10 @@ async fn serve(
         let fleet = fleet.clone();
 
         tokio::spawn(async move {
-            let service = service::service_fn(move |request| handle_request(&fleet, request));
+            let service = hyper::service::service_fn(move |request| {
+                crate::api::handle(fleet.clone(), request)
+            });
+
             let connection = http.serve_connection(io, service);
 
             if let Err(error) = watcher.watch(connection).await {
@@ -71,13 +66,4 @@ async fn serve(
             }
         });
     }
-}
-
-fn handle_request(
-    _fleet: &Fleet,
-    _request: Request<Incoming>,
-) -> impl Future<Output = Result<Response<ResponseBody>, Infallible>> + use<> {
-    let mut response = Response::new(ResponseBody::default());
-    *response.status_mut() = StatusCode::NOT_FOUND;
-    future::ready(Ok(response))
 }

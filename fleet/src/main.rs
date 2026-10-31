@@ -1,12 +1,12 @@
 //! An AI agent harness.
 
+mod api;
 mod error_handler;
 mod fleet;
 mod idle_handler;
 mod server;
 mod signals;
 
-#[expect(unused_imports, reason = "HTTP routes are not implemented yet")]
 pub(crate) use self::{
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
