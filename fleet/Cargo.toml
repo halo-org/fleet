@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 fleet-core.workspace = true
+fleet-simulator.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "tokio"] }
-tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

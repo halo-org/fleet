@@ -5,12 +5,12 @@ use futures_util::{
 };
 use std::sync::LazyLock;
 
-static SHUTDOWN: LazyLock<Shared<BoxFuture<'static, ()>>> =
+static SHUTDOWN_SIGNAL: LazyLock<Shared<BoxFuture<'static, ()>>> =
     LazyLock::new(|| wait_for_signal().boxed().shared());
 
-/// Waits until shutdown is requested.
-pub async fn wait() {
-    SHUTDOWN.clone().await;
+/// Waits for a shutdown signal.
+pub async fn wait_for_shutdown() {
+    SHUTDOWN_SIGNAL.clone().await;
 }
 
 async fn wait_for_signal() {
