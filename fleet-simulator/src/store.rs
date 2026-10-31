@@ -7,9 +7,9 @@ use core::{
 use fastrand::Rng;
 use fleet_core::{
     Agent, AgentId, AgentParent, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event,
-    EventCursor, EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse,
-    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd,
-    TurnEndReason, Wake,
+    EventCursor, EventDirection, EventPayload, Message, MessageId, MessageMode, ModelOutput,
+    ModelResponse, ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult,
+    TurnEnd, TurnEndReason, Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -621,6 +621,61 @@ impl RuntimeStore for StorePartition<'_, '_> {
 
 impl ClientStore for StoreSimulator<'_> {
     type Error = ClientError;
+
+    fn events(
+        &self,
+        agent_id: AgentId,
+        from: Option<EventCursor>,
+        until: Option<EventCursor>,
+        direction: EventDirection,
+    ) -> impl Stream<Item = Result<Event, Self::Error>> + Send {
+        #[expect(clippy::significant_drop_tightening, reason = "false positive")]
+        let items_future = async move {
+            let state = self.state.lock().expect("never poisoned");
+
+            let Some(agent) = state.agents.get(&agent_id) else {
+                return Vec::from([Err(ClientError::agent_not_found("agent does not exist"))]);
+            };
+
+            let (lower, upper) = match direction {
+                EventDirection::Forward => (from, until),
+                EventDirection::Backward => (until, from),
+            };
+            let start = lower.map_or_default(|lower| {
+                agent.events.partition_point(|event| event.cursor <= lower)
+            });
+            let end = upper.map_or(agent.events.len(), |upper| {
+                agent.events.partition_point(|event| event.cursor < upper)
+            });
+            let mut items = agent
+                .events
+                .get(start..end)
+                .unwrap_or_default()
+                .iter()
+                .cloned()
+                .map(Ok)
+                .collect::<Vec<_>>();
+
+            if direction == EventDirection::Backward {
+                items.reverse();
+            }
+
+            if let Some(position) = self
+                .scheduler
+                .sample_fault_position(self.config.events_error, 0..=items.len())
+            {
+                items.truncate(position);
+                items.push(Err(ClientError::random()));
+            }
+
+            items
+        };
+
+        stream::once(items_future).flat_map(|items| {
+            self.scheduler
+                .suspend_stream(self.config.events_suspend, items)
+        })
+    }
 
     async fn create_agent(
         &self,
@@ -1676,11 +1731,11 @@ mod tests {
         task::Context,
     };
     use fleet_core::{
-        Configured, ContentBlock, JsonObject, ModelCompaction, ModelInput, ModelProvenance,
-        ModelUsage, ToolCall, ToolOutput,
+        Configured, ContentBlock, Error as _, JsonObject, ModelCompaction, ModelInput,
+        ModelProvenance, ModelUsage, ToolCall, ToolOutput,
     };
     use futures_util::{
-        FutureExt as _,
+        FutureExt as _, TryStreamExt as _,
         task::{ArcWake, waker},
     };
     use std::sync::Arc;
@@ -1837,6 +1892,125 @@ mod tests {
             .unwrap();
 
         store
+    }
+
+    #[test]
+    fn events_reads_in_both_directions_with_exclusive_bounds() {
+        let scheduler = Scheduler::new(0);
+        scheduler.disable_faults();
+        let store = populated_store(&scheduler);
+        let cursors = [10, 20, 30, 40];
+
+        store.mutate(|state| {
+            state.agents.get_mut(&0.into()).unwrap().events = cursors
+                .map(|cursor| Event {
+                    cursor: cursor.into(),
+                    payload: EventPayload::Input(cursor.into(), Vec::new()),
+                })
+                .into();
+        });
+
+        for (from, until, direction, expected) in [
+            (None, None, EventDirection::Forward, vec![10, 20, 30, 40]),
+            (None, None, EventDirection::Backward, vec![40, 30, 20, 10]),
+            (Some(10), Some(40), EventDirection::Forward, vec![20, 30]),
+            (Some(40), Some(10), EventDirection::Backward, vec![30, 20]),
+            (None, Some(30), EventDirection::Forward, vec![10, 20]),
+            (None, Some(20), EventDirection::Backward, vec![40, 30]),
+            (Some(25), None, EventDirection::Forward, vec![30, 40]),
+            (Some(25), None, EventDirection::Backward, vec![20, 10]),
+            (Some(40), Some(10), EventDirection::Forward, vec![]),
+            (Some(10), Some(40), EventDirection::Backward, vec![]),
+            (Some(20), Some(20), EventDirection::Forward, vec![]),
+        ] {
+            let events = scheduler
+                .run(
+                    store
+                        .events(
+                            0.into(),
+                            from.map(Into::into),
+                            until.map(Into::into),
+                            direction,
+                        )
+                        .try_collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let cursors: Vec<u128> = events.iter().map(|event| event.cursor.into()).collect();
+
+            assert_eq!(cursors, expected);
+        }
+    }
+
+    #[test]
+    fn events_excludes_appends_after_reading_starts() {
+        let scheduler = Scheduler::new(0);
+        scheduler.disable_faults();
+        let store = populated_store(&scheduler);
+        let events = store.events(0.into(), None, None, EventDirection::Forward);
+        let mut events = pin!(events);
+
+        scheduler.run(async {
+            let event = events.try_next().await.unwrap().unwrap();
+            assert_eq!(event.cursor, 0.into());
+
+            store
+                .mutate(|state| state.append_tool_result(0.into(), &tool_result("a")))
+                .unwrap();
+
+            let events = events.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].cursor, 1.into());
+            assert_eq!(store.snapshot()[&0.into()].events.len(), 3);
+        });
+    }
+
+    #[test]
+    fn events_distinguishes_empty_and_missing_agents() {
+        let scheduler = Scheduler::new(0);
+        scheduler.disable_faults();
+        let store = store(&scheduler);
+        store
+            .mutate(|state| state.create_agent(&agent(0), None))
+            .unwrap();
+
+        scheduler.run(async {
+            let events = store
+                .events(0.into(), None, None, EventDirection::Forward)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(events, []);
+
+            let events = store.events(1.into(), None, None, EventDirection::Forward);
+            let mut events = pin!(events);
+
+            let error = events.try_next().await.unwrap_err();
+            assert_eq!(error.kind(), ClientStoreErrorKind::AgentNotFound);
+            assert_eq!(events.try_next().await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn events_stops_after_injected_errors() {
+        let scheduler = Scheduler::new(0);
+        let mut store = populated_store(&scheduler);
+        store.config.events_error = Probability::ALWAYS;
+
+        scheduler.run(async {
+            let events = store.events(0.into(), None, None, EventDirection::Forward);
+            let mut events = pin!(events);
+
+            let error = loop {
+                match events.try_next().await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => panic!("expected an injected error"),
+                    Err(error) => break error,
+                }
+            };
+
+            assert_eq!(error.kind(), ClientStoreErrorKind::Other);
+            assert_eq!(events.try_next().await.unwrap(), None);
+        });
     }
 
     #[test]

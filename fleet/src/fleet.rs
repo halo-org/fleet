@@ -1,13 +1,14 @@
 use crate::{ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, ClientStoreErrorKind, Message, MessageId, TurnEnd,
+    Agent, AgentId, ClientStore as _, ClientStoreErrorKind, Event, EventCursor, EventDirection,
+    Message, MessageId, TurnEnd,
 };
 use fleet_simulator::{
     ModelsSimulator, RolesSimulator, Scheduler, Simulator, StoreSimulator, StoreSimulatorError,
     ToolsSimulator,
 };
-use futures_util::future;
+use futures_util::{Stream, TryStreamExt as _, future};
 use std::sync::{Arc, LazyLock};
 
 static SCHEDULER: LazyLock<Scheduler> = LazyLock::new(|| {
@@ -101,6 +102,24 @@ impl Fleet {
     /// Waits for shutdown to begin.
     pub async fn wait_for_shutdown(&self) {
         self.state.idle_handler.wait_for_shutdown().await;
+    }
+
+    /// Streams events in the given direction.
+    ///
+    /// # Errors
+    ///
+    /// Yields an error if the agent is missing or the store fails.
+    pub fn events(
+        &self,
+        agent_id: AgentId,
+        from: Option<EventCursor>,
+        until: Option<EventCursor>,
+        direction: EventDirection,
+    ) -> impl Stream<Item = Result<Event, FleetError>> + Send {
+        self.state
+            .store
+            .events(agent_id, from, until, direction)
+            .map_err(FleetError::Store)
     }
 
     /// Creates an agent with an optional initial message.

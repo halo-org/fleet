@@ -545,6 +545,15 @@ pub enum EventPayload {
     TurnEnd(TurnEndReason),
 }
 
+/// The direction to read events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EventDirection {
+    /// Reads from oldest to newest.
+    Forward,
+    /// Reads from newest to oldest.
+    Backward,
+}
+
 // === Wakes ===
 
 /// A wake event from a store.

@@ -1,6 +1,7 @@
 //! An AI agent harness.
 
 mod api;
+mod api_types;
 mod error_handler;
 mod fleet;
 mod idle_handler;
@@ -8,6 +9,10 @@ mod server;
 mod signals;
 
 pub(crate) use self::{
+    api_types::{
+        ApiEvent, ApiMessage, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery,
+        InterruptAgentRequest,
+    },
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
