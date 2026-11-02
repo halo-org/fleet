@@ -63,6 +63,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-kit"
+version = "0.0.0"
+dependencies = [
+ "fleet-core",
+]
+
+[[package]]
 name = "fleet-simulator"
 version = "0.0.0"
 dependencies = [
