@@ -946,7 +946,7 @@ where
             return Ok(Outcome::Obsolete);
         };
 
-        let role = self
+        let mut role = self
             .roles
             .get(&agent.role.name)
             .await
@@ -957,6 +957,16 @@ where
             .ok_or_else(|| OperationError::RoleNotFound {
                 role: agent.role.name.clone(),
             })?;
+
+        role.extensions = crate::apply_extension_parameters(
+            role.extensions,
+            &role.parameters,
+            &agent.role.config,
+        )
+        .map_err(|source| OperationError::ApplyExtensionParameters {
+            role: agent.role.name.clone(),
+            source,
+        })?;
 
         Ok(Outcome::Completed(AgentRole { agent, role }))
     }
@@ -1011,6 +1021,7 @@ where
             model: agent_role.role.model.clone(),
             system_prompt: agent_role.role.system_prompt.clone(),
             tools,
+            role_extensions: agent_role.role.extensions.clone(),
         })
     }
 
@@ -1175,6 +1186,7 @@ impl AgentRole {
             tool,
             agent_id: self.agent.id,
             call_id: call.id.clone(),
+            role_extensions: self.role.extensions.clone(),
         }))
     }
 }

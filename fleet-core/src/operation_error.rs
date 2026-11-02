@@ -53,6 +53,10 @@ pub enum OperationError<S, R, M, T> {
         role: RoleName,
         source: ParametersError,
     },
+    ApplyExtensionParameters {
+        role: RoleName,
+        source: ParametersError,
+    },
     GenerateModelResponse {
         model: ModelName,
         source: M,
@@ -131,6 +135,12 @@ impl<S, R, M, T> fmt::Display for OperationError<S, R, M, T> {
             Self::ApplyToolParameters { role, source: _ } => {
                 write!(f, r#"could not apply tool parameters for role "{role}""#)
             }
+            Self::ApplyExtensionParameters { role, source: _ } => {
+                write!(
+                    f,
+                    r#"could not apply extension parameters for role "{role}""#,
+                )
+            }
             Self::GenerateModelResponse { model, source: _ } => {
                 write!(f, r#"could not generate response using model "{model}""#)
             }
@@ -203,7 +213,8 @@ where
             | Self::ExecuteTool { source, .. }
             | Self::ProduceInterruptedToolOutput { source, .. } => Some(source),
             Self::ApplyModelParameters { source, .. }
-            | Self::ApplyToolParameters { source, .. } => Some(source),
+            | Self::ApplyToolParameters { source, .. }
+            | Self::ApplyExtensionParameters { source, .. } => Some(source),
             Self::RoleNotFound { .. }
             | Self::ModelNotFound { .. }
             | Self::ToolNotFound { .. }

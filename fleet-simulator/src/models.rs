@@ -635,10 +635,10 @@ fn generate_models(rng: &mut Rng, config: &ModelsSimulatorConfig) -> BTreeMap<Mo
             let compaction_threshold = context_window.saturating_sub(context_window.div_ceil(4));
             let model = Model {
                 name: format!("model-{index}").into(),
-                config_schema: JsonObject::new(),
                 context_window: u32::try_from(context_window).expect("context window fits u32"),
                 compaction_threshold: u32::try_from(compaction_threshold)
                     .expect("compaction threshold fits u32"),
+                extensions: JsonObject::new(),
             };
 
             (model.name.clone(), model)
@@ -829,6 +829,7 @@ mod tests {
                 is_async: true,
                 input_schema: tools::input_schema(),
             }],
+            role_extensions: JsonObject::new(),
         }
     }
 

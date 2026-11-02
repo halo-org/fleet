@@ -142,8 +142,8 @@ fn generate_prompts(
         .map(|index| {
             let prompt = Prompt {
                 name: format!("prompt-{index}").into(),
-                config_schema: JsonObject::new(),
                 input_schema: JsonObject::new(),
+                extensions: JsonObject::new(),
             };
 
             let output = (0..rng.usize(config.output_count))

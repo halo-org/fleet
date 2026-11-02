@@ -293,12 +293,12 @@ fn generate_tools(rng: &mut Rng, config: &ToolsSimulatorConfig) -> BTreeMap<Tool
                     .sample(rng)
                     .then(|| content::generate_text(rng, &config.description_content)),
                 is_async: config.is_async.sample(rng),
-                config_schema: JsonObject::new(),
                 input_schema: input_schema(),
                 output_schema: config
                     .supports_structured_output
                     .sample(rng)
                     .then(|| string_object_schema("output")),
+                extensions: JsonObject::new(),
             };
 
             (
@@ -369,6 +369,7 @@ mod tests {
             },
             agent_id: 0.into(),
             call_id: id.to_string().into(),
+            role_extensions: JsonObject::new(),
         }
     }
 

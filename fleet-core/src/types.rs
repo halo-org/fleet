@@ -14,24 +14,15 @@ pub type JsonObject = serde_json::Map<String, JsonValue>;
 pub struct Agent {
     /// The unique identifier of this agent.
     pub id: AgentId,
-    /// The parent of this agent.
-    pub parent: AgentParent,
     /// The role that defines this agent's behavior.
     pub role: Configured<RoleName>,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The ID of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(u128);
-
-/// The parent of an agent.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum AgentParent {
-    /// The user.
-    User,
-    /// Another agent.
-    Agent(AgentId, ToolCallId),
-}
 
 /// The runtime state of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,6 +56,8 @@ pub struct Role {
     ///
     /// When `None`, the model's default compaction settings are used.
     pub compaction: Option<RoleCompaction>,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The name of a role.
@@ -73,12 +66,14 @@ pub struct RoleName(String);
 
 /// The metadata of a role parameter.
 ///
-/// A role parameter enables runtime overrides of model and tool config. Agents can be created with
-/// values for the role parameters of its role.
+/// A role parameter enables runtime overrides of model config, tool config and role extensions.
+/// Agents can be created with values for the parameters of their role.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoleParameter {
     /// Where the value of this role parameter should replace.
     pub target: RoleParameterTarget,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The name of a role parameter.
@@ -88,10 +83,12 @@ pub struct RoleParameterName(String);
 /// Where a role parameter should override.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RoleParameterTarget {
-    /// A model's config path.
+    /// A path in the model's config.
     Model(Vec<String>),
-    /// A tool's config path.
+    /// A path in a tool's config.
     Tool(ToolAlias, Vec<String>),
+    /// A path in the role's extensions.
+    Extensions(Vec<String>),
 }
 
 /// The compaction settings of a role.
@@ -114,12 +111,12 @@ pub struct RoleCompaction {
 pub struct Model {
     /// The name that uniquely identifies this model.
     pub name: ModelName,
-    /// The JSON schema for this model's config.
-    pub config_schema: JsonObject,
     /// The maximum number of combined input and output tokens this model supports.
     pub context_window: u32,
     /// The recommended number of input tokens at which to compact this model's input.
     pub compaction_threshold: u32,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The name of a model.
@@ -135,6 +132,8 @@ pub struct ModelContext {
     pub system_prompt: String,
     /// The tools available to the model.
     pub tools: Vec<ModelTool>,
+    /// The role's extensions.
+    pub role_extensions: JsonObject,
 }
 
 /// A model's view of a tool.
@@ -304,14 +303,14 @@ pub struct Tool {
     pub description: Option<String>,
     /// Whether the model may continue without waiting for this tool’s result.
     pub is_async: bool,
-    /// The JSON schema for this tool's config.
-    pub config_schema: JsonObject,
     /// The JSON schema for this tool's input.
     pub input_schema: JsonObject,
     /// The JSON schema for this tool's structured output.
     ///
     /// When `None`, the tool doesn't support structured output.
     pub output_schema: Option<JsonObject>,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The name of a tool.
@@ -333,6 +332,8 @@ pub struct ToolContext {
     pub agent_id: AgentId,
     /// The tool call ID.
     pub call_id: ToolCallId,
+    /// The role's extensions.
+    pub role_extensions: JsonObject,
 }
 
 /// A request to call a tool.
@@ -387,10 +388,10 @@ pub struct ToolOutput {
 pub struct Prompt {
     /// The name that uniquely identifies this prompt.
     pub name: PromptName,
-    /// The JSON schema for this prompt's config.
-    pub config_schema: JsonObject,
     /// The JSON schema for this prompt's input.
     pub input_schema: JsonObject,
+    /// Additional data not interpreted by core.
+    pub extensions: JsonObject,
 }
 
 /// The name of a prompt.
@@ -533,7 +534,7 @@ pub struct EventCursor(u128);
 /// An agent event payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventPayload {
-    /// Input from the agent's parent.
+    /// Input sent to the agent.
     Input(MessageId, Vec<ContentBlock>),
     /// Response from the agent.
     ModelResponse(ModelResponse),

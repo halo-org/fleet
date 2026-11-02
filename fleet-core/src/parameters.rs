@@ -19,6 +19,7 @@ pub enum ParametersError {
 enum Target<'a> {
     Model,
     Tool(&'a ToolAlias),
+    Extensions,
 }
 
 struct Binding<'a> {
@@ -44,8 +45,16 @@ pub fn apply_tool_parameters(
     apply_parameters(config, parameters, values, Target::Tool(tool))
 }
 
+pub fn apply_extension_parameters(
+    extensions: JsonObject,
+    parameters: &BTreeMap<RoleParameterName, RoleParameter>,
+    values: &JsonObject,
+) -> Result<JsonObject, ParametersError> {
+    apply_parameters(extensions, parameters, values, Target::Extensions)
+}
+
 fn apply_parameters(
-    mut config: JsonObject,
+    mut object: JsonObject,
     parameters: &BTreeMap<RoleParameterName, RoleParameter>,
     values: &JsonObject,
     target: Target<'_>,
@@ -54,7 +63,8 @@ fn apply_parameters(
         .iter()
         .filter_map(|(name, parameter)| {
             let path = match (target, &parameter.target) {
-                (Target::Model, RoleParameterTarget::Model(path)) => path,
+                (Target::Model, RoleParameterTarget::Model(path))
+                | (Target::Extensions, RoleParameterTarget::Extensions(path)) => path,
                 (Target::Tool(alias), RoleParameterTarget::Tool(tool, path)) if alias == tool => {
                     path
                 }
@@ -87,7 +97,7 @@ fn apply_parameters(
 
         match (binding.path.split_last(), value) {
             (Some((key, parents)), value) => {
-                let mut target = &mut config;
+                let mut target = &mut object;
 
                 for parent in parents {
                     let value = target
@@ -103,7 +113,7 @@ fn apply_parameters(
 
                 merge(target.entry(key.clone()).or_insert(JsonValue::Null), value);
             }
-            (None, JsonValue::Object(value)) => merge_object(&mut config, value),
+            (None, JsonValue::Object(value)) => merge_object(&mut object, value),
             (None, _) => {
                 return Err(ParametersError::NonObjectRoot {
                     parameter: binding.name.clone(),
@@ -112,7 +122,7 @@ fn apply_parameters(
         }
     }
 
-    Ok(config)
+    Ok(object)
 }
 
 fn merge(target: &mut JsonValue, value: &JsonValue) {
@@ -137,7 +147,7 @@ impl fmt::Display for ParametersError {
             ),
             Self::NonObjectRoot { parameter } => write!(
                 f,
-                "parameter {parameter} must be an object when targeting the whole config",
+                "parameter {parameter} must be an object when targeting the root",
             ),
         }
     }
@@ -165,6 +175,7 @@ mod tests {
             "settings".into(),
             RoleParameter {
                 target: RoleParameterTarget::Model(vec![]),
+                extensions: JsonObject::new(),
             },
         )]);
 
@@ -202,6 +213,7 @@ mod tests {
             "setting".into(),
             RoleParameter {
                 target: RoleParameterTarget::Model(vec!["value".into()]),
+                extensions: JsonObject::new(),
             },
         )]);
 
@@ -238,6 +250,7 @@ mod tests {
             "format".into(),
             RoleParameter {
                 target: RoleParameterTarget::Model(vec!["options".into(), "format".into()]),
+                extensions: JsonObject::new(),
             },
         )]);
 
@@ -268,6 +281,7 @@ mod tests {
             "limit".into(),
             RoleParameter {
                 target: RoleParameterTarget::Model(vec!["limit".into()]),
+                extensions: JsonObject::new(),
             },
         )]);
 
@@ -284,24 +298,74 @@ mod tests {
     }
 
     #[test]
+    fn apply_extension_parameters_deep_merges_objects() {
+        let parameters = BTreeMap::from([(
+            "workspace".into(),
+            RoleParameter {
+                target: RoleParameterTarget::Extensions(vec!["workspace".into()]),
+                extensions: JsonObject::new(),
+            },
+        )]);
+
+        let extensions = object(json!({
+            "workspace": {
+                "machine": "development",
+                "config": {
+                    "directory": "/repo",
+                    "read_only": false,
+                },
+            },
+        }));
+        let values = object(json!({
+            "workspace": {
+                "config": {
+                    "directory": "/project",
+                },
+            },
+        }));
+        let expected = object(json!({
+            "workspace": {
+                "machine": "development",
+                "config": {
+                    "directory": "/project",
+                    "read_only": false,
+                },
+            },
+        }));
+
+        let result = apply_extension_parameters(extensions, &parameters, &values).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
     fn apply_parameters_uses_matching_targets() {
         let parameters = BTreeMap::from([
             (
                 "model_limit".into(),
                 RoleParameter {
                     target: RoleParameterTarget::Model(vec!["limit".into()]),
+                    extensions: JsonObject::new(),
                 },
             ),
             (
                 "search_limit".into(),
                 RoleParameter {
                     target: RoleParameterTarget::Tool("search".into(), vec!["limit".into()]),
+                    extensions: JsonObject::new(),
                 },
             ),
             (
                 "fetch_limit".into(),
                 RoleParameter {
                     target: RoleParameterTarget::Tool("fetch".into(), vec!["limit".into()]),
+                    extensions: JsonObject::new(),
+                },
+            ),
+            (
+                "extension_limit".into(),
+                RoleParameter {
+                    target: RoleParameterTarget::Extensions(vec!["limit".into()]),
+                    extensions: JsonObject::new(),
                 },
             ),
         ]);
@@ -311,6 +375,7 @@ mod tests {
             "model_limit": 10,
             "search_limit": 20,
             "fetch_limit": 30,
+            "extension_limit": 40,
         }));
 
         let result = apply_model_parameters(config.clone(), &parameters, &values).unwrap();
@@ -330,11 +395,20 @@ mod tests {
             })),
         );
 
-        let result = apply_tool_parameters(&"fetch".into(), config, &parameters, &values).unwrap();
+        let result =
+            apply_tool_parameters(&"fetch".into(), config.clone(), &parameters, &values).unwrap();
         assert_eq!(
             result,
             object(json!({
                 "limit": 30,
+            })),
+        );
+
+        let result = apply_extension_parameters(config, &parameters, &values).unwrap();
+        assert_eq!(
+            result,
+            object(json!({
+                "limit": 40,
             })),
         );
     }
@@ -353,12 +427,14 @@ mod tests {
                     "setting_a".into(),
                     RoleParameter {
                         target: RoleParameterTarget::Model(vec!["options".into()]),
+                        extensions: JsonObject::new(),
                     },
                 ),
                 (
                     "setting_b".into(),
                     RoleParameter {
                         target: RoleParameterTarget::Model(path),
+                        extensions: JsonObject::new(),
                     },
                 ),
             ]);
@@ -383,6 +459,7 @@ mod tests {
             "settings".into(),
             RoleParameter {
                 target: RoleParameterTarget::Model(vec![]),
+                extensions: JsonObject::new(),
             },
         )]);
 

@@ -210,6 +210,7 @@ mod tests {
             },
             system_prompt: "system prompt".into(),
             tools: Vec::new(),
+            role_extensions: JsonObject::new(),
         }
     }
 

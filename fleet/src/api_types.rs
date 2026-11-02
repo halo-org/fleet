@@ -1,7 +1,7 @@
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
-    Agent, AgentParent, Compaction, Configured, ContentBlock, Event, EventDirection, EventPayload,
-    JsonObject, Message, MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance,
+    Agent, Compaction, Configured, ContentBlock, Event, EventDirection, EventPayload, JsonObject,
+    Message, MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance,
     ModelReasoning, ModelResponse, ModelUsage, ToolCall, ToolOutput, ToolResult, TurnEndReason,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
@@ -272,7 +272,7 @@ pub struct ApiEvent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEventPayload {
-    /// Input from the agent's parent.
+    /// Input sent to the agent.
     Input {
         /// The message ID.
         #[serde(serialize_with = "serialize_id")]
@@ -335,11 +335,11 @@ impl CreateAgentRequest {
         } = self;
         let agent = Agent {
             id: id.into(),
-            parent: AgentParent::User,
             role: Configured {
                 name: role.into(),
                 config: parameters,
             },
+            extensions: JsonObject::new(),
         };
 
         (agent, message.map(Into::into))
@@ -666,9 +666,9 @@ mod tests {
         let message = message.unwrap();
 
         assert_eq!(agent.id, u128::MAX.into());
-        assert_eq!(agent.parent, AgentParent::User);
         assert_eq!(agent.role.name.as_ref(), "assistant");
         assert_eq!(agent.role.config["language"], "english");
+        assert!(agent.extensions.is_empty());
         assert_eq!(message.id, 2.into());
         assert_eq!(message.mode, MessageMode::Steer);
         assert_eq!(message.content, vec![ContentBlock::Text("Hello".into())]);

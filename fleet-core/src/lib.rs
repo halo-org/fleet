@@ -21,7 +21,9 @@ pub(crate) use self::{
     event_log::EventLog,
     model_request::ModelRequest,
     operation_error::OperationError,
-    parameters::{ParametersError, apply_model_parameters, apply_tool_parameters},
+    parameters::{
+        ParametersError, apply_extension_parameters, apply_model_parameters, apply_tool_parameters,
+    },
     runtime_error::RuntimeError,
     signal::{PrioritySignal, Signal, SignalReceiver, SignalSender, signal_channel},
 };
@@ -33,13 +35,13 @@ pub use self::{
     },
     runtime::run,
     types::{
-        Agent, AgentId, AgentParent, AgentState, Compaction, Configured, ContentBlock, Event,
-        EventCursor, EventDirection, EventPayload, JsonObject, JsonValue, Message, MessageId,
-        MessageMode, Model, ModelCompaction, ModelCompactionResponse, ModelContext,
-        ModelContinuation, ModelInput, ModelName, ModelOutput, ModelProvenance, ModelReasoning,
-        ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext,
-        PromptName, PromptOutput, PromptResponse, Role, RoleCompaction, RoleName, RoleParameter,
-        RoleParameterName, RoleParameterTarget, Tool, ToolAlias, ToolCall, ToolCallId, ToolContext,
-        ToolName, ToolOutput, ToolResult, TurnEnd, TurnEndReason, Wake,
+        Agent, AgentId, AgentState, Compaction, Configured, ContentBlock, Event, EventCursor,
+        EventDirection, EventPayload, JsonObject, JsonValue, Message, MessageId, MessageMode,
+        Model, ModelCompaction, ModelCompactionResponse, ModelContext, ModelContinuation,
+        ModelInput, ModelName, ModelOutput, ModelProvenance, ModelReasoning, ModelResponse,
+        ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext, PromptName, PromptOutput,
+        PromptResponse, Role, RoleCompaction, RoleName, RoleParameter, RoleParameterName,
+        RoleParameterTarget, Tool, ToolAlias, ToolCall, ToolCallId, ToolContext, ToolName,
+        ToolOutput, ToolResult, TurnEnd, TurnEndReason, Wake,
     },
 };

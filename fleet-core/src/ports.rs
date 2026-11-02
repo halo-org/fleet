@@ -549,13 +549,9 @@ pub trait ClientStore {
     ///
     /// Returns errors with the following error kinds:
     ///
-    /// - [`Conflict`](ClientStoreErrorKind::Conflict) when:
-    ///   - the agent ID is already in use.
-    ///   - the parent has no unresolved tool call matching the provided call ID.
+    /// - [`Conflict`](ClientStoreErrorKind::Conflict) when the agent ID is already in use.
     /// - [`IdempotencyConflict`](ClientStoreErrorKind::IdempotencyConflict) when the key was used
     ///   with a different method or arguments.
-    /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the parent agent does not
-    ///   exist.
     /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
     fn create_agent(
         &self,

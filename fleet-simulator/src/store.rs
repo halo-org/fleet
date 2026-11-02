@@ -6,10 +6,10 @@ use core::{
 };
 use fastrand::Rng;
 use fleet_core::{
-    Agent, AgentId, AgentParent, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event,
-    EventCursor, EventDirection, EventPayload, Message, MessageId, MessageMode, ModelOutput,
-    ModelResponse, ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult,
-    TurnEnd, TurnEndReason, Wake,
+    Agent, AgentId, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event, EventCursor,
+    EventDirection, EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse,
+    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd,
+    TurnEndReason, Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -785,19 +785,6 @@ impl State {
     ) -> Result<(), ClientError> {
         if self.agents.contains_key(&agent.id) {
             return Err(ClientError::conflict("agent already exists"));
-        }
-
-        if let AgentParent::Agent(parent_id, call_id) = &agent.parent {
-            let parent = self
-                .agents
-                .get(parent_id)
-                .ok_or_else(|| ClientError::agent_not_found("parent agent does not exist"))?;
-
-            if !parent.unresolved_tool_calls.contains_key(call_id) {
-                return Err(ClientError::conflict(
-                    "parent has no matching unresolved tool call",
-                ));
-            }
         }
 
         let mut agent_record = AgentRecord::new(agent.clone());
@@ -1768,11 +1755,11 @@ mod tests {
     fn agent(id: u128) -> Agent {
         Agent {
             id: id.into(),
-            parent: AgentParent::User,
             role: Configured {
                 name: "test".into(),
                 config: JsonObject::new(),
             },
+            extensions: JsonObject::new(),
         }
     }
 
@@ -2018,8 +2005,7 @@ mod tests {
         let scheduler = Scheduler::new(0);
         let store = populated_store(&scheduler);
 
-        let mut child = agent(7);
-        child.parent = AgentParent::Agent(0.into(), "a".into());
+        let other_agent = agent(7);
 
         let queued = Message {
             id: 3.into(),
@@ -2028,16 +2014,21 @@ mod tests {
         };
 
         store
-            .mutate(|state| state.create_agent(&child, Some(&message(9))))
+            .mutate(|state| state.create_agent(&other_agent, Some(&message(9))))
             .unwrap();
 
         store
-            .mutate(|state| state.consume_messages(child.id, None, true))
+            .mutate(|state| state.consume_messages(other_agent.id, None, true))
             .unwrap();
 
         store
             .mutate(|state| {
-                state.append_model_response(child.id, 0.into(), false, &response(&[("a", false)]))
+                state.append_model_response(
+                    other_agent.id,
+                    0.into(),
+                    false,
+                    &response(&[("a", false)]),
+                )
             })
             .unwrap();
 
@@ -2093,9 +2084,9 @@ mod tests {
         );
 
         assert_eq!(
-            snapshot[&child.id],
+            snapshot[&other_agent.id],
             AgentSnapshot {
-                agent: child.clone(),
+                agent: other_agent.clone(),
                 events: vec![
                     Event {
                         cursor: 0.into(),
@@ -2582,22 +2573,6 @@ mod tests {
         let scheduler = Scheduler::new(0);
         let store = populated_store(&scheduler);
         let id = AgentId::from(0);
-        let mut child = agent(1);
-        child.parent = AgentParent::Agent(id, "a".into());
-
-        store
-            .mutate(|state| state.create_agent(&child, Some(&message(0))))
-            .unwrap();
-
-        store
-            .mutate(|state| state.consume_messages(child.id, None, true))
-            .unwrap();
-
-        store
-            .mutate(|state| {
-                state.append_model_response(child.id, 0.into(), false, &response(&[("a", false)]))
-            })
-            .unwrap();
 
         assert!(
             store
@@ -2734,6 +2709,48 @@ mod tests {
         );
 
         drop(state);
+    }
+
+    #[test]
+    fn create_agent_preserves_extensions_and_checks_retries() {
+        let scheduler = Scheduler::new(0);
+        scheduler.disable_faults();
+        let store = store(&scheduler);
+        let partition = store.add_partition();
+        let mut agent = agent(0);
+        agent.extensions = JsonObject::from_iter([(
+            "app".into(),
+            JsonObject::from_iter([("title".into(), "Example".into())]).into(),
+        )]);
+
+        scheduler.run(async {
+            store.create_agent("create", &agent, None).await.unwrap();
+            store.create_agent("create", &agent, None).await.unwrap();
+
+            let saved = store
+                .partition(partition)
+                .agent(agent.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved, agent);
+
+            agent.extensions.clear();
+
+            let error = store
+                .create_agent("create", &agent, None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), ClientStoreErrorKind::IdempotencyConflict);
+
+            let loaded = store
+                .partition(partition)
+                .agent(agent.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(loaded, saved);
+        });
     }
 
     #[test]
