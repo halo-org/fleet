@@ -12,7 +12,8 @@ workspace = true
 
 [dependencies]
 fleet-core.workspace = true
-fleet-simulator.workspace = true
+fleet-kit.workspace = true
+fleet-simulator = { workspace = true, features = ["queries"] }
 form_urlencoded = { workspace = true, features = ["alloc"] }
 futures-util = { workspace = true, features = ["std"] }
 http-body-util.workspace = true

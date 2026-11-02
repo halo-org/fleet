@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::{
         Compaction, ContentBlock, ModelOutput, ModelProvenance, ModelResponse, ModelUsage,
-        ToolOutput, ToolResult, TurnEndReason,
+        ToolOutput, ToolResult, TurnEnd,
     };
     use alloc::vec;
     use core::{cell::Cell, fmt, task::Poll};
@@ -134,10 +134,10 @@ mod tests {
         }
     }
 
-    fn turn_end(cursor: u128, reason: TurnEndReason) -> Event {
+    fn turn_end(cursor: u128, payload: TurnEnd) -> Event {
         Event {
             cursor: cursor.into(),
-            payload: EventPayload::TurnEnd(reason),
+            payload: EventPayload::TurnEnd(payload),
         }
     }
 
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn is_turn_finished_returns_true_at_turn_end() {
-        for reason in [TurnEndReason::Completed, TurnEndReason::Interrupted] {
-            let event = turn_end(1, reason);
+        for payload in [TurnEnd::Completed, TurnEnd::Interrupted] {
+            let event = turn_end(1, payload);
 
             let stream = stream::iter([Ok(event), Err(fmt::Error)]);
 
@@ -300,7 +300,7 @@ mod tests {
     fn is_turn_finished_skips_compactions() {
         let event_a = compaction(4);
         let event_b = compaction(3);
-        let event_c = turn_end(2, TurnEndReason::Completed);
+        let event_c = turn_end(2, TurnEnd::Completed);
 
         let stream = stream::iter([Ok(event_a), Ok(event_b), Ok(event_c), Err(fmt::Error)]);
 
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn is_turn_finished_returns_false_after_new_activity() {
         for event_a in [input(2), tool_result(2), model_response(2, vec![], USAGE)] {
-            let event_b = turn_end(1, TurnEndReason::Completed);
+            let event_b = turn_end(1, TurnEnd::Completed);
 
             let stream = stream::iter([event_a, event_b].map(Ok::<_, fmt::Error>));
 
@@ -385,7 +385,7 @@ mod tests {
     fn last_token_count_skips_events_without_usage() {
         let event_a = input(4);
         let event_b = tool_result(3);
-        let event_c = turn_end(2, TurnEndReason::Completed);
+        let event_c = turn_end(2, TurnEnd::Completed);
         let event_d = model_response(1, vec![], USAGE);
 
         let stream = stream::iter([

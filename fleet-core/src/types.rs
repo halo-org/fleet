@@ -498,16 +498,7 @@ pub struct Compaction {
 
 /// The end of a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TurnEnd {
-    /// The cursor of the event that ended the turn.
-    pub cursor: EventCursor,
-    /// Why the turn ended.
-    pub reason: TurnEndReason,
-}
-
-/// Why a turn ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TurnEndReason {
+pub enum TurnEnd {
     /// The agent finished responding.
     Completed,
     /// The turn was interrupted.
@@ -543,16 +534,7 @@ pub enum EventPayload {
     /// Replacement model context and pending tool calls.
     Compaction(Compaction),
     /// The end of a turn.
-    TurnEnd(TurnEndReason),
-}
-
-/// The direction to read events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EventDirection {
-    /// Reads from oldest to newest.
-    Forward,
-    /// Reads from newest to oldest.
-    Backward,
+    TurnEnd(TurnEnd),
 }
 
 // === Wakes ===

@@ -3,7 +3,7 @@
 use core::assert_matches;
 use fleet_core::{
     Agent, ClientStore as _, ClientStoreErrorKind, Configured, ContentBlock, Error as _,
-    EventPayload, JsonObject, Message, MessageMode, ModelOutput, RoleName, TurnEndReason,
+    EventPayload, JsonObject, Message, MessageMode, ModelOutput, RoleName, TurnEnd,
 };
 use fleet_simulator::{Scheduler, Simulator};
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,7 +87,7 @@ fn run_processes_a_message() {
                     assert!(tool_results.insert(&tool_result.call_id));
                 }
                 EventPayload::Compaction(_) => {}
-                EventPayload::TurnEnd(reason) => assert_eq!(*reason, TurnEndReason::Completed),
+                EventPayload::TurnEnd(turn_end) => assert_eq!(*turn_end, TurnEnd::Completed),
             }
         }
 

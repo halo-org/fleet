@@ -1,15 +1,13 @@
 use crate::{Probability, RandomError, Scheduler, TrySuspendConfig, WrapConfig};
 use core::{
     fmt, mem,
-    ops::Bound,
     task::{Poll, Waker},
 };
 use fastrand::Rng;
 use fleet_core::{
     Agent, AgentId, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event, EventCursor,
-    EventDirection, EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse,
-    ModelResponseChunk, RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd,
-    TurnEndReason, Wake,
+    EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse, ModelResponseChunk,
+    RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd, Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -86,7 +84,7 @@ struct AgentRecord {
     parked_at: Option<EventCursor>,
     interrupt_intent: bool,
     message_cursors: BTreeMap<MessageId, Option<EventCursor>>,
-    turn_ends: BTreeMap<EventCursor, TurnEndReason>,
+    turn_ends: BTreeMap<EventCursor, TurnEnd>,
     tool_call_ids: BTreeSet<ToolCallId>,
     unresolved_tool_calls: BTreeMap<ToolCallId, ToolCallSnapshot>,
     response_stream: Option<ResponseStreamState>,
@@ -138,13 +136,6 @@ struct WakeSubscription<'store, 'sim> {
     is_idle: bool,
 }
 
-struct TurnSubscription<'store, 'sim> {
-    simulator: &'store StoreSimulator<'sim>,
-    id: Option<u64>,
-    agent_id: AgentId,
-    message_id: MessageId,
-}
-
 /// An error returned by [`StoreSimulator`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StoreSimulatorError<K> {
@@ -175,6 +166,7 @@ struct StoreSimulatorConfig {
     create_agent: WrapConfig,
     interrupt_agent: WrapConfig,
     send_message: WrapConfig,
+    #[cfg(feature = "queries")]
     wait_for_turn_end: WrapConfig,
     wakes: TrySuspendConfig,
     wakes_repartition: Probability,
@@ -622,61 +614,6 @@ impl RuntimeStore for StorePartition<'_, '_> {
 impl ClientStore for StoreSimulator<'_> {
     type Error = ClientError;
 
-    fn events(
-        &self,
-        agent_id: AgentId,
-        from: Option<EventCursor>,
-        until: Option<EventCursor>,
-        direction: EventDirection,
-    ) -> impl Stream<Item = Result<Event, Self::Error>> + Send {
-        #[expect(clippy::significant_drop_tightening, reason = "false positive")]
-        let items_future = async move {
-            let state = self.state.lock().expect("never poisoned");
-
-            let Some(agent) = state.agents.get(&agent_id) else {
-                return Vec::from([Err(ClientError::agent_not_found("agent does not exist"))]);
-            };
-
-            let (lower, upper) = match direction {
-                EventDirection::Forward => (from, until),
-                EventDirection::Backward => (until, from),
-            };
-            let start = lower.map_or_default(|lower| {
-                agent.events.partition_point(|event| event.cursor <= lower)
-            });
-            let end = upper.map_or(agent.events.len(), |upper| {
-                agent.events.partition_point(|event| event.cursor < upper)
-            });
-            let mut items = agent
-                .events
-                .get(start..end)
-                .unwrap_or_default()
-                .iter()
-                .cloned()
-                .map(Ok)
-                .collect::<Vec<_>>();
-
-            if direction == EventDirection::Backward {
-                items.reverse();
-            }
-
-            if let Some(position) = self
-                .scheduler
-                .sample_fault_position(self.config.events_error, 0..=items.len())
-            {
-                items.truncate(position);
-                items.push(Err(ClientError::random()));
-            }
-
-            items
-        };
-
-        stream::once(items_future).flat_map(|items| {
-            self.scheduler
-                .suspend_stream(self.config.events_suspend, items)
-        })
-    }
-
     async fn create_agent(
         &self,
         idempotency_key: &str,
@@ -753,24 +690,6 @@ impl ClientStore for StoreSimulator<'_> {
                             },
                         )
                     })
-                },
-            )
-            .await
-    }
-
-    async fn wait_for_turn_end(
-        &self,
-        agent_id: AgentId,
-        message_id: MessageId,
-    ) -> Result<TurnEnd, Self::Error> {
-        self.scheduler
-            .wrap(
-                &self.config.wait_for_turn_end,
-                StoreSimulatorError::random,
-                async {
-                    TurnSubscription::new(self, agent_id, message_id)
-                        .wait()
-                        .await
                 },
             )
             .await
@@ -896,7 +815,7 @@ impl State {
             agent.append_tool_result(result);
         }
 
-        agent.append_event(EventPayload::TurnEnd(TurnEndReason::Interrupted));
+        agent.append_event(EventPayload::TurnEnd(TurnEnd::Interrupted));
         agent.interrupt_intent = false;
         agent.parked_at = agent.latest_event();
 
@@ -1070,7 +989,7 @@ impl State {
         });
 
         if ends_turn {
-            agent.append_event(EventPayload::TurnEnd(TurnEndReason::Completed));
+            agent.append_event(EventPayload::TurnEnd(TurnEnd::Completed));
             self.notify_turn_end(agent_id);
         }
 
@@ -1413,8 +1332,8 @@ impl AgentRecord {
             EventPayload::Input(id, _) => {
                 *self.message_cursors.get_mut(id).expect("message exists") = Some(cursor);
             }
-            EventPayload::TurnEnd(reason) => {
-                self.turn_ends.insert(cursor, *reason);
+            EventPayload::TurnEnd(turn_end) => {
+                self.turn_ends.insert(cursor, *turn_end);
             }
             _ => {}
         }
@@ -1516,82 +1435,6 @@ impl Drop for WakeSubscription<'_, '_> {
     }
 }
 
-impl<'store, 'sim> TurnSubscription<'store, 'sim> {
-    const fn new(
-        simulator: &'store StoreSimulator<'sim>,
-        agent_id: AgentId,
-        message_id: MessageId,
-    ) -> Self {
-        Self {
-            simulator,
-            id: None,
-            agent_id,
-            message_id,
-        }
-    }
-
-    async fn wait(mut self) -> Result<TurnEnd, ClientError> {
-        future::poll_fn(|cx| {
-            let mut state = self.simulator.state.lock().expect("never poisoned");
-
-            let Some(agent) = state.agents.get(&self.agent_id) else {
-                return Poll::Ready(Err(ClientError::agent_not_found("agent does not exist")));
-            };
-
-            let Some(input_cursor) = agent.message_cursors.get(&self.message_id) else {
-                return Poll::Ready(Err(ClientError::message_not_found(
-                    "message does not exist",
-                )));
-            };
-
-            if let Some(input_cursor) = input_cursor
-                && let Some((cursor, reason)) = agent
-                    .turn_ends
-                    .range((Bound::Excluded(*input_cursor), Bound::Unbounded))
-                    .next()
-            {
-                return Poll::Ready(Ok(TurnEnd {
-                    cursor: *cursor,
-                    reason: *reason,
-                }));
-            }
-
-            let id = *self
-                .id
-                .get_or_insert_with(|| state.allocate_subscription_id());
-
-            state
-                .agents
-                .get_mut(&self.agent_id)
-                .expect("agent exists")
-                .turn_subscriptions
-                .insert(id, cx.waker().clone());
-
-            Poll::Pending
-        })
-        .await
-    }
-}
-
-impl Drop for TurnSubscription<'_, '_> {
-    fn drop(&mut self) {
-        let Some(id) = self.id else {
-            return;
-        };
-
-        if let Some(agent) = self
-            .simulator
-            .state
-            .lock()
-            .expect("never poisoned")
-            .agents
-            .get_mut(&self.agent_id)
-        {
-            agent.turn_subscriptions.remove(&id);
-        }
-    }
-}
-
 impl<K> StoreSimulatorError<K> {
     const fn random() -> Self {
         Self {
@@ -1633,12 +1476,6 @@ impl StoreSimulatorError<ClientStoreErrorKind> {
     const fn agent_not_found(message: &'static str) -> Self {
         Self {
             inner: StoreSimulatorErrorInner::Kind(ClientStoreErrorKind::AgentNotFound, message),
-        }
-    }
-
-    const fn message_not_found(message: &'static str) -> Self {
-        Self {
-            inner: StoreSimulatorErrorInner::Kind(ClientStoreErrorKind::MessageNotFound, message),
         }
     }
 }
@@ -1700,11 +1537,207 @@ impl StoreSimulatorConfig {
             create_agent: WrapConfig::generate(rng),
             interrupt_agent: WrapConfig::generate(rng),
             send_message: WrapConfig::generate(rng),
+            #[cfg(feature = "queries")]
             wait_for_turn_end: WrapConfig::generate(rng),
             wakes: TrySuspendConfig::generate(rng),
             events_suspend: Probability::generate(rng),
             events_error: Probability::generate_for_faults(rng),
             wakes_repartition: Probability::generate_for_faults(rng),
+        }
+    }
+}
+
+// TODO: Remove simulator queries when the server uses a proper store.
+#[cfg(feature = "queries")]
+mod queries {
+    use super::{StoreSimulator, StoreSimulatorError, StoreSimulatorErrorInner};
+    use core::{ops::Bound, task::Poll};
+    use fleet_core::{AgentId, Event, EventCursor, MessageId};
+    use fleet_kit::{EventDirection, Queries, QueriesErrorKind, TurnEndEvent};
+    use futures_util::{Stream, StreamExt as _, future, stream};
+
+    struct TurnSubscription<'store, 'sim> {
+        simulator: &'store StoreSimulator<'sim>,
+        id: Option<u64>,
+        agent_id: AgentId,
+        message_id: MessageId,
+    }
+
+    type QueryError = StoreSimulatorError<QueriesErrorKind>;
+
+    impl Queries for StoreSimulator<'_> {
+        type Error = QueryError;
+
+        fn events(
+            &self,
+            agent_id: AgentId,
+            from: Option<EventCursor>,
+            until: Option<EventCursor>,
+            direction: EventDirection,
+        ) -> impl Stream<Item = Result<Event, Self::Error>> + Send {
+            #[expect(clippy::significant_drop_tightening, reason = "false positive")]
+            let items_future = async move {
+                let state = self.state.lock().expect("never poisoned");
+
+                let Some(agent) = state.agents.get(&agent_id) else {
+                    return Vec::from([Err(QueryError::agent_not_found("agent does not exist"))]);
+                };
+
+                let (lower, upper) = match direction {
+                    EventDirection::Forward => (from, until),
+                    EventDirection::Backward => (until, from),
+                };
+                let start = lower.map_or_default(|lower| {
+                    agent.events.partition_point(|event| event.cursor <= lower)
+                });
+                let end = upper.map_or(agent.events.len(), |upper| {
+                    agent.events.partition_point(|event| event.cursor < upper)
+                });
+                let mut items = agent
+                    .events
+                    .get(start..end)
+                    .unwrap_or_default()
+                    .iter()
+                    .cloned()
+                    .map(Ok)
+                    .collect::<Vec<_>>();
+
+                if direction == EventDirection::Backward {
+                    items.reverse();
+                }
+
+                if let Some(position) = self
+                    .scheduler
+                    .sample_fault_position(self.config.events_error, 0..=items.len())
+                {
+                    items.truncate(position);
+                    items.push(Err(QueryError::random()));
+                }
+
+                items
+            };
+
+            stream::once(items_future).flat_map(|items| {
+                self.scheduler
+                    .suspend_stream(self.config.events_suspend, items)
+            })
+        }
+
+        async fn wait_for_turn_end(
+            &self,
+            agent_id: AgentId,
+            message_id: MessageId,
+        ) -> Result<TurnEndEvent, Self::Error> {
+            self.scheduler
+                .wrap(
+                    &self.config.wait_for_turn_end,
+                    StoreSimulatorError::random,
+                    async {
+                        TurnSubscription::new(self, agent_id, message_id)
+                            .wait()
+                            .await
+                    },
+                )
+                .await
+        }
+    }
+
+    impl<'store, 'sim> TurnSubscription<'store, 'sim> {
+        const fn new(
+            simulator: &'store StoreSimulator<'sim>,
+            agent_id: AgentId,
+            message_id: MessageId,
+        ) -> Self {
+            Self {
+                simulator,
+                id: None,
+                agent_id,
+                message_id,
+            }
+        }
+
+        async fn wait(mut self) -> Result<TurnEndEvent, QueryError> {
+            future::poll_fn(|cx| {
+                let mut state = self.simulator.state.lock().expect("never poisoned");
+
+                let Some(agent) = state.agents.get(&self.agent_id) else {
+                    return Poll::Ready(Err(QueryError::agent_not_found("agent does not exist")));
+                };
+
+                let Some(input_cursor) = agent.message_cursors.get(&self.message_id) else {
+                    return Poll::Ready(Err(QueryError::message_not_found(
+                        "message does not exist",
+                    )));
+                };
+
+                if let Some(input_cursor) = input_cursor
+                    && let Some((cursor, payload)) = agent
+                        .turn_ends
+                        .range((Bound::Excluded(*input_cursor), Bound::Unbounded))
+                        .next()
+                {
+                    return Poll::Ready(Ok(TurnEndEvent {
+                        cursor: *cursor,
+                        payload: *payload,
+                    }));
+                }
+
+                let id = *self
+                    .id
+                    .get_or_insert_with(|| state.allocate_subscription_id());
+
+                state
+                    .agents
+                    .get_mut(&self.agent_id)
+                    .expect("agent exists")
+                    .turn_subscriptions
+                    .insert(id, cx.waker().clone());
+
+                Poll::Pending
+            })
+            .await
+        }
+    }
+
+    impl Drop for TurnSubscription<'_, '_> {
+        fn drop(&mut self) {
+            let Some(id) = self.id else {
+                return;
+            };
+
+            if let Some(agent) = self
+                .simulator
+                .state
+                .lock()
+                .expect("never poisoned")
+                .agents
+                .get_mut(&self.agent_id)
+            {
+                agent.turn_subscriptions.remove(&id);
+            }
+        }
+    }
+
+    impl StoreSimulatorError<QueriesErrorKind> {
+        const fn agent_not_found(message: &'static str) -> Self {
+            Self {
+                inner: StoreSimulatorErrorInner::Kind(QueriesErrorKind::AgentNotFound, message),
+            }
+        }
+
+        const fn message_not_found(message: &'static str) -> Self {
+            Self {
+                inner: StoreSimulatorErrorInner::Kind(QueriesErrorKind::MessageNotFound, message),
+            }
+        }
+    }
+
+    impl fleet_core::Error<QueriesErrorKind> for StoreSimulatorError<QueriesErrorKind> {
+        fn kind(&self) -> QueriesErrorKind {
+            match self.inner {
+                StoreSimulatorErrorInner::Random(_) => QueriesErrorKind::Other,
+                StoreSimulatorErrorInner::Kind(kind, _) => kind,
+            }
         }
     }
 }
@@ -1722,7 +1755,7 @@ mod tests {
         ModelProvenance, ModelUsage, ToolCall, ToolOutput,
     };
     use futures_util::{
-        FutureExt as _, TryStreamExt as _,
+        FutureExt as _,
         task::{ArcWake, waker},
     };
     use std::sync::Arc;
@@ -1742,12 +1775,6 @@ mod tests {
             error: Probability::NEVER,
         };
         store.config.wakes_repartition = Probability::NEVER;
-        store.config.wait_for_turn_end = WrapConfig {
-            suspend_before: Probability::NEVER,
-            suspend_after: Probability::NEVER,
-            error: Probability::NEVER,
-            error_after: Probability::NEVER,
-        };
 
         store
     }
@@ -1879,125 +1906,6 @@ mod tests {
             .unwrap();
 
         store
-    }
-
-    #[test]
-    fn events_reads_in_both_directions_with_exclusive_bounds() {
-        let scheduler = Scheduler::new(0);
-        scheduler.disable_faults();
-        let store = populated_store(&scheduler);
-        let cursors = [10, 20, 30, 40];
-
-        store.mutate(|state| {
-            state.agents.get_mut(&0.into()).unwrap().events = cursors
-                .map(|cursor| Event {
-                    cursor: cursor.into(),
-                    payload: EventPayload::Input(cursor.into(), Vec::new()),
-                })
-                .into();
-        });
-
-        for (from, until, direction, expected) in [
-            (None, None, EventDirection::Forward, vec![10, 20, 30, 40]),
-            (None, None, EventDirection::Backward, vec![40, 30, 20, 10]),
-            (Some(10), Some(40), EventDirection::Forward, vec![20, 30]),
-            (Some(40), Some(10), EventDirection::Backward, vec![30, 20]),
-            (None, Some(30), EventDirection::Forward, vec![10, 20]),
-            (None, Some(20), EventDirection::Backward, vec![40, 30]),
-            (Some(25), None, EventDirection::Forward, vec![30, 40]),
-            (Some(25), None, EventDirection::Backward, vec![20, 10]),
-            (Some(40), Some(10), EventDirection::Forward, vec![]),
-            (Some(10), Some(40), EventDirection::Backward, vec![]),
-            (Some(20), Some(20), EventDirection::Forward, vec![]),
-        ] {
-            let events = scheduler
-                .run(
-                    store
-                        .events(
-                            0.into(),
-                            from.map(Into::into),
-                            until.map(Into::into),
-                            direction,
-                        )
-                        .try_collect::<Vec<_>>(),
-                )
-                .unwrap();
-            let cursors: Vec<u128> = events.iter().map(|event| event.cursor.into()).collect();
-
-            assert_eq!(cursors, expected);
-        }
-    }
-
-    #[test]
-    fn events_excludes_appends_after_reading_starts() {
-        let scheduler = Scheduler::new(0);
-        scheduler.disable_faults();
-        let store = populated_store(&scheduler);
-        let events = store.events(0.into(), None, None, EventDirection::Forward);
-        let mut events = pin!(events);
-
-        scheduler.run(async {
-            let event = events.try_next().await.unwrap().unwrap();
-            assert_eq!(event.cursor, 0.into());
-
-            store
-                .mutate(|state| state.append_tool_result(0.into(), &tool_result("a")))
-                .unwrap();
-
-            let events = events.try_collect::<Vec<_>>().await.unwrap();
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0].cursor, 1.into());
-            assert_eq!(store.snapshot()[&0.into()].events.len(), 3);
-        });
-    }
-
-    #[test]
-    fn events_distinguishes_empty_and_missing_agents() {
-        let scheduler = Scheduler::new(0);
-        scheduler.disable_faults();
-        let store = store(&scheduler);
-        store
-            .mutate(|state| state.create_agent(&agent(0), None))
-            .unwrap();
-
-        scheduler.run(async {
-            let events = store
-                .events(0.into(), None, None, EventDirection::Forward)
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            assert_eq!(events, []);
-
-            let events = store.events(1.into(), None, None, EventDirection::Forward);
-            let mut events = pin!(events);
-
-            let error = events.try_next().await.unwrap_err();
-            assert_eq!(error.kind(), ClientStoreErrorKind::AgentNotFound);
-            assert_eq!(events.try_next().await.unwrap(), None);
-        });
-    }
-
-    #[test]
-    fn events_stops_after_injected_errors() {
-        let scheduler = Scheduler::new(0);
-        let mut store = populated_store(&scheduler);
-        store.config.events_error = Probability::ALWAYS;
-
-        scheduler.run(async {
-            let events = store.events(0.into(), None, None, EventDirection::Forward);
-            let mut events = pin!(events);
-
-            let error = loop {
-                match events.try_next().await {
-                    Ok(Some(_)) => {}
-                    Ok(None) => panic!("expected an injected error"),
-                    Err(error) => break error,
-                }
-            };
-
-            assert_eq!(error.kind(), ClientStoreErrorKind::Other);
-            assert_eq!(events.try_next().await.unwrap(), None);
-        });
     }
 
     #[test]
@@ -2378,168 +2286,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.snapshot(), before);
-    }
-
-    #[test]
-    fn wait_for_turn_end_wakes_all_subscribers() {
-        for reason in [TurnEndReason::Completed, TurnEndReason::Interrupted] {
-            let scheduler = Scheduler::new(0);
-            let store = store(&scheduler);
-            let mut queued = message(2);
-            queued.mode = MessageMode::Queue;
-
-            store
-                .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
-                .unwrap();
-            store
-                .mutate(|state| state.send_message(0.into(), &message(1)))
-                .unwrap();
-            store
-                .mutate(|state| state.send_message(0.into(), &queued))
-                .unwrap();
-            store
-                .mutate(|state| state.consume_messages(0.into(), None, false))
-                .unwrap();
-
-            if reason == TurnEndReason::Interrupted {
-                store
-                    .mutate(|state| state.interrupt_agent(0.into(), None))
-                    .unwrap();
-            }
-
-            let flags = [
-                Arc::new(WakeFlag(AtomicBool::new(false))),
-                Arc::new(WakeFlag(AtomicBool::new(false))),
-            ];
-            let wakers = flags.each_ref().map(|flag| waker(flag.clone()));
-            let mut waiters = [
-                Box::pin(store.wait_for_turn_end(0.into(), 0.into())),
-                Box::pin(store.wait_for_turn_end(0.into(), 1.into())),
-            ];
-
-            for (waiter, task_waker) in waiters.iter_mut().zip(&wakers) {
-                assert_eq!(
-                    waiter.as_mut().poll(&mut Context::from_waker(task_waker)),
-                    Poll::Pending
-                );
-            }
-
-            let cursor = match reason {
-                TurnEndReason::Completed => {
-                    store
-                        .mutate(|state| {
-                            state.append_model_response(0.into(), 1.into(), true, &response(&[]))
-                        })
-                        .unwrap();
-                    EventCursor::from(3)
-                }
-                TurnEndReason::Interrupted => {
-                    store
-                        .mutate(|state| state.settle_interrupt(0.into(), Some(1.into()), &[]))
-                        .unwrap();
-                    EventCursor::from(2)
-                }
-            };
-
-            for flag in &flags {
-                assert!(flag.0.load(Ordering::Relaxed));
-            }
-
-            for waiter in waiters {
-                let turn_end = waiter.now_or_never().unwrap().unwrap();
-                assert_eq!(turn_end, TurnEnd { cursor, reason });
-            }
-
-            let snapshot = store.snapshot();
-            assert_eq!(
-                snapshot[&0.into()].events.last().unwrap().payload,
-                EventPayload::TurnEnd(reason)
-            );
-            assert_eq!(snapshot[&0.into()].pending_messages, [queued]);
-            assert!(
-                store
-                    .wait_for_turn_end(0.into(), 2.into())
-                    .now_or_never()
-                    .is_none()
-            );
-        }
-    }
-
-    #[test]
-    fn wait_for_turn_end_is_stable_after_later_activity() {
-        let scheduler = Scheduler::new(0);
-        let store = store(&scheduler);
-
-        store
-            .mutate(|state| state.create_agent(&agent(0), Some(&message(0))))
-            .unwrap();
-        store
-            .mutate(|state| state.consume_messages(0.into(), None, true))
-            .unwrap();
-        store
-            .mutate(|state| {
-                state.append_model_response(
-                    0.into(),
-                    0.into(),
-                    false,
-                    &response(&[("async", true)]),
-                )
-            })
-            .unwrap();
-        store
-            .mutate(|state| state.append_model_response(0.into(), 1.into(), true, &response(&[])))
-            .unwrap();
-
-        let turn_end = store
-            .wait_for_turn_end(0.into(), 0.into())
-            .now_or_never()
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            turn_end,
-            TurnEnd {
-                cursor: 3.into(),
-                reason: TurnEndReason::Completed,
-            }
-        );
-        assert_eq!(store.snapshot()[&0.into()].unresolved_tool_calls.len(), 1);
-
-        store
-            .mutate(|state| state.append_tool_result(0.into(), &tool_result("async")))
-            .unwrap();
-        store
-            .mutate(|state| state.send_message(0.into(), &message(1)))
-            .unwrap();
-        store
-            .mutate(|state| state.consume_messages(0.into(), Some(4.into()), true))
-            .unwrap();
-        store
-            .mutate(|state| state.interrupt_agent(0.into(), None))
-            .unwrap();
-        store
-            .mutate(|state| state.settle_interrupt(0.into(), Some(5.into()), &[]))
-            .unwrap();
-        store
-            .mutate(|state| state.append_compaction(0.into(), 6.into(), &compaction(6, &[])))
-            .unwrap();
-
-        for (id, cursor, reason) in [
-            (0, 3, TurnEndReason::Completed),
-            (1, 6, TurnEndReason::Interrupted),
-        ] {
-            let turn_end = store
-                .wait_for_turn_end(0.into(), id.into())
-                .now_or_never()
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                turn_end,
-                TurnEnd {
-                    cursor: cursor.into(),
-                    reason,
-                }
-            );
-        }
     }
 
     #[test]

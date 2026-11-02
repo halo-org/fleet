@@ -1,9 +1,8 @@
 use crate::{
-    Agent, AgentId, AgentState, Compaction, Event, EventCursor, EventDirection, JsonObject,
-    Message, MessageId, Model, ModelCompactionResponse, ModelContext, ModelContinuation,
-    ModelInput, ModelName, ModelResponse, ModelResponseChunk, Prompt, PromptContext, PromptName,
-    PromptResponse, Role, RoleName, Tool, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput,
-    ToolResult, TurnEnd, Wake,
+    Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, Model,
+    ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName, ModelResponse,
+    ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName, Tool,
+    ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
@@ -315,9 +314,9 @@ pub trait RuntimeStore {
 
     /// Settles an agent's interrupt intent.
     ///
-    /// Atomically appends the provided tool results and a [`TurnEnd`](crate::EventPayload::TurnEnd)
-    /// with an [`Interrupted`](crate::TurnEndReason::Interrupted) reason, clears the interrupt
-    /// intent, and parks the agent at the turn end.
+    /// Atomically appends the provided tool results and an
+    /// [`Interrupted`](crate::TurnEnd::Interrupted) turn end, clears the interrupt intent, and
+    /// parks the agent at the turn end.
     ///
     /// # Errors
     ///
@@ -405,8 +404,8 @@ pub trait RuntimeStore {
     /// Appends a model response to the agent's event log.
     ///
     /// The response supersedes any live preview for `expected_latest_event`. When `ends_turn` is
-    /// true, atomically appends a [`TurnEnd`](crate::EventPayload::TurnEnd) with a
-    /// [`Completed`](crate::TurnEndReason::Completed) reason after the response.
+    /// true, atomically appends a [`Completed`](crate::TurnEnd::Completed) turn end after the
+    /// response.
     ///
     /// # Errors
     ///
@@ -517,29 +516,6 @@ pub trait ClientStore {
     /// The error type returned by this provider.
     type Error: crate::Error<ClientStoreErrorKind> + 'static;
 
-    /// Streams events in the given direction.
-    ///
-    /// Both bounds are exclusive. When `from` is `None`, reading starts at the oldest event for
-    /// [`Forward`](EventDirection::Forward) or the newest for
-    /// [`Backward`](EventDirection::Backward). When `until` is `None`, reading continues to the
-    /// opposite end of the log. The stream does not wait for new events.
-    ///
-    /// # Errors
-    ///
-    /// Yields errors with the following error kinds:
-    ///
-    /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the agent does not exist.
-    /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
-    ///
-    /// An error terminates the stream.
-    fn events(
-        &self,
-        agent_id: AgentId,
-        from: Option<EventCursor>,
-        until: Option<EventCursor>,
-        direction: EventDirection,
-    ) -> impl Stream<Item = Result<Event, Self::Error>> + Send;
-
     /// Creates an agent with an optional initial message.
     ///
     /// The agent starts parked with an empty event log. If provided, the message is added to its
@@ -603,25 +579,6 @@ pub trait ClientStore {
         agent_id: AgentId,
         message: &Message,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    /// Waits for the turn containing the message to end.
-    ///
-    /// Repeated waits return the same turn end, even after later activity. Other pending messages
-    /// and outstanding async tool calls do not delay completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns errors with the following error kinds:
-    ///
-    /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the agent does not exist.
-    /// - [`MessageNotFound`](ClientStoreErrorKind::MessageNotFound) when the message does not exist
-    ///   for the agent.
-    /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
-    fn wait_for_turn_end(
-        &self,
-        agent_id: AgentId,
-        message_id: MessageId,
-    ) -> impl Future<Output = Result<TurnEnd, Self::Error>> + Send;
 }
 
 /// The kind of error returned by a client store provider.
@@ -633,8 +590,6 @@ pub enum ClientStoreErrorKind {
     IdempotencyConflict,
     /// The agent does not exist.
     AgentNotFound,
-    /// The message does not exist.
-    MessageNotFound,
     /// An error not covered by any other kind.
     Other,
 }
@@ -926,16 +881,6 @@ macro_rules! impl_client_store_for_pointer {
         {
             type Error = T::Error;
 
-            fn events(
-                &self,
-                agent_id: AgentId,
-                from: Option<EventCursor>,
-                until: Option<EventCursor>,
-                direction: EventDirection,
-            ) -> impl Stream<Item = Result<Event, Self::Error>> + Send {
-                (**self).events(agent_id, from, until, direction)
-            }
-
             fn create_agent(
                 &self,
                 idempotency_key: &str,
@@ -961,14 +906,6 @@ macro_rules! impl_client_store_for_pointer {
                 message: &Message,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
                 (**self).send_message(idempotency_key, agent_id, message)
-            }
-
-            fn wait_for_turn_end(
-                &self,
-                agent_id: AgentId,
-                message_id: MessageId,
-            ) -> impl Future<Output = Result<TurnEnd, Self::Error>> + Send {
-                (**self).wait_for_turn_end(agent_id, message_id)
             }
         }
     };
@@ -1059,7 +996,6 @@ impl fmt::Display for ClientStoreErrorKind {
             Self::Conflict => f.write_str("conflict"),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::AgentNotFound => f.write_str("agent not found"),
-            Self::MessageNotFound => f.write_str("message not found"),
             Self::Other => f.write_str("other error"),
         }
     }

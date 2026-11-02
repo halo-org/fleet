@@ -1,9 +1,10 @@
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
-    Agent, Compaction, Configured, ContentBlock, Event, EventDirection, EventPayload, JsonObject,
-    Message, MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance,
-    ModelReasoning, ModelResponse, ModelUsage, ToolCall, ToolOutput, ToolResult, TurnEndReason,
+    Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
+    MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
+    ModelResponse, ModelUsage, ToolCall, ToolOutput, ToolResult, TurnEnd,
 };
+use fleet_kit::EventDirection;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
 
 // === Requests ===
@@ -246,10 +247,10 @@ pub struct ApiCompaction {
 
 // === Turns ===
 
-/// Why a turn ended.
+/// The end of a turn.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ApiTurnEndReason {
+pub enum ApiTurnEnd {
     /// The agent finished responding.
     Completed,
     /// The turn was interrupted.
@@ -289,7 +290,7 @@ pub enum ApiEventPayload {
     /// The end of a turn.
     TurnEnd {
         /// Why the turn ended.
-        reason: ApiTurnEndReason,
+        reason: ApiTurnEnd,
     },
 }
 
@@ -561,11 +562,11 @@ impl From<Compaction> for ApiCompaction {
     }
 }
 
-impl From<TurnEndReason> for ApiTurnEndReason {
-    fn from(reason: TurnEndReason) -> Self {
-        match reason {
-            TurnEndReason::Completed => Self::Completed,
-            TurnEndReason::Interrupted => Self::Interrupted,
+impl From<TurnEnd> for ApiTurnEnd {
+    fn from(turn_end: TurnEnd) -> Self {
+        match turn_end {
+            TurnEnd::Completed => Self::Completed,
+            TurnEnd::Interrupted => Self::Interrupted,
         }
     }
 }
@@ -590,8 +591,8 @@ impl From<EventPayload> for ApiEventPayload {
             EventPayload::ModelResponse(response) => Self::ModelResponse(response.into()),
             EventPayload::ToolResult(result) => Self::ToolResult(result.into()),
             EventPayload::Compaction(compaction) => Self::Compaction(compaction.into()),
-            EventPayload::TurnEnd(reason) => Self::TurnEnd {
-                reason: reason.into(),
+            EventPayload::TurnEnd(turn_end) => Self::TurnEnd {
+                reason: turn_end.into(),
             },
         }
     }
@@ -888,13 +889,13 @@ mod tests {
         let value = serde_json::to_value(ApiEvent::from(event)).unwrap();
         assert_eq!(value["payload"], payload["input"][2]);
 
-        for (reason, name) in [
-            (TurnEndReason::Completed, "completed"),
-            (TurnEndReason::Interrupted, "interrupted"),
+        for (turn_end, name) in [
+            (TurnEnd::Completed, "completed"),
+            (TurnEnd::Interrupted, "interrupted"),
         ] {
             let event = Event {
                 cursor: 22.into(),
-                payload: EventPayload::TurnEnd(reason),
+                payload: EventPayload::TurnEnd(turn_end),
             };
             let value = serde_json::to_value(ApiEvent::from(event)).unwrap();
 

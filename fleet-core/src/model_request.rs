@@ -189,7 +189,7 @@ mod tests {
     use super::*;
     use crate::{
         Compaction, Configured, ContentBlock, JsonObject, ModelCompaction, ModelProvenance,
-        ModelResponse, ModelUsage, TurnEndReason,
+        ModelResponse, ModelUsage, TurnEnd,
     };
     use alloc::vec;
     use core::fmt;
@@ -268,7 +268,7 @@ mod tests {
         let event_a = input(1, "first");
         let event_b = Event {
             cursor: 2.into(),
-            payload: EventPayload::TurnEnd(TurnEndReason::Completed),
+            payload: EventPayload::TurnEnd(TurnEnd::Completed),
         };
         let event_c = input(3, "second");
         let expected = [

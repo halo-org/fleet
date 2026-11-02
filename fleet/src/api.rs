@@ -4,6 +4,7 @@ use crate::{
 };
 use core::{convert::Infallible, error::Error};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
+use fleet_kit::QueriesErrorKind;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited, combinators::UnsyncBoxBody};
 use hyper::{
@@ -308,28 +309,41 @@ impl ApiError {
                 ClientStoreErrorKind::AgentNotFound => {
                     (StatusCode::NOT_FOUND, "agent_not_found", "Agent not found")
                 }
-                ClientStoreErrorKind::MessageNotFound => (
+                ClientStoreErrorKind::Other => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error",
+                ),
+            },
+            Self::Fleet(FleetError::Query(error)) => match error.kind() {
+                QueriesErrorKind::AgentNotFound => {
+                    (StatusCode::NOT_FOUND, "agent_not_found", "Agent not found")
+                }
+                QueriesErrorKind::MessageNotFound => (
                     StatusCode::NOT_FOUND,
                     "message_not_found",
                     "Message not found",
                 ),
-                ClientStoreErrorKind::Other => {
-                    eprintln!("HTTP request failed: {error}");
-                    let mut source = error.source();
-
-                    while let Some(error) = source {
-                        eprintln!("Caused by: {error}");
-                        source = error.source();
-                    }
-
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "Internal server error",
-                    )
-                }
+                QueriesErrorKind::Other => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error",
+                ),
             },
         };
+
+        if status == StatusCode::INTERNAL_SERVER_ERROR
+            && let Self::Fleet(error) = &self
+        {
+            eprintln!("HTTP request failed: {error}");
+            let mut source = error.source();
+
+            while let Some(error) = source {
+                eprintln!("Caused by: {error}");
+                source = error.source();
+            }
+        }
+
         let mut response = json_response(
             status,
             &ErrorResponse {

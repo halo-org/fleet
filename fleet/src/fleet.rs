@@ -1,9 +1,9 @@
 use crate::{ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, ClientStoreErrorKind, Event, EventCursor, EventDirection,
-    Message, MessageId, TurnEnd,
+    Agent, AgentId, ClientStore as _, ClientStoreErrorKind, Event, EventCursor, Message, MessageId,
 };
+use fleet_kit::{EventDirection, Queries as _, QueriesErrorKind, TurnEndEvent};
 use fleet_simulator::{
     ModelsSimulator, RolesSimulator, Scheduler, Simulator, StoreSimulator, StoreSimulatorError,
     ToolsSimulator,
@@ -31,6 +31,8 @@ pub enum FleetError {
     ShuttingDown,
     /// A store operation failed.
     Store(StoreSimulatorError<ClientStoreErrorKind>),
+    /// A query failed.
+    Query(StoreSimulatorError<QueriesErrorKind>),
 }
 
 struct State {
@@ -119,7 +121,7 @@ impl Fleet {
         self.state
             .store
             .events(agent_id, from, until, direction)
-            .map_err(FleetError::Store)
+            .map_err(FleetError::Query)
     }
 
     /// Creates an agent with an optional initial message.
@@ -195,12 +197,12 @@ impl Fleet {
         &self,
         agent_id: AgentId,
         message_id: MessageId,
-    ) -> Result<TurnEnd, FleetError> {
+    ) -> Result<TurnEndEvent, FleetError> {
         self.state
             .store
             .wait_for_turn_end(agent_id, message_id)
             .await
-            .map_err(FleetError::Store)
+            .map_err(FleetError::Query)
     }
 
     async fn mutate<F>(
@@ -240,6 +242,7 @@ impl fmt::Display for FleetError {
         match self {
             Self::ShuttingDown => f.write_str("shutting down"),
             Self::Store(_) => f.write_str("store operation failed"),
+            Self::Query(_) => f.write_str("query failed"),
         }
     }
 }
@@ -249,6 +252,7 @@ impl core::error::Error for FleetError {
         match self {
             Self::ShuttingDown => None,
             Self::Store(source) => Some(source),
+            Self::Query(source) => Some(source),
         }
     }
 }
