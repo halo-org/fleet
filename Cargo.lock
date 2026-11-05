@@ -98,6 +98,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-wasm"
+version = "0.0.0"
+dependencies = [
+ "fleet-core",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
