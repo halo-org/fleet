@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["fleet", "fleet-core", "fleet-kit", "fleet-simulator"]
+members = ["fleet", "fleet-core", "fleet-kit", "fleet-simulator", "fleet-store"]
 
 [workspace.package]
 edition = "2024"
@@ -68,6 +68,7 @@ use_debug = "warn"
 fleet-core.path = "fleet-core"
 fleet-kit.path = "fleet-kit"
 fleet-simulator.path = "fleet-simulator"
+fleet-store.path = "fleet-store"
 
 fastrand = { version = "2.5.0", default-features = false }
 form_urlencoded = { version = "1.2.2", default-features = false }
