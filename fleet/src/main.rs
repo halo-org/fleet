@@ -7,11 +7,13 @@ mod fleet;
 mod idle_handler;
 mod server;
 mod signals;
+mod subscription;
 
 pub(crate) use self::{
     api_types::{
-        ApiEvent, ApiMessage, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery,
-        InterruptAgentRequest,
+        ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
+        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiToolCallRecord, CreateAgentRequest,
+        ErrorDetails, ErrorResponse, EventsQuery, InterruptAgentRequest, SinceQuery,
     },
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},

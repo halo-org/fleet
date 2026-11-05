@@ -9,5 +9,9 @@ mod types;
 
 pub use self::{
     ports::{Queries, QueriesErrorKind},
-    types::{EventDirection, TurnEndEvent},
+    types::{
+        AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord,
+        Preview, PreviewContent, QueryResponse, QueryUpdate, Revision, ToolCallRecord,
+        TurnEndEvent, TurnStatus,
+    },
 };

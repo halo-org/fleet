@@ -1,15 +1,18 @@
 use crate::{
-    ApiEvent, ApiMessage, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet,
-    FleetError, InterruptAgentRequest,
+    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiToolCallRecord,
+    CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet, FleetError,
+    InterruptAgentRequest, SinceQuery,
 };
-use core::{convert::Infallible, error::Error};
+use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
-use fleet_kit::QueriesErrorKind;
-use futures_util::{StreamExt as _, TryStreamExt as _};
-use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited, combinators::UnsyncBoxBody};
+use fleet_kit::{QueriesErrorKind, QueryUpdate, Revision};
+use futures_util::Stream;
+use http_body_util::{
+    BodyExt as _, Full, LengthLimitError, Limited, StreamBody, combinators::UnsyncBoxBody,
+};
 use hyper::{
     HeaderMap, Method, Request, Response, StatusCode,
-    body::{Body, Bytes},
+    body::{Body, Bytes, Frame},
     header::{self, HeaderValue},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -53,18 +56,52 @@ where
         (&Method::POST, ["", "agents", agent_id, "interrupts"]) => {
             interrupt_agent(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
-        (&Method::GET, ["", "agents", agent_id, "events"]) => {
-            events(
-                fleet,
-                parse_id(agent_id)?,
-                parse_events_query(parts.uri.query())?,
-            )
-            .await
+        (&Method::GET, ["", "agents", agent_id]) => {
+            agent(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
-        (_, ["", "agents"] | ["", "agents", _, "messages" | "interrupts"]) => {
+        (&Method::GET, ["", "agents", agent_id, "messages"]) => {
+            messages(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
+        }
+        (&Method::GET, ["", "agents", agent_id, "activity"]) => {
+            activity(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
+        }
+        (&Method::GET, ["", "agents", agent_id, "tool-calls"]) => {
+            tool_calls(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
+        }
+        (&Method::GET, ["", "agents", agent_id, "preview", "subscription"]) => {
+            if parts.uri.query().is_some_and(|query| !query.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "Subscription does not accept query parameters".into(),
+                ));
+            }
+            preview_subscription(fleet, parse_id(agent_id)?, &parts.headers).await
+        }
+        (&Method::GET, ["", "agents", agent_id, "subscription"]) => {
+            if parts.uri.query().is_some_and(|query| !query.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "Subscription does not accept query parameters".into(),
+                ));
+            }
+            subscription(fleet, parse_id(agent_id)?, &parts.headers).await
+        }
+        (&Method::GET, ["", "agents", agent_id, "events"]) => {
+            events(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
+        }
+        (_, ["", "agents"] | ["", "agents", _, "interrupts"]) => {
             Err(ApiError::MethodNotAllowed("POST"))
         }
-        (_, ["", "agents", _, "events"]) => Err(ApiError::MethodNotAllowed("GET")),
+        (_, ["", "agents", _, "messages"]) => Err(ApiError::MethodNotAllowed("GET, POST")),
+        (
+            _,
+            ["", "agents", _]
+            | [
+                "",
+                "agents",
+                _,
+                "events" | "activity" | "tool-calls" | "subscription",
+            ]
+            | ["", "agents", _, "preview", "subscription"],
+        ) => Err(ApiError::MethodNotAllowed("GET")),
         _ => Err(ApiError::NotFound),
     }
 }
@@ -138,33 +175,166 @@ where
     Ok(empty_response(StatusCode::ACCEPTED))
 }
 
+async fn agent(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    query: SinceQuery,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let response = fleet
+        .agent(agent_id, query.since.map(Into::into))
+        .await
+        .map_err(ApiError::Fleet)?;
+    let body = match response.value {
+        QueryUpdate::Unchanged => empty_response(StatusCode::NO_CONTENT),
+        QueryUpdate::Changed(agent) => json_response(StatusCode::OK, &ApiAgent::from(agent)),
+    };
+    Ok(read_response(response.revision, body))
+}
+
+async fn messages(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    query: SinceQuery,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let response = fleet
+        .messages(agent_id, query.since.map(Into::into))
+        .await
+        .map_err(ApiError::Fleet)?;
+    let messages = response
+        .value
+        .into_iter()
+        .map(ApiMessageRecord::from)
+        .collect::<Vec<_>>();
+    Ok(read_response(
+        response.revision,
+        json_response(StatusCode::OK, &messages),
+    ))
+}
+
+async fn activity(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    query: SinceQuery,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let response = fleet
+        .activity(agent_id, query.since.map(Into::into))
+        .await
+        .map_err(ApiError::Fleet)?;
+    let body = match response.value {
+        QueryUpdate::Unchanged => empty_response(StatusCode::NO_CONTENT),
+        QueryUpdate::Changed(activity) => {
+            json_response(StatusCode::OK, &ApiAgentActivity::from(activity))
+        }
+    };
+    Ok(read_response(response.revision, body))
+}
+
+async fn tool_calls(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    query: SinceQuery,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let response = fleet
+        .tool_calls(agent_id, query.since.map(Into::into))
+        .await
+        .map_err(ApiError::Fleet)?;
+    let tool_calls = response
+        .value
+        .into_iter()
+        .map(ApiToolCallRecord::from)
+        .collect::<Vec<_>>();
+    Ok(read_response(
+        response.revision,
+        json_response(StatusCode::OK, &tool_calls),
+    ))
+}
+
 async fn events(
     fleet: &Fleet,
     agent_id: AgentId,
     query: EventsQuery,
 ) -> Result<Response<ResponseBody>, ApiError> {
-    let events = fleet
-        .events(
-            agent_id,
-            query.from.map(Into::into),
-            query.until.map(Into::into),
-            query.direction.into(),
-        )
-        .take(query.limit)
-        .map_ok(ApiEvent::from)
-        .try_collect::<Vec<_>>()
+    let response = fleet
+        .events(agent_id, query.into())
+        .await
+        .map_err(ApiError::Fleet)?;
+    let events = response
+        .value
+        .into_iter()
+        .map(ApiEvent::from)
+        .collect::<Vec<_>>();
+    Ok(read_response(
+        response.revision,
+        json_response(StatusCode::OK, &events),
+    ))
+}
+
+async fn subscription(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let mut values = headers.get_all("last-event-id").iter();
+    let value = values
+        .next()
+        .map(HeaderValue::to_str)
+        .transpose()
+        .map_err(|_| ApiError::BadRequest("Last-Event-ID must be a decimal string".into()))?
+        .unwrap_or("0");
+    if values.next().is_some() {
+        return Err(ApiError::BadRequest("Last-Event-ID must occur once".into()));
+    }
+    let after = parse_id(value)?;
+    fleet
+        .agent(agent_id, Some(after))
         .await
         .map_err(ApiError::Fleet)?;
 
-    Ok(json_response(StatusCode::OK, &events))
+    let stream = crate::subscription::stream(fleet.clone(), agent_id, after);
+    Ok(subscription_response(stream))
+}
+
+async fn preview_subscription(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+) -> Result<Response<ResponseBody>, ApiError> {
+    if headers.contains_key("last-event-id") {
+        return Err(ApiError::BadRequest(
+            "Preview subscriptions do not accept Last-Event-ID".into(),
+        ));
+    }
+    fleet.agent(agent_id, None).await.map_err(ApiError::Fleet)?;
+
+    let stream = crate::subscription::previews(fleet.clone(), agent_id);
+    Ok(subscription_response(stream))
+}
+
+fn subscription_response(
+    stream: impl Stream<Item = Result<Frame<Bytes>, FleetError>> + Send + 'static,
+) -> Response<ResponseBody> {
+    let body = StreamBody::new(stream).map_err(Into::into).boxed_unsync();
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response
 }
 
 // === Request parsing ===
 
-fn parse_events_query(query: Option<&str>) -> Result<EventsQuery, ApiError> {
+fn parse_query<T: FromStr>(query: Option<&str>) -> Result<T, ApiError>
+where
+    T::Err: fmt::Display,
+{
     query
         .unwrap_or_default()
-        .parse::<EventsQuery>()
+        .parse::<T>()
         .map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
@@ -225,6 +395,23 @@ where
 }
 
 // === Responses ===
+
+fn read_response(
+    revision: Revision,
+    mut response: Response<ResponseBody>,
+) -> Response<ResponseBody> {
+    response.headers_mut().insert(
+        "read-revision",
+        revision
+            .to_string()
+            .parse()
+            .expect("revision is a valid header"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
 
 fn empty_response(status: StatusCode) -> Response<ResponseBody> {
     let mut response = Response::new(ResponseBody::default());
@@ -323,6 +510,16 @@ impl ApiError {
                     StatusCode::NOT_FOUND,
                     "message_not_found",
                     "Message not found",
+                ),
+                QueriesErrorKind::InvalidRevision => (
+                    StatusCode::BAD_REQUEST,
+                    "invalid_revision",
+                    "Revision is ahead of the agent",
+                ),
+                QueriesErrorKind::RevisionExpired => (
+                    StatusCode::GONE,
+                    "revision_expired",
+                    "Changes after the revision are no longer available",
                 ),
                 QueriesErrorKind::Other => (
                     StatusCode::INTERNAL_SERVER_ERROR,

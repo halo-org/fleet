@@ -4,7 +4,10 @@ use fleet_core::{
     MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
     ModelResponse, ModelUsage, ToolCall, ToolOutput, ToolResult, TurnEnd,
 };
-use fleet_kit::EventDirection;
+use fleet_kit::{
+    AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord, Preview,
+    PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
 
 // === Requests ===
@@ -33,6 +36,15 @@ pub struct InterruptAgentRequest {
     pub message: Option<ApiMessage>,
 }
 
+/// A query for changes after a revision.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinceQuery {
+    /// The exclusive starting revision.
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    pub since: Option<u128>,
+}
+
 /// A query for an agent's events.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,7 +63,143 @@ pub struct EventsQuery {
         default = "default_event_limit",
         deserialize_with = "deserialize_limit"
     )]
-    pub limit: usize,
+    pub limit: NonZeroUsize,
+    /// The exclusive starting revision.
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    pub since: Option<u128>,
+}
+
+// === Agents ===
+
+/// The resources changed by an agent update.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentUpdates {
+    /// The agent's metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ApiAgent>,
+    /// The changed messages.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<ApiMessageRecord>,
+    /// The agent's activity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ApiAgentActivity>,
+    /// The changed tool calls.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ApiToolCallRecord>,
+    /// The changed events.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<ApiEvent>,
+}
+
+/// An agent's metadata.
+#[derive(Debug, Serialize)]
+pub struct ApiAgent {
+    /// The agent ID.
+    #[serde(serialize_with = "serialize_id")]
+    pub id: u128,
+    /// The role name.
+    pub role: String,
+    /// The role parameters.
+    pub parameters: JsonObject,
+}
+
+/// An agent's activity.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentActivity {
+    /// Whether a turn is in progress.
+    pub turn: ApiTurnStatus,
+    /// Whether an interrupt is pending.
+    pub interrupt_pending: bool,
+}
+
+/// A turn's current status.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiTurnStatus {
+    /// The agent is responding.
+    Active,
+    /// The agent has no active turn.
+    Idle,
+}
+
+// === Previews ===
+
+/// The current response preview.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApiPreview {
+    /// A response being streamed.
+    Streaming {
+        /// The event the response is answering.
+        #[serde(serialize_with = "serialize_id")]
+        input_cursor: u128,
+        /// The partial output blocks.
+        output: Vec<ApiPreviewBlock>,
+    },
+    /// No response preview is available.
+    Idle,
+}
+
+/// A partial output block.
+#[derive(Debug, Serialize)]
+pub struct ApiPreviewBlock {
+    /// The output index.
+    pub index: u32,
+    /// The partial content.
+    #[serde(flatten)]
+    pub content: ApiPreviewContent,
+}
+
+/// The partial content of an output block.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiPreviewContent {
+    /// Response text.
+    Text {
+        /// The text received so far.
+        text: String,
+    },
+    /// Reasoning text.
+    Reasoning {
+        /// The text received so far.
+        text: String,
+    },
+    /// A tool call.
+    ToolCall {
+        /// The tool call ID.
+        id: String,
+        /// The tool alias.
+        tool: String,
+        /// The partial JSON input.
+        input: String,
+    },
+}
+
+/// Selects the block receiving preview text.
+#[derive(Debug, Serialize)]
+pub struct ApiPreviewSelection<'a> {
+    /// The output index.
+    pub index: u32,
+    /// Metadata for a new block.
+    #[serde(flatten)]
+    pub kind: Option<ApiPreviewKind<'a>>,
+}
+
+/// Metadata for a new preview block.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiPreviewKind<'a> {
+    /// Response text.
+    Text,
+    /// Reasoning text.
+    Reasoning,
+    /// A tool call.
+    ToolCall {
+        /// The tool call ID.
+        id: &'a str,
+        /// The tool alias.
+        tool: &'a str,
+    },
 }
 
 // === Models ===
@@ -158,6 +306,26 @@ pub struct ApiModelProvenance {
 
 // === Tools ===
 
+/// A tool call's current state.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApiToolCallRecord {
+    /// A tool call without a committed result.
+    Pending {
+        /// The tool call ID.
+        id: String,
+        /// The tool alias.
+        tool: String,
+        /// Whether the agent can continue before the call completes.
+        is_async: bool,
+    },
+    /// A tool call with a committed result.
+    Resolved {
+        /// The tool call ID.
+        id: String,
+    },
+}
+
 /// A request to call a tool.
 #[derive(Debug, Serialize)]
 pub struct ApiToolCall {
@@ -205,6 +373,33 @@ pub enum ApiContentBlock {
 }
 
 // === Messages ===
+
+/// A message's current state.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApiMessageRecord {
+    /// A message waiting to be consumed.
+    Pending {
+        /// The stable position in the queue.
+        #[serde(serialize_with = "serialize_id")]
+        position: u128,
+        /// The message.
+        #[serde(flatten)]
+        message: ApiMessage,
+    },
+    /// A message that was consumed.
+    Consumed {
+        /// The message ID.
+        #[serde(serialize_with = "serialize_id")]
+        id: u128,
+    },
+    /// A message that was deleted.
+    Deleted {
+        /// The message ID.
+        #[serde(serialize_with = "serialize_id")]
+        id: u128,
+    },
+}
 
 /// A message to an agent.
 #[derive(Debug, Deserialize, Serialize)]
@@ -261,12 +456,22 @@ pub enum ApiTurnEnd {
 
 /// An event in an agent's history.
 #[derive(Debug, Serialize)]
-pub struct ApiEvent {
-    /// The event cursor.
-    #[serde(serialize_with = "serialize_id")]
-    pub cursor: u128,
-    /// The event payload.
-    pub payload: ApiEventPayload,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApiEvent {
+    /// An event in the log.
+    Settled {
+        /// The event cursor.
+        #[serde(serialize_with = "serialize_id")]
+        cursor: u128,
+        /// The event payload.
+        payload: ApiEventPayload,
+    },
+    /// An event that was deleted.
+    Deleted {
+        /// The event cursor.
+        #[serde(serialize_with = "serialize_id")]
+        cursor: u128,
+    },
 }
 
 /// The payload of an agent event.
@@ -464,6 +669,19 @@ impl From<ModelProvenance> for ApiModelProvenance {
     }
 }
 
+impl From<ToolCallRecord> for ApiToolCallRecord {
+    fn from(record: ToolCallRecord) -> Self {
+        match record {
+            ToolCallRecord::Pending { id, tool, is_async } => Self::Pending {
+                id: id.into(),
+                tool: tool.into(),
+                is_async,
+            },
+            ToolCallRecord::Resolved(id) => Self::Resolved { id: id.into() },
+        }
+    }
+}
+
 impl From<ToolCall> for ApiToolCall {
     fn from(call: ToolCall) -> Self {
         let ToolCall {
@@ -574,7 +792,7 @@ impl From<TurnEnd> for ApiTurnEnd {
 impl From<Event> for ApiEvent {
     fn from(event: Event) -> Self {
         let Event { cursor, payload } = event;
-        Self {
+        Self::Settled {
             cursor: cursor.into(),
             payload: payload.into(),
         }
@@ -607,6 +825,141 @@ impl From<ApiEventDirection> for EventDirection {
     }
 }
 
+impl FromStr for SinceQuery {
+    type Err = serde::de::value::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::deserialize(MapDeserializer::new(form_urlencoded::parse(
+            value.as_bytes(),
+        )))
+    }
+}
+
+impl From<EventsQuery> for EventQuery {
+    fn from(query: EventsQuery) -> Self {
+        Self {
+            from: query.from.map(Into::into),
+            until: query.until.map(Into::into),
+            direction: query.direction.into(),
+            limit: query.limit,
+            since: query.since.map(Into::into),
+        }
+    }
+}
+
+impl From<AgentUpdates> for ApiAgentUpdates {
+    fn from(updates: AgentUpdates) -> Self {
+        Self {
+            agent: match updates.agent {
+                QueryUpdate::Unchanged => None,
+                QueryUpdate::Changed(agent) => Some(agent.into()),
+            },
+            messages: updates.messages.into_iter().map(Into::into).collect(),
+            activity: match updates.activity {
+                QueryUpdate::Unchanged => None,
+                QueryUpdate::Changed(activity) => Some(activity.into()),
+            },
+            tool_calls: updates.tool_calls.into_iter().map(Into::into).collect(),
+            events: updates.events.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<Agent> for ApiAgent {
+    fn from(agent: Agent) -> Self {
+        Self {
+            id: agent.id.into(),
+            role: agent.role.name.into(),
+            parameters: agent.role.config,
+        }
+    }
+}
+
+impl From<AgentActivity> for ApiAgentActivity {
+    fn from(activity: AgentActivity) -> Self {
+        Self {
+            turn: match activity.turn {
+                TurnStatus::Active => ApiTurnStatus::Active,
+                TurnStatus::Idle => ApiTurnStatus::Idle,
+            },
+            interrupt_pending: activity.interrupt_pending,
+        }
+    }
+}
+
+impl From<Preview> for ApiPreview {
+    fn from(preview: Preview) -> Self {
+        Self::Streaming {
+            input_cursor: preview.input_cursor.into(),
+            output: preview
+                .output
+                .into_iter()
+                .map(|(index, content)| ApiPreviewBlock {
+                    index,
+                    content: content.into(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<Option<Preview>> for ApiPreview {
+    fn from(preview: Option<Preview>) -> Self {
+        preview.map_or(Self::Idle, Into::into)
+    }
+}
+
+impl From<PreviewContent> for ApiPreviewContent {
+    fn from(content: PreviewContent) -> Self {
+        match content {
+            PreviewContent::Text(text) => Self::Text { text },
+            PreviewContent::Reasoning(text) => Self::Reasoning { text },
+            PreviewContent::ToolCall { id, tool, input } => Self::ToolCall {
+                id: id.into(),
+                tool: tool.into(),
+                input,
+            },
+        }
+    }
+}
+
+impl From<MessageRecord> for ApiMessageRecord {
+    fn from(record: MessageRecord) -> Self {
+        match record {
+            MessageRecord::Pending { position, message } => Self::Pending {
+                position,
+                message: message.into(),
+            },
+            MessageRecord::Consumed(id) => Self::Consumed { id: id.into() },
+            MessageRecord::Deleted(id) => Self::Deleted { id: id.into() },
+        }
+    }
+}
+
+impl From<Message> for ApiMessage {
+    fn from(message: Message) -> Self {
+        Self {
+            id: message.id.into(),
+            mode: match message.mode {
+                MessageMode::Steer => ApiMessageMode::Steer,
+                MessageMode::Queue => ApiMessageMode::Queue,
+            },
+            content: message.content.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<EventRecord> for ApiEvent {
+    fn from(record: EventRecord) -> Self {
+        match record {
+            EventRecord::Settled(event) => event.into(),
+            EventRecord::Deleted(cursor) => Self::Deleted {
+                cursor: cursor.into(),
+            },
+        }
+    }
+}
+
 // === Serialization ===
 
 fn serialize_id<S: Serializer>(id: &u128, serializer: S) -> Result<S::Ok, S::Error> {
@@ -625,15 +978,14 @@ fn deserialize_optional_id<'de, D: Deserializer<'de>>(
     deserialize_id(deserializer).map(Some)
 }
 
-fn deserialize_limit<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+fn deserialize_limit<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NonZeroUsize, D::Error> {
     String::deserialize(deserializer)?
         .parse::<NonZeroUsize>()
-        .map(NonZeroUsize::get)
         .map_err(serde::de::Error::custom)
 }
 
-const fn default_event_limit() -> usize {
-    100
+const fn default_event_limit() -> NonZeroUsize {
+    NonZeroUsize::new(100).expect("limit is positive")
 }
 
 #[cfg(test)]
@@ -696,7 +1048,7 @@ mod tests {
         assert_eq!(query.from, None);
         assert_eq!(query.until, None);
         assert_matches!(query.direction, ApiEventDirection::Forward);
-        assert_eq!(query.limit, 100);
+        assert_eq!(query.limit.get(), 100);
     }
 
     #[test]
@@ -709,7 +1061,7 @@ mod tests {
         assert_eq!(query.from, Some(u128::MAX));
         assert_eq!(query.until, Some(2));
         assert_matches!(query.direction, ApiEventDirection::Backward);
-        assert_eq!(query.limit, 10);
+        assert_eq!(query.limit.get(), 10);
     }
 
     #[test]
@@ -769,6 +1121,7 @@ mod tests {
             value,
             json!({
                 "cursor": "340282366920938463463374607431768211455",
+                "status": "settled",
                 "payload": {
                     "type": "model_response",
                     "output": [
