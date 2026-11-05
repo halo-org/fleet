@@ -72,11 +72,14 @@ fleet-store.path = "fleet-store"
 
 fastrand = { version = "2.5.0", default-features = false }
 form_urlencoded = { version = "1.2.2", default-features = false }
+futures-channel = { version = "0.3.34", default-features = false }
 futures-executor = { version = "0.3.34", default-features = false }
 futures-util = { version = "0.3.34", default-features = false }
 http-body-util = { version = "0.1.5", default-features = false }
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
+redb = { version = "4.4.0", default-features = false }
 serde = { version = "1.0.229", default-features = false }
 serde_json = { version = "1.0.151", default-features = false }
 tokio = { version = "1.54.0", default-features = false }
+windows-sys = { version = "0.61.2", default-features = false }

@@ -2,6 +2,7 @@
 
 mod api;
 mod api_types;
+mod directories;
 mod error_handler;
 mod fleet;
 mod idle_handler;
@@ -35,7 +36,22 @@ fn main() -> ExitCode {
         .expect("can build tokio runtime");
 
     let idle_timeout = None;
-    let fleet = Fleet::new(idle_timeout);
+    let data_dir = match directories::create_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Could not create data directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let database_path = data_dir.join("fleet.db");
+    let store = match fleet_store::Store::open(&database_path) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("Could not open {}: {error}", database_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let fleet = Fleet::new(store, idle_timeout);
 
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1337));
     let shutdown_timeout = Some(Duration::from_secs(10));

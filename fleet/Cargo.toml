@@ -13,7 +13,8 @@ workspace = true
 [dependencies]
 fleet-core.workspace = true
 fleet-kit.workspace = true
-fleet-simulator = { workspace = true, features = ["queries"] }
+fleet-simulator.workspace = true
+fleet-store = { workspace = true, features = ["queries"] }
 form_urlencoded = { workspace = true, features = ["alloc"] }
 futures-util = { workspace = true, features = ["std"] }
 http-body-util.workspace = true
@@ -22,6 +23,9 @@ hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

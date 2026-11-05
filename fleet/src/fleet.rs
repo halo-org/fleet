@@ -1,14 +1,12 @@
 use crate::{ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
-use fleet_core::{Agent, AgentId, ClientStore as _, ClientStoreErrorKind, Message, MessageId};
+use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId};
 use fleet_kit::{
     AgentActivity, AgentUpdates, EventQuery, EventRecord, MessageRecord, Preview, Queries as _,
-    QueriesErrorKind, QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
+    QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
 };
-use fleet_simulator::{
-    ModelsSimulator, RolesSimulator, Scheduler, Simulator, StoreSimulator, StoreSimulatorError,
-    ToolsSimulator,
-};
+use fleet_simulator::{ModelsSimulator, RolesSimulator, Scheduler, Simulator, ToolsSimulator};
+use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
 use std::sync::{Arc, LazyLock};
 
@@ -31,29 +29,29 @@ pub enum FleetError {
     /// Shutdown has begun.
     ShuttingDown,
     /// A store operation failed.
-    Store(StoreSimulatorError<ClientStoreErrorKind>),
+    Store(StoreError),
     /// A query failed.
-    Query(StoreSimulatorError<QueriesErrorKind>),
+    Query(StoreError),
 }
 
 struct State {
     idle_handler: IdleHandler,
-    store: StoreSimulator<'static>,
+    store: Store,
     roles: RolesSimulator<'static>,
     models: ModelsSimulator<'static>,
     tools: ToolsSimulator<'static>,
 }
 
 impl Fleet {
-    /// Creates a fleet with simulated providers.
+    /// Creates a fleet with the given store and simulated providers.
     #[must_use]
-    pub fn new(idle_timeout: Option<Duration>) -> Self {
+    pub fn new(store: Store, idle_timeout: Option<Duration>) -> Self {
         let simulator = Simulator::new(&SCHEDULER, 0);
 
         Self {
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
-                store: simulator.store,
+                store,
                 roles: simulator.roles,
                 models: simulator.models,
                 tools: simulator.tools,
@@ -64,37 +62,32 @@ impl Fleet {
     /// Runs agents until shutdown and waits for pending mutations.
     pub async fn run(&self) {
         let state = &self.state;
-        let partition = state.store.add_partition();
 
-        {
-            let agents = async {
-                loop {
-                    let last_activity = state.idle_handler.last_activity();
+        let agents = async {
+            loop {
+                let last_activity = state.idle_handler.last_activity();
 
-                    fleet_core::run(
-                        &state.idle_handler,
-                        ErrorHandler,
-                        state.store.partition(partition),
-                        &state.roles,
-                        &state.models,
-                        &state.tools,
-                    )
-                    .await;
+                fleet_core::run(
+                    &state.idle_handler,
+                    ErrorHandler,
+                    &state.store,
+                    &state.roles,
+                    &state.models,
+                    &state.tools,
+                )
+                .await;
 
-                    if state.idle_handler.try_shutdown(last_activity) {
-                        return;
-                    }
+                if state.idle_handler.try_shutdown(last_activity) {
+                    return;
                 }
-            };
-            let shutdown = async {
-                self.wait_for_shutdown().await;
-                state.idle_handler.wait_for_mutations().await;
-            };
+            }
+        };
+        let shutdown = async {
+            self.wait_for_shutdown().await;
+            state.idle_handler.wait_for_mutations().await;
+        };
 
-            future::select(pin!(shutdown), pin!(agents)).await;
-        }
-
-        state.store.remove_partition(partition);
+        future::select(pin!(shutdown), pin!(agents)).await;
     }
 
     /// Begins shutdown.
@@ -310,7 +303,7 @@ impl Fleet {
         operation: impl FnOnce(Self) -> F + Send + 'static,
     ) -> Result<(), FleetError>
     where
-        F: Future<Output = Result<(), StoreSimulatorError<ClientStoreErrorKind>>> + Send + 'static,
+        F: Future<Output = Result<(), StoreError>> + Send + 'static,
     {
         let guard = self
             .state
@@ -351,8 +344,7 @@ impl core::error::Error for FleetError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::ShuttingDown => None,
-            Self::Store(source) => Some(source),
-            Self::Query(source) => Some(source),
+            Self::Store(source) | Self::Query(source) => Some(source),
         }
     }
 }
@@ -363,7 +355,7 @@ mod tests {
     use fleet_core::{
         Compaction, Configured, ContentBlock, JsonObject, MessageMode, ModelOutput,
         ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage, RuntimeStore as _,
-        ToolCall, ToolOutput, ToolResult,
+        ToolCall, ToolOutput, ToolResult, TurnEnd,
     };
     use http_body_util::{BodyExt as _, Full};
     use hyper::{
@@ -373,7 +365,7 @@ mod tests {
     use serde_json::{Value, json};
 
     async fn fleet() -> Fleet {
-        let fleet = Fleet::new(None);
+        let fleet = Fleet::new(Store::memory().unwrap(), None);
         let agent = Agent {
             id: 1.into(),
             role: Configured {
@@ -448,10 +440,46 @@ mod tests {
     }
 
     #[test]
+    fn run_processes_a_message_and_shuts_down_when_idle() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let store = Store::memory().unwrap();
+        let fleet = Fleet::new(store.clone(), Some(Duration::ZERO));
+        let agent = Agent {
+            id: 1.into(),
+            role: Configured {
+                name: fleet.state.roles.role_names().first().unwrap().clone(),
+                config: JsonObject::new(),
+            },
+            extensions: JsonObject::new(),
+        };
+        let message = Message {
+            id: 1.into(),
+            mode: MessageMode::Steer,
+            content: vec![ContentBlock::Text("Hello".into())],
+        };
+
+        runtime.block_on(async {
+            fleet
+                .create_agent("create".into(), agent.clone(), Some(message.clone()))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), fleet.run())
+                .await
+                .unwrap();
+            let state = store.agent_state(agent.id).await.unwrap().unwrap();
+            let turn_end = store.wait_for_turn_end(agent.id, message.id).await.unwrap();
+            assert_eq!(state.parked_at, state.latest_event);
+            assert_eq!(turn_end.payload, TurnEnd::Completed);
+        });
+    }
+
+    #[test]
     fn subscriptions_bootstrap_from_zero_by_default() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
-            .start_paused(true)
             .build()
             .unwrap();
 
@@ -485,14 +513,12 @@ mod tests {
     fn subscriptions_send_and_resume_complete_revision_groups() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
-            .start_paused(true)
             .build()
             .unwrap();
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             let message = Message {
                 id: 3.into(),
                 mode: MessageMode::Steer,
@@ -540,6 +566,7 @@ mod tests {
             let replay = next_frame(&mut response.into_body()).await;
             assert_eq!(replay, text);
 
+            tokio::time::pause();
             let text = next_frame(&mut body).await;
             assert_eq!(text, ": keep-alive\n\n");
         });
@@ -549,14 +576,12 @@ mod tests {
     fn reads_and_subscriptions_follow_message_consumption() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
-            .start_paused(true)
             .build()
             .unwrap();
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             let response = crate::api::handle(fleet.clone(), request("/agents/1/messages"))
                 .await
                 .unwrap();
@@ -642,8 +667,7 @@ mod tests {
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             let response = ModelResponse {
                 output: vec![
                     ModelOutput::ToolCall(tool_call("a", false)),
@@ -721,8 +745,7 @@ mod tests {
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             let tool_call = tool_call("a", true);
             let response = ModelResponse {
                 output: vec![ModelOutput::ToolCall(tool_call.clone())],
@@ -797,14 +820,12 @@ mod tests {
     fn preview_subscriptions_stream_without_advancing_state_revisions() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
-            .start_paused(true)
             .build()
             .unwrap();
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             store.consume_messages(1.into(), None, true).await.unwrap();
             let response =
                 crate::api::handle(fleet.clone(), request("/agents/1/preview/subscription"))
@@ -910,8 +931,7 @@ mod tests {
 
         runtime.block_on(async {
             let fleet = fleet().await;
-            let partition = fleet.state.store.add_partition();
-            let store = fleet.state.store.partition(partition);
+            let store = &fleet.state.store;
             store.consume_messages(1.into(), None, true).await.unwrap();
             fleet
                 .interrupt_agent("interrupt".into(), 1.into(), None)

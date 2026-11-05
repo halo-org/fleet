@@ -13,9 +13,5 @@ workspace = true
 [dependencies]
 fastrand.workspace = true
 fleet-core.workspace = true
-fleet-kit = { workspace = true, optional = true }
 futures-executor = { workspace = true, features = ["std"] }
 futures-util.workspace = true
-
-[features]
-queries = ["dep:fleet-kit"]

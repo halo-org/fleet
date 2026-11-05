@@ -12,7 +12,7 @@ use fleet_core::{
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Mutex, PoisonError},
 };
 
 /// An in-memory simulator for [`RuntimeStore`] and [`ClientStore`].
@@ -24,7 +24,7 @@ use std::{
 pub struct StoreSimulator<'sim> {
     scheduler: &'sim Scheduler,
     config: StoreSimulatorConfig,
-    state: Arc<Mutex<State>>,
+    state: Mutex<State>,
 }
 
 /// The ID of a wake partition in a [`StoreSimulator`].
@@ -83,14 +83,10 @@ struct AgentRecord {
     pending_messages: Vec<Message>,
     parked_at: Option<EventCursor>,
     interrupt_intent: bool,
-    message_cursors: BTreeMap<MessageId, Option<EventCursor>>,
-    turn_ends: BTreeMap<EventCursor, TurnEnd>,
+    message_ids: BTreeSet<MessageId>,
     tool_call_ids: BTreeSet<ToolCallId>,
     unresolved_tool_calls: BTreeMap<ToolCallId, ToolCallSnapshot>,
     response_stream: Option<ResponseStreamState>,
-    turn_subscriptions: BTreeMap<u64, Waker>,
-    #[cfg(feature = "queries")]
-    queries: queries::QueryState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,8 +164,6 @@ struct StoreSimulatorConfig {
     create_agent: WrapConfig,
     interrupt_agent: WrapConfig,
     send_message: WrapConfig,
-    #[cfg(feature = "queries")]
-    wait_for_turn_end: WrapConfig,
     wakes: TrySuspendConfig,
     wakes_repartition: Probability,
     events_suspend: Probability,
@@ -185,14 +179,14 @@ impl<'sim> StoreSimulator<'sim> {
         Self {
             scheduler,
             config,
-            state: Arc::new(Mutex::new(State {
+            state: Mutex::new(State {
                 idempotency_keys: BTreeMap::new(),
                 agents: BTreeMap::new(),
                 partitions: BTreeMap::new(),
                 next_partition_id: 0,
                 next_subscription_id: 0,
                 ready_wakers: Vec::new(),
-            })),
+            }),
         }
     }
 
@@ -330,22 +324,6 @@ impl<'sim> StoreSimulator<'sim> {
         result
     }
 
-    fn mutate_agent<T>(&self, agent_id: AgentId, f: impl FnOnce(&mut State) -> T) -> T {
-        self.mutate(|state| {
-            let result = f(state);
-
-            #[cfg(feature = "queries")]
-            if let Some(agent) = state.agents.get_mut(&agent_id) {
-                state.ready_wakers.extend(queries::refresh(agent));
-            }
-
-            #[cfg(not(feature = "queries"))]
-            let _ = agent_id;
-
-            result
-        })
-    }
-
     fn partition_wakes(
         &self,
         partition: PartitionId,
@@ -480,7 +458,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.settle_interrupt,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
+                    self.store.mutate(|state| {
                         state.settle_interrupt(agent_id, expected_latest_event, tool_results)
                     })
                 },
@@ -499,9 +477,8 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.park,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
-                        state.park(agent_id, expected_latest_event)
-                    })
+                    self.store
+                        .mutate(|state| state.park(agent_id, expected_latest_event))
                 },
             )
             .await
@@ -519,7 +496,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.consume_messages,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
+                    self.store.mutate(|state| {
                         state.consume_messages(agent_id, expected_latest_event, allow_queued)
                     })
                 },
@@ -540,7 +517,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.publish_model_response_chunk,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
+                    self.store.mutate(|state| {
                         state.publish_model_response_chunk(agent_id, input_cursor, sequence, chunk)
                     })
                 },
@@ -561,7 +538,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.append_model_response,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
+                    self.store.mutate(|state| {
                         state.append_model_response(
                             agent_id,
                             expected_latest_event,
@@ -586,7 +563,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 &self.store.config.append_compaction,
                 StoreSimulatorError::random,
                 async {
-                    self.store.mutate_agent(agent_id, |state| {
+                    self.store.mutate(|state| {
                         state.append_compaction(agent_id, expected_latest_event, compaction)
                     })
                 },
@@ -606,7 +583,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 StoreSimulatorError::random,
                 async {
                     self.store
-                        .mutate_agent(agent_id, |state| state.prepare_tool_call(agent_id, call_id))
+                        .mutate(|state| state.prepare_tool_call(agent_id, call_id))
                 },
             )
             .await
@@ -624,7 +601,7 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 StoreSimulatorError::random,
                 async {
                     self.store
-                        .mutate_agent(agent_id, |state| state.append_tool_result(agent_id, result))
+                        .mutate(|state| state.append_tool_result(agent_id, result))
                 },
             )
             .await
@@ -645,7 +622,7 @@ impl ClientStore for StoreSimulator<'_> {
                 &self.config.create_agent,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate_agent(agent.id, |state| {
+                    self.mutate(|state| {
                         state.handle_request(
                             self.scheduler,
                             self.config.wakes_repartition,
@@ -672,7 +649,7 @@ impl ClientStore for StoreSimulator<'_> {
                 &self.config.interrupt_agent,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate_agent(agent_id, |state| {
+                    self.mutate(|state| {
                         state.handle_request(
                             self.scheduler,
                             self.config.wakes_repartition,
@@ -699,7 +676,7 @@ impl ClientStore for StoreSimulator<'_> {
                 &self.config.send_message,
                 StoreSimulatorError::random,
                 async {
-                    self.mutate_agent(agent_id, |state| {
+                    self.mutate(|state| {
                         state.handle_request(
                             self.scheduler,
                             self.config.wakes_repartition,
@@ -762,7 +739,7 @@ impl State {
             .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
 
         if let Some(message) = message {
-            if agent.message_cursors.contains_key(&message.id) {
+            if agent.message_ids.contains(&message.id) {
                 return Err(ClientError::conflict("message ID already exists"));
             }
 
@@ -784,7 +761,7 @@ impl State {
             .get_mut(&agent_id)
             .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
 
-        if agent.message_cursors.contains_key(&message.id) {
+        if agent.message_ids.contains(&message.id) {
             return Err(ClientError::conflict("message ID already exists"));
         }
 
@@ -838,8 +815,6 @@ impl State {
         agent.append_event(EventPayload::TurnEnd(TurnEnd::Interrupted));
         agent.interrupt_intent = false;
         agent.parked_at = agent.latest_event();
-
-        self.notify_turn_end(agent_id);
 
         Ok(())
     }
@@ -1010,7 +985,6 @@ impl State {
 
         if ends_turn {
             agent.append_event(EventPayload::TurnEnd(TurnEnd::Completed));
-            self.notify_turn_end(agent_id);
         }
 
         Ok(())
@@ -1268,12 +1242,6 @@ impl State {
         }
     }
 
-    fn notify_turn_end(&mut self, agent_id: AgentId) {
-        let agent = self.agents.get_mut(&agent_id).expect("agent exists");
-        let subscriptions = mem::take(&mut agent.turn_subscriptions);
-        self.ready_wakers.extend(subscriptions.into_values());
-    }
-
     const fn allocate_subscription_id(&mut self) -> u64 {
         let id = self.next_subscription_id;
         self.next_subscription_id = id.checked_add(1).expect("IDs never overflow");
@@ -1282,11 +1250,7 @@ impl State {
 }
 
 impl AgentRecord {
-    #[cfg_attr(
-        not(feature = "queries"),
-        expect(clippy::missing_const_for_fn, reason = "query state is not const")
-    )]
-    fn new(agent: Agent) -> Self {
+    const fn new(agent: Agent) -> Self {
         Self {
             agent,
             wake_owner: None,
@@ -1294,14 +1258,10 @@ impl AgentRecord {
             pending_messages: Vec::new(),
             parked_at: None,
             interrupt_intent: false,
-            message_cursors: BTreeMap::new(),
-            turn_ends: BTreeMap::new(),
+            message_ids: BTreeSet::new(),
             tool_call_ids: BTreeSet::new(),
             unresolved_tool_calls: BTreeMap::new(),
             response_stream: None,
-            turn_subscriptions: BTreeMap::new(),
-            #[cfg(feature = "queries")]
-            queries: queries::QueryState::default(),
         }
     }
 
@@ -1343,26 +1303,13 @@ impl AgentRecord {
     }
 
     fn push_pending_message(&mut self, message: Message) {
-        assert!(
-            self.message_cursors.insert(message.id, None).is_none(),
-            "message ID is new"
-        );
+        assert!(self.message_ids.insert(message.id), "message ID is new");
         self.pending_messages.push(message);
     }
 
     fn append_event(&mut self, payload: EventPayload) {
         let cursor =
             EventCursor::from(u128::try_from(self.events.len()).expect("event count fits u128"));
-
-        match &payload {
-            EventPayload::Input(id, _) => {
-                *self.message_cursors.get_mut(id).expect("message exists") = Some(cursor);
-            }
-            EventPayload::TurnEnd(turn_end) => {
-                self.turn_ends.insert(cursor, *turn_end);
-            }
-            _ => {}
-        }
 
         self.events.push(Event { cursor, payload });
     }
@@ -1563,740 +1510,10 @@ impl StoreSimulatorConfig {
             create_agent: WrapConfig::generate(rng),
             interrupt_agent: WrapConfig::generate(rng),
             send_message: WrapConfig::generate(rng),
-            #[cfg(feature = "queries")]
-            wait_for_turn_end: WrapConfig::generate(rng),
             wakes: TrySuspendConfig::generate(rng),
             events_suspend: Probability::generate(rng),
             events_error: Probability::generate_for_faults(rng),
             wakes_repartition: Probability::generate_for_faults(rng),
-        }
-    }
-}
-
-// TODO: Remove simulator queries when the server uses a proper store.
-#[cfg(feature = "queries")]
-mod queries {
-    use super::{
-        AgentRecord, ResponseStreamStatus, State, StoreSimulator, StoreSimulatorError,
-        StoreSimulatorErrorInner,
-    };
-    use core::{
-        mem,
-        ops::Bound,
-        task::{Poll, Waker},
-    };
-    use fleet_core::{
-        Agent, AgentId, Event, EventPayload, JsonValue, MessageId, ModelOutput, ModelResponseChunk,
-        ToolCallId,
-    };
-    use fleet_kit::{
-        AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord,
-        Preview, PreviewContent, Queries, QueriesErrorKind, QueryResponse, QueryUpdate, Revision,
-        ToolCallRecord, TurnEndEvent, TurnStatus,
-    };
-    use futures_util::{Stream, future, stream};
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
-
-    #[derive(Default)]
-    pub(super) struct QueryState {
-        revision: Revision,
-        event_revisions: Vec<Revision>,
-        messages: BTreeMap<MessageId, (Revision, u128, MessageRecord)>,
-        next_position: u128,
-        activity: AgentActivity,
-        activity_revision: Revision,
-        tool_calls: BTreeMap<ToolCallId, (Revision, ToolCallRecord)>,
-        preview: Option<Preview>,
-        preview_version: u64,
-        preview_chunks: usize,
-        subscriptions: BTreeMap<u64, Waker>,
-        preview_subscriptions: BTreeMap<u64, Waker>,
-    }
-
-    struct UpdateSubscription<'store, 'sim> {
-        simulator: &'store StoreSimulator<'sim>,
-        id: Option<u64>,
-        agent_id: AgentId,
-        after: Revision,
-    }
-
-    struct PreviewSubscription {
-        state: Arc<Mutex<State>>,
-        id: Option<u64>,
-        agent_id: AgentId,
-        version: Option<u64>,
-    }
-
-    struct TurnSubscription<'store, 'sim> {
-        simulator: &'store StoreSimulator<'sim>,
-        id: Option<u64>,
-        agent_id: AgentId,
-        message_id: MessageId,
-    }
-
-    type QueryError = StoreSimulatorError<QueriesErrorKind>;
-
-    impl<'sim> Queries for StoreSimulator<'sim> {
-        type Error = QueryError;
-
-        fn agent(
-            &self,
-            agent_id: AgentId,
-            since: Option<Revision>,
-        ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<Agent>>, Self::Error>> + Send
-        {
-            future::ready(self.read_query(agent_id, since, |agent| {
-                changed_since(1.into(), since, || agent.agent.clone())
-            }))
-        }
-
-        fn messages(
-            &self,
-            agent_id: AgentId,
-            since: Option<Revision>,
-        ) -> impl Future<Output = Result<QueryResponse<Vec<MessageRecord>>, Self::Error>> + Send
-        {
-            future::ready(self.read_query(agent_id, since, |agent| agent.queries.messages(since)))
-        }
-
-        fn activity(
-            &self,
-            agent_id: AgentId,
-            since: Option<Revision>,
-        ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<AgentActivity>>, Self::Error>> + Send
-        {
-            future::ready(self.read_query(agent_id, since, |agent| {
-                changed_since(agent.queries.activity_revision, since, || {
-                    agent.queries.activity.clone()
-                })
-            }))
-        }
-
-        fn tool_calls(
-            &self,
-            agent_id: AgentId,
-            since: Option<Revision>,
-        ) -> impl Future<Output = Result<QueryResponse<Vec<ToolCallRecord>>, Self::Error>> + Send
-        {
-            future::ready(self.read_query(agent_id, since, |agent| agent.queries.tool_calls(since)))
-        }
-
-        fn previews(
-            &self,
-            agent_id: AgentId,
-        ) -> impl Stream<Item = Result<Option<Preview>, Self::Error>> + Send + use<'sim> {
-            let subscription = PreviewSubscription {
-                state: Arc::clone(&self.state),
-                id: None,
-                agent_id,
-                version: None,
-            };
-            stream::unfold(Some(subscription), async |subscription| {
-                let mut subscription = subscription?;
-                let result = subscription.next().await;
-                let subscription = result.is_ok().then_some(subscription);
-                Some((result, subscription))
-            })
-        }
-
-        fn events(
-            &self,
-            agent_id: AgentId,
-            query: EventQuery,
-        ) -> impl Future<Output = Result<QueryResponse<Vec<EventRecord>>, Self::Error>> + Send
-        {
-            future::ready(self.read_query(agent_id, query.since, |agent| {
-                let (lower, upper) = match query.direction {
-                    EventDirection::Forward => (query.from, query.until),
-                    EventDirection::Backward => (query.until, query.from),
-                };
-                let includes = |(event, revision): &(&Event, &Revision)| {
-                    lower.is_none_or(|lower| event.cursor > lower)
-                        && upper.is_none_or(|upper| event.cursor < upper)
-                        && query.since.is_none_or(|since| **revision > since)
-                };
-                let events = agent.events.iter().zip(&agent.queries.event_revisions);
-                let record = |(event, _): (&Event, &Revision)| EventRecord::Settled(event.clone());
-
-                match query.direction {
-                    EventDirection::Forward => events
-                        .filter(includes)
-                        .take(query.limit.get())
-                        .map(record)
-                        .collect(),
-                    EventDirection::Backward => events
-                        .rev()
-                        .filter(includes)
-                        .take(query.limit.get())
-                        .map(record)
-                        .collect(),
-                }
-            }))
-        }
-
-        async fn updates(
-            &self,
-            agent_id: AgentId,
-            after: Revision,
-        ) -> Result<AgentUpdates, Self::Error> {
-            UpdateSubscription {
-                simulator: self,
-                id: None,
-                agent_id,
-                after,
-            }
-            .wait()
-            .await
-        }
-
-        async fn wait_for_turn_end(
-            &self,
-            agent_id: AgentId,
-            message_id: MessageId,
-        ) -> Result<TurnEndEvent, Self::Error> {
-            self.scheduler
-                .wrap(
-                    &self.config.wait_for_turn_end,
-                    StoreSimulatorError::random,
-                    async {
-                        TurnSubscription::new(self, agent_id, message_id)
-                            .wait()
-                            .await
-                    },
-                )
-                .await
-        }
-    }
-
-    impl StoreSimulator<'_> {
-        #[expect(clippy::significant_drop_tightening, reason = "false positive")]
-        fn read_query<T>(
-            &self,
-            agent_id: AgentId,
-            since: Option<Revision>,
-            read: impl FnOnce(&AgentRecord) -> T,
-        ) -> Result<QueryResponse<T>, QueryError> {
-            let state = self.state.lock().expect("never poisoned");
-            let agent = state
-                .agents
-                .get(&agent_id)
-                .ok_or_else(|| QueryError::agent_not_found("agent does not exist"))?;
-            agent.queries.check_revision(since)?;
-
-            Ok(QueryResponse {
-                revision: agent.queries.revision,
-                value: read(agent),
-            })
-        }
-    }
-
-    pub(super) fn refresh(agent: &mut AgentRecord) -> Vec<Waker> {
-        let mut queries = mem::take(&mut agent.queries);
-        let revision = queries.revision;
-        let preview_version = queries.preview_version;
-        queries.refresh(agent);
-        let mut wakers = if queries.revision == revision {
-            Vec::new()
-        } else {
-            mem::take(&mut queries.subscriptions)
-                .into_values()
-                .collect()
-        };
-        if queries.preview_version != preview_version {
-            wakers.extend(mem::take(&mut queries.preview_subscriptions).into_values());
-        }
-        agent.queries = queries;
-        wakers
-    }
-
-    impl QueryState {
-        fn refresh(&mut self, agent: &AgentRecord) {
-            let revision = Revision::from(
-                u128::from(self.revision)
-                    .checked_add(1)
-                    .expect("revisions never overflow"),
-            );
-            let mut changed = self.revision == Revision::default();
-            let mut activity = self.activity.clone();
-            activity.interrupt_pending = agent.interrupt_intent;
-
-            for message in &agent.pending_messages {
-                if !self.messages.contains_key(&message.id) {
-                    let position = self.next_position;
-                    self.next_position = position.checked_add(1).expect("positions never overflow");
-                    self.messages.insert(
-                        message.id,
-                        (
-                            revision,
-                            position,
-                            MessageRecord::Pending {
-                                position,
-                                message: message.clone(),
-                            },
-                        ),
-                    );
-                    changed = true;
-                }
-            }
-
-            for event in agent.events.iter().skip(self.event_revisions.len()) {
-                match &event.payload {
-                    EventPayload::Input(id, _) => {
-                        if let Some((updated, _, message)) = self.messages.get_mut(id) {
-                            *updated = revision;
-                            *message = MessageRecord::Consumed(*id);
-                        }
-                        activity.turn = TurnStatus::Active;
-                    }
-                    EventPayload::ModelResponse(response) => {
-                        activity.turn = TurnStatus::Active;
-                        for output in &response.output {
-                            if let ModelOutput::ToolCall(call) = output {
-                                self.tool_calls.insert(
-                                    call.id.clone(),
-                                    (
-                                        revision,
-                                        ToolCallRecord::Pending {
-                                            id: call.id.clone(),
-                                            tool: call.tool.clone(),
-                                            is_async: call.is_async,
-                                        },
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    EventPayload::ToolResult(result) => {
-                        activity.turn = TurnStatus::Active;
-                        self.tool_calls.insert(
-                            result.call_id.clone(),
-                            (revision, ToolCallRecord::Resolved(result.call_id.clone())),
-                        );
-                    }
-                    EventPayload::Compaction(_) => {}
-                    EventPayload::TurnEnd(_) => activity.turn = TurnStatus::Idle,
-                }
-                changed = true;
-            }
-            self.event_revisions.resize(agent.events.len(), revision);
-
-            if activity != self.activity || self.activity_revision == Revision::default() {
-                self.activity = activity;
-                self.activity_revision = revision;
-                changed = true;
-            }
-
-            if self.refresh_preview(agent) {
-                self.preview_version = self
-                    .preview_version
-                    .checked_add(1)
-                    .expect("preview versions never overflow");
-            }
-
-            if changed {
-                self.revision = revision;
-            }
-        }
-
-        fn refresh_preview(&mut self, agent: &AgentRecord) -> bool {
-            let active = agent.response_stream.as_ref().and_then(|stream| {
-                if !agent.interrupt_intent
-                    && agent.latest_event() == Some(stream.cursor)
-                    && let ResponseStreamStatus::Active(chunks) = &stream.status
-                {
-                    Some((stream.cursor, chunks))
-                } else {
-                    None
-                }
-            });
-            let Some((cursor, chunks)) = active else {
-                self.preview_chunks = 0;
-                return self.preview.take().is_some();
-            };
-            let mut changed = self
-                .preview
-                .as_ref()
-                .is_none_or(|preview| preview.input_cursor != cursor);
-            if changed {
-                self.preview = Some(Preview {
-                    input_cursor: cursor,
-                    output: BTreeMap::new(),
-                });
-                self.preview_chunks = 0;
-            }
-            let preview = self.preview.as_mut().expect("preview exists");
-            for chunk in chunks.iter().skip(self.preview_chunks) {
-                changed |= apply_chunk(preview, chunk);
-            }
-            self.preview_chunks = chunks.len();
-            changed
-        }
-
-        fn check_revision(&self, since: Option<Revision>) -> Result<(), QueryError> {
-            if since.is_some_and(|since| since > self.revision) {
-                return Err(QueryError {
-                    inner: StoreSimulatorErrorInner::Kind(
-                        QueriesErrorKind::InvalidRevision,
-                        "revision is ahead of the agent",
-                    ),
-                });
-            }
-            Ok(())
-        }
-
-        fn messages(&self, since: Option<Revision>) -> Vec<MessageRecord> {
-            let mut messages = self
-                .messages
-                .values()
-                .filter(|(revision, _, message)| {
-                    since.map_or_else(
-                        || matches!(message, MessageRecord::Pending { .. }),
-                        |since| *revision > since,
-                    )
-                })
-                .collect::<Vec<_>>();
-            messages.sort_by_key(|(_, position, _)| *position);
-            messages
-                .into_iter()
-                .map(|(_, _, message)| message.clone())
-                .collect()
-        }
-
-        fn tool_calls(&self, since: Option<Revision>) -> Vec<ToolCallRecord> {
-            self.tool_calls
-                .values()
-                .filter(|(revision, tool_call)| {
-                    since.map_or_else(
-                        || matches!(tool_call, ToolCallRecord::Pending { .. }),
-                        |since| *revision > since,
-                    )
-                })
-                .map(|(_, tool_call)| tool_call.clone())
-                .collect()
-        }
-
-        fn updates(&self, agent: &AgentRecord, after: Revision) -> Option<AgentUpdates> {
-            let first_event = self
-                .event_revisions
-                .partition_point(|revision| *revision <= after);
-            let revision = [
-                Some(1.into()),
-                Some(self.activity_revision),
-                self.event_revisions.get(first_event).copied(),
-                self.messages
-                    .values()
-                    .map(|(revision, _, _)| *revision)
-                    .filter(|revision| *revision > after)
-                    .min(),
-                self.tool_calls
-                    .values()
-                    .map(|(revision, _)| *revision)
-                    .filter(|revision| *revision > after)
-                    .min(),
-            ]
-            .into_iter()
-            .flatten()
-            .filter(|revision| *revision > after)
-            .min()?;
-            let mut messages = self
-                .messages
-                .values()
-                .filter(|(updated, _, _)| *updated == revision)
-                .collect::<Vec<_>>();
-            messages.sort_by_key(|(_, position, _)| *position);
-
-            Some(AgentUpdates {
-                revision,
-                agent: if revision == 1.into() {
-                    QueryUpdate::Changed(agent.agent.clone())
-                } else {
-                    QueryUpdate::Unchanged
-                },
-                messages: messages
-                    .into_iter()
-                    .map(|(_, _, message)| message.clone())
-                    .collect(),
-                activity: if revision == self.activity_revision {
-                    QueryUpdate::Changed(self.activity.clone())
-                } else {
-                    QueryUpdate::Unchanged
-                },
-                tool_calls: self
-                    .tool_calls
-                    .values()
-                    .filter(|(updated, _)| *updated == revision)
-                    .map(|(_, tool_call)| tool_call.clone())
-                    .collect(),
-                events: agent
-                    .events
-                    .iter()
-                    .zip(&self.event_revisions)
-                    .skip(first_event)
-                    .take_while(|(_, updated)| **updated == revision)
-                    .map(|(event, _)| EventRecord::Settled(event.clone()))
-                    .collect(),
-            })
-        }
-    }
-
-    fn changed_since<T>(
-        revision: Revision,
-        since: Option<Revision>,
-        value: impl FnOnce() -> T,
-    ) -> QueryUpdate<T> {
-        if since.is_none_or(|since| revision > since) {
-            QueryUpdate::Changed(value())
-        } else {
-            QueryUpdate::Unchanged
-        }
-    }
-
-    fn apply_chunk(preview: &mut Preview, chunk: &ModelResponseChunk) -> bool {
-        let (index, content) = match chunk {
-            ModelResponseChunk::TextStart(index) => (*index, PreviewContent::Text(String::new())),
-            ModelResponseChunk::ReasoningStart(index) => {
-                (*index, PreviewContent::Reasoning(String::new()))
-            }
-            ModelResponseChunk::ToolCallStart(index, id, tool) => (
-                *index,
-                PreviewContent::ToolCall {
-                    id: id.clone(),
-                    tool: tool.clone(),
-                    input: String::new(),
-                },
-            ),
-            ModelResponseChunk::TextDelta(index, text)
-            | ModelResponseChunk::ReasoningDelta(index, text)
-            | ModelResponseChunk::ToolInputDelta(index, text) => {
-                let Some(content) = preview.output.get_mut(index) else {
-                    return false;
-                };
-                let value = match content {
-                    PreviewContent::Text(value) | PreviewContent::Reasoning(value) => value,
-                    PreviewContent::ToolCall { input, .. } => input,
-                };
-                value.push_str(text);
-                return !text.is_empty();
-            }
-            ModelResponseChunk::OutputEnd(index, output) => (*index, preview_content(output)),
-            ModelResponseChunk::ResponseEnd(response) => {
-                let output = (0..)
-                    .zip(response.output.iter().map(preview_content))
-                    .collect();
-                if preview.output == output {
-                    return false;
-                }
-                preview.output = output;
-                return true;
-            }
-        };
-        if preview.output.get(&index) == Some(&content) {
-            return false;
-        }
-        preview.output.insert(index, content);
-        true
-    }
-
-    fn preview_content(output: &ModelOutput) -> PreviewContent {
-        match output {
-            ModelOutput::Text(text) => PreviewContent::Text(text.clone()),
-            ModelOutput::Reasoning(reasoning) => {
-                PreviewContent::Reasoning(reasoning.content.clone().unwrap_or_default())
-            }
-            ModelOutput::ToolCall(call) => PreviewContent::ToolCall {
-                id: call.id.clone(),
-                tool: call.tool.clone(),
-                input: JsonValue::Object(call.input.clone()).to_string(),
-            },
-        }
-    }
-
-    impl UpdateSubscription<'_, '_> {
-        async fn wait(mut self) -> Result<AgentUpdates, QueryError> {
-            future::poll_fn(|cx| {
-                let mut state = self.simulator.state.lock().expect("never poisoned");
-                let Some(agent) = state.agents.get(&self.agent_id) else {
-                    return Poll::Ready(Err(QueryError::agent_not_found("agent does not exist")));
-                };
-                if let Err(error) = agent.queries.check_revision(Some(self.after)) {
-                    return Poll::Ready(Err(error));
-                }
-                if let Some(updates) = agent.queries.updates(agent, self.after) {
-                    return Poll::Ready(Ok(updates));
-                }
-                let id = *self
-                    .id
-                    .get_or_insert_with(|| state.allocate_subscription_id());
-                state
-                    .agents
-                    .get_mut(&self.agent_id)
-                    .expect("agent exists")
-                    .queries
-                    .subscriptions
-                    .insert(id, cx.waker().clone());
-                Poll::Pending
-            })
-            .await
-        }
-    }
-
-    impl Drop for UpdateSubscription<'_, '_> {
-        fn drop(&mut self) {
-            if let Some(id) = self.id
-                && let Some(agent) = self
-                    .simulator
-                    .state
-                    .lock()
-                    .expect("never poisoned")
-                    .agents
-                    .get_mut(&self.agent_id)
-            {
-                agent.queries.subscriptions.remove(&id);
-            }
-        }
-    }
-
-    impl PreviewSubscription {
-        async fn next(&mut self) -> Result<Option<Preview>, QueryError> {
-            future::poll_fn(|cx| {
-                let mut state = self.state.lock().expect("never poisoned");
-                let Some(agent) = state.agents.get(&self.agent_id) else {
-                    return Poll::Ready(Err(QueryError::agent_not_found("agent does not exist")));
-                };
-                if self.version != Some(agent.queries.preview_version) {
-                    self.version = Some(agent.queries.preview_version);
-                    return Poll::Ready(Ok(agent.queries.preview.clone()));
-                }
-                let id = *self
-                    .id
-                    .get_or_insert_with(|| state.allocate_subscription_id());
-                state
-                    .agents
-                    .get_mut(&self.agent_id)
-                    .expect("agent exists")
-                    .queries
-                    .preview_subscriptions
-                    .insert(id, cx.waker().clone());
-                Poll::Pending
-            })
-            .await
-        }
-    }
-
-    impl Drop for PreviewSubscription {
-        fn drop(&mut self) {
-            if let Some(id) = self.id
-                && let Some(agent) = self
-                    .state
-                    .lock()
-                    .expect("never poisoned")
-                    .agents
-                    .get_mut(&self.agent_id)
-            {
-                agent.queries.preview_subscriptions.remove(&id);
-            }
-        }
-    }
-
-    impl<'store, 'sim> TurnSubscription<'store, 'sim> {
-        const fn new(
-            simulator: &'store StoreSimulator<'sim>,
-            agent_id: AgentId,
-            message_id: MessageId,
-        ) -> Self {
-            Self {
-                simulator,
-                id: None,
-                agent_id,
-                message_id,
-            }
-        }
-
-        async fn wait(mut self) -> Result<TurnEndEvent, QueryError> {
-            future::poll_fn(|cx| {
-                let mut state = self.simulator.state.lock().expect("never poisoned");
-
-                let Some(agent) = state.agents.get(&self.agent_id) else {
-                    return Poll::Ready(Err(QueryError::agent_not_found("agent does not exist")));
-                };
-
-                let Some(input_cursor) = agent.message_cursors.get(&self.message_id) else {
-                    return Poll::Ready(Err(QueryError::message_not_found(
-                        "message does not exist",
-                    )));
-                };
-
-                if let Some(input_cursor) = input_cursor
-                    && let Some((cursor, payload)) = agent
-                        .turn_ends
-                        .range((Bound::Excluded(*input_cursor), Bound::Unbounded))
-                        .next()
-                {
-                    return Poll::Ready(Ok(TurnEndEvent {
-                        cursor: *cursor,
-                        payload: *payload,
-                    }));
-                }
-
-                let id = *self
-                    .id
-                    .get_or_insert_with(|| state.allocate_subscription_id());
-
-                state
-                    .agents
-                    .get_mut(&self.agent_id)
-                    .expect("agent exists")
-                    .turn_subscriptions
-                    .insert(id, cx.waker().clone());
-
-                Poll::Pending
-            })
-            .await
-        }
-    }
-
-    impl Drop for TurnSubscription<'_, '_> {
-        fn drop(&mut self) {
-            let Some(id) = self.id else {
-                return;
-            };
-
-            if let Some(agent) = self
-                .simulator
-                .state
-                .lock()
-                .expect("never poisoned")
-                .agents
-                .get_mut(&self.agent_id)
-            {
-                agent.turn_subscriptions.remove(&id);
-            }
-        }
-    }
-
-    impl StoreSimulatorError<QueriesErrorKind> {
-        const fn agent_not_found(message: &'static str) -> Self {
-            Self {
-                inner: StoreSimulatorErrorInner::Kind(QueriesErrorKind::AgentNotFound, message),
-            }
-        }
-
-        const fn message_not_found(message: &'static str) -> Self {
-            Self {
-                inner: StoreSimulatorErrorInner::Kind(QueriesErrorKind::MessageNotFound, message),
-            }
-        }
-    }
-
-    impl fleet_core::Error<QueriesErrorKind> for StoreSimulatorError<QueriesErrorKind> {
-        fn kind(&self) -> QueriesErrorKind {
-            match self.inner {
-                StoreSimulatorErrorInner::Random(_) => QueriesErrorKind::Other,
-                StoreSimulatorErrorInner::Kind(kind, _) => kind,
-            }
         }
     }
 }

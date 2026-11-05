@@ -12,3 +12,15 @@ workspace = true
 
 [dependencies]
 fleet-core.workspace = true
+fleet-kit = { workspace = true, optional = true }
+futures-channel = { workspace = true, features = ["std"] }
+futures-util = { workspace = true, features = ["std"] }
+redb = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+futures-executor = { workspace = true, features = ["std"] }
+
+[features]
+queries = ["dep:fleet-kit"]

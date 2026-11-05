@@ -43,6 +43,7 @@ dependencies = [
  "fleet-core",
  "fleet-kit",
  "fleet-simulator",
+ "fleet-store",
  "form_urlencoded",
  "futures-util",
  "http-body-util",
@@ -51,6 +52,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]
@@ -77,7 +79,6 @@ version = "0.0.0"
 dependencies = [
  "fastrand",
  "fleet-core",
- "fleet-kit",
  "futures-executor",
  "futures-util",
 ]
@@ -87,6 +88,13 @@ name = "fleet-store"
 version = "0.0.0"
 dependencies = [
  "fleet-core",
+ "fleet-kit",
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "redb",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -332,6 +340,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "redb"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
