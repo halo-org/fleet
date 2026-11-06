@@ -22,12 +22,14 @@ pub(crate) use self::{
 };
 
 use core::{
+    error::Error,
     net::{Ipv4Addr, SocketAddr},
     pin::pin,
     time::Duration,
 };
+use fleet_wasm::{Wasm, WasmCapabilities, WasmModels, WasmMount, WasmRoles, WasmTools};
 use futures_util::future;
-use std::{io, process::ExitCode};
+use std::{fs, io, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -36,6 +38,27 @@ fn main() -> ExitCode {
         .expect("can build tokio runtime");
 
     let idle_timeout = None;
+    let config_dir = match directories::create_config_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Could not create config directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let providers_path = config_dir.join("providers.wasm");
+    let (roles, models, tools) = match load_providers(&providers_path, &config_dir) {
+        Ok(providers) => providers,
+        Err(error) => {
+            eprintln!("Could not load {}: {error}", providers_path.display());
+            let mut source = error.source();
+            while let Some(error) = source {
+                eprintln!("  {error}");
+                source = error.source();
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
     let data_dir = match directories::create_data_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -56,7 +79,8 @@ fn main() -> ExitCode {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1337));
     let shutdown_timeout = Some(Duration::from_secs(10));
 
-    match tokio_runtime.block_on(run(fleet, address, shutdown_timeout)) {
+    let agents = fleet.run(&roles, &models, &tools);
+    match tokio_runtime.block_on(run(fleet.clone(), agents, address, shutdown_timeout)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("HTTP server failed: {error}");
@@ -65,8 +89,30 @@ fn main() -> ExitCode {
     }
 }
 
+fn load_providers(
+    path: &Path,
+    config_dir: &Path,
+) -> Result<(WasmRoles, WasmModels, WasmTools), Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    let wasm = Wasm::new()?;
+    let component = wasm.compile(&bytes)?;
+    let capabilities = WasmCapabilities {
+        filesystem: vec![WasmMount {
+            host_path: config_dir.into(),
+            guest_path: "/config".into(),
+            read_only: true,
+        }],
+        ..WasmCapabilities::default()
+    };
+    let roles = wasm.roles(&component, capabilities.clone())?;
+    let models = wasm.models(&component, capabilities.clone())?;
+    let tools = wasm.tools(&component, capabilities)?;
+    Ok((roles, models, tools))
+}
+
 async fn run(
     fleet: Fleet,
+    agents: impl Future<Output = ()> + Send,
     address: SocketAddr,
     shutdown_timeout: Option<Duration>,
 ) -> io::Result<()> {
@@ -85,7 +131,7 @@ async fn run(
         result
     };
 
-    let (result, ()) = future::join(server, fleet.run()).await;
+    let (result, ()) = future::join(server, agents).await;
 
     result
 }

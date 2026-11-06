@@ -1,0 +1,59 @@
+/// Provides access to models.
+interface models {
+    use types.{
+        model, model-name, model-context, model-continuation, model-input,
+        model-response-chunk, model-compaction-response,
+    };
+
+    /// The kind of error returned by a model provider.
+    enum models-error-kind {
+        /// The continuation token is not valid for this model.
+        invalid-continuation,
+        /// The input contains compaction state that this model cannot use.
+        invalid-compaction,
+        /// The context of the conversation exceeds the model's context window.
+        context-too-long,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by a model provider.
+    record models-error {
+        /// The kind of error.
+        kind: models-error-kind,
+        /// A description of the error.
+        message: string,
+    }
+
+    /// Returns the model with the given name.
+    get: async func(name: model-name) -> result<option<model>, models-error>;
+
+    /// Streams a response to the provided input.
+    ///
+    /// A successful stream emits exactly one response-end as its final item.
+    /// Ending without it means an incomplete response. An error ends the stream.
+    generate: async func(
+        context: model-context,
+        continuation: option<model-continuation>,
+        input: list<model-input>,
+    ) -> stream<result<model-response-chunk, models-error>>;
+
+    /// Compacts the provided input.
+    ///
+    /// The context and input allow providers to reuse the cache from previous generations.
+    /// Providers may use native compaction or generate a summary. Instructions override
+    /// the default summarization instructions.
+    ///
+    /// The returned input replaces the full context covered by this call.
+    compact: async func(
+        context: model-context,
+        continuation: option<model-continuation>,
+        input: list<model-input>,
+        instructions: option<string>,
+    ) -> result<model-compaction-response, models-error>;
+}
+
+/// A component that provides models.
+world model-provider {
+    export models;
+}

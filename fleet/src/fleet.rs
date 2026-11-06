@@ -1,21 +1,13 @@
 use crate::{ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
-use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId};
+use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId, Models, Roles, Tools};
 use fleet_kit::{
     AgentActivity, AgentUpdates, EventQuery, EventRecord, MessageRecord, Preview, Queries as _,
     QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
 };
-use fleet_simulator::{ModelsSimulator, RolesSimulator, Scheduler, Simulator, ToolsSimulator};
 use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
-use std::sync::{Arc, LazyLock};
-
-static SCHEDULER: LazyLock<Scheduler> = LazyLock::new(|| {
-    let scheduler = Scheduler::new(0);
-    scheduler.disable_suspensions();
-    scheduler.disable_faults();
-    scheduler
-});
+use std::sync::Arc;
 
 /// An AI agent harness.
 #[derive(Clone)]
@@ -37,30 +29,27 @@ pub enum FleetError {
 struct State {
     idle_handler: IdleHandler,
     store: Store,
-    roles: RolesSimulator<'static>,
-    models: ModelsSimulator<'static>,
-    tools: ToolsSimulator<'static>,
 }
 
 impl Fleet {
-    /// Creates a fleet with the given store and simulated providers.
+    /// Creates a fleet with the given store.
     #[must_use]
     pub fn new(store: Store, idle_timeout: Option<Duration>) -> Self {
-        let simulator = Simulator::new(&SCHEDULER, 0);
-
         Self {
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
                 store,
-                roles: simulator.roles,
-                models: simulator.models,
-                tools: simulator.tools,
             }),
         }
     }
 
     /// Runs agents until shutdown and waits for pending mutations.
-    pub async fn run(&self) {
+    pub async fn run(
+        &self,
+        roles: &(impl Roles<Error: Send> + Sync),
+        models: &(impl Models<Error: Send> + Sync),
+        tools: &(impl Tools<Error: Send> + Sync),
+    ) {
         let state = &self.state;
 
         let agents = async {
@@ -71,9 +60,9 @@ impl Fleet {
                     &state.idle_handler,
                     ErrorHandler,
                     &state.store,
-                    &state.roles,
-                    &state.models,
-                    &state.tools,
+                    roles,
+                    models,
+                    tools,
                 )
                 .await;
 
@@ -355,7 +344,7 @@ mod tests {
     use fleet_core::{
         Compaction, Configured, ContentBlock, JsonObject, MessageMode, ModelOutput,
         ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage, RuntimeStore as _,
-        ToolCall, ToolOutput, ToolResult, TurnEnd,
+        ToolCall, ToolOutput, ToolResult,
     };
     use http_body_util::{BodyExt as _, Full};
     use hyper::{
@@ -437,43 +426,6 @@ mod tests {
     {
         let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
-    }
-
-    #[test]
-    fn run_processes_a_message_and_shuts_down_when_idle() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let store = Store::memory().unwrap();
-        let fleet = Fleet::new(store.clone(), Some(Duration::ZERO));
-        let agent = Agent {
-            id: 1.into(),
-            role: Configured {
-                name: fleet.state.roles.role_names().first().unwrap().clone(),
-                config: JsonObject::new(),
-            },
-            extensions: JsonObject::new(),
-        };
-        let message = Message {
-            id: 1.into(),
-            mode: MessageMode::Steer,
-            content: vec![ContentBlock::Text("Hello".into())],
-        };
-
-        runtime.block_on(async {
-            fleet
-                .create_agent("create".into(), agent.clone(), Some(message.clone()))
-                .await
-                .unwrap();
-            tokio::time::timeout(Duration::from_secs(5), fleet.run())
-                .await
-                .unwrap();
-            let state = store.agent_state(agent.id).await.unwrap().unwrap();
-            let turn_end = store.wait_for_turn_end(agent.id, message.id).await.unwrap();
-            assert_eq!(state.parked_at, state.latest_event);
-            assert_eq!(turn_end.payload, TurnEnd::Completed);
-        });
     }
 
     #[test]

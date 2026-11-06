@@ -83,4 +83,7 @@ redb = { version = "4.4.0", default-features = false }
 serde = { version = "1.0.229", default-features = false }
 serde_json = { version = "1.0.151", default-features = false }
 tokio = { version = "1.54.0", default-features = false }
+wasmtime = { version = "50.0.1", default-features = false }
+wasmtime-wasi = { version = "50.0.1", default-features = false }
+wasmtime-wasi-http = { version = "50.0.1", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }

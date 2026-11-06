@@ -1,0 +1,18 @@
+/// Provides access to prompts.
+interface prompts {
+    use types.{json-object, prompt, prompt-name, prompt-context, prompt-response};
+
+    /// Returns the prompt with the given name.
+    get: async func(name: prompt-name) -> result<option<prompt>, string>;
+
+    /// Renders a prompt using the provided input.
+    render: async func(
+        context: prompt-context,
+        input: json-object,
+    ) -> result<prompt-response, string>;
+}
+
+/// A component that provides prompts.
+world prompt-provider {
+    export prompts;
+}

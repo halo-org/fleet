@@ -1,0 +1,349 @@
+package fleet:providers@0.0.0;
+
+/// Types shared by providers.
+interface types {
+    /// A JSON object encoded as a string.
+    type json-object = string;
+
+    // === Agents ===
+
+    /// The ID of an agent.
+    record agent-id {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    // === Roles ===
+
+    /// The metadata of a role.
+    record role {
+        /// The name that uniquely identifies this role.
+        name: role-name,
+        /// The parameters this role exposes. Names must be unique.
+        parameters: list<tuple<role-parameter-name, role-parameter>>,
+        /// The model that powers agents with this role.
+        model: configured,
+        /// The tools available to agents with this role. Aliases must be unique.
+        tools: list<tuple<tool-alias, configured>>,
+        /// The system prompt to pass to the model.
+        system-prompt: string,
+        /// The compaction settings. When absent, the model's defaults are used.
+        compaction: option<role-compaction>,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The name of a role.
+    type role-name = string;
+
+    /// The metadata of a role parameter.
+    record role-parameter {
+        /// Where the value of this role parameter should replace.
+        target: role-parameter-target,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The name of a role parameter.
+    type role-parameter-name = string;
+
+    /// Where a role parameter should override.
+    /// Paths contain object keys as separate segments.
+    variant role-parameter-target {
+        /// A path in the model's config.
+        model(list<string>),
+        /// A path in a tool's config.
+        tool(tuple<tool-alias, list<string>>),
+        /// A path in the role's extensions.
+        extensions(list<string>),
+    }
+
+    /// The compaction settings of a role.
+    record role-compaction {
+        /// The input token count that triggers compaction.
+        ///
+        /// When absent, the model's compaction threshold is used.
+        threshold: option<u32>,
+        /// Custom summarization instructions.
+        ///
+        /// When absent, the model provider uses its default instructions.
+        instructions: option<string>,
+    }
+
+    // === Models ===
+
+    /// The metadata of a model.
+    record model {
+        /// The name that uniquely identifies this model.
+        name: model-name,
+        /// The maximum number of combined input and output tokens this model supports.
+        context-window: u32,
+        /// The recommended number of input tokens at which to compact this model's input.
+        compaction-threshold: u32,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The name of a model.
+    type model-name = string;
+
+    /// The context passed to a model.
+    record model-context {
+        /// The model name and config.
+        model: configured,
+        /// The system prompt to use.
+        system-prompt: string,
+        /// The tools available to the model.
+        tools: list<model-tool>,
+        /// The role's extensions.
+        role-extensions: json-object,
+    }
+
+    /// A model's view of a tool.
+    record model-tool {
+        /// The name of the tool.
+        name: tool-alias,
+        /// The description of the tool.
+        description: option<string>,
+        /// Whether the model may continue without waiting for this tool's result.
+        is-async: bool,
+        /// The schema of the tool's input object.
+        input-schema: json-object,
+    }
+
+    /// Input to a model.
+    variant model-input {
+        /// Content sent by the user.
+        user(list<content-block>),
+        /// Content of previous model responses.
+        assistant(tuple<model-provenance, list<model-output>>),
+        /// Content of a tool result.
+        tool-result(tool-result),
+        /// Compacted context from a model.
+        compaction(tuple<model-provenance, model-compaction>),
+    }
+
+    /// A response from a model.
+    record model-response {
+        /// The response output blocks.
+        output: list<model-output>,
+        /// How many tokens were used to serve this response.
+        usage: model-usage,
+        /// Provenance to identify which underlying model served this response.
+        provenance: model-provenance,
+        /// A token to continue from this response.
+        continuation-token: option<string>,
+    }
+
+    /// A chunk of a streamed model response.
+    variant model-response-chunk {
+        /// The start of a text block.
+        text-start(u32),
+        /// The start of a reasoning block.
+        reasoning-start(u32),
+        /// The start of a tool call block.
+        tool-call-start(tuple<u32, tool-call-id, tool-alias>),
+        /// An update to a text block.
+        text-delta(tuple<u32, string>),
+        /// An update to a reasoning block.
+        reasoning-delta(tuple<u32, string>),
+        /// An update to a tool call block.
+        tool-input-delta(tuple<u32, string>),
+        /// The end of a block.
+        output-end(tuple<u32, model-output>),
+        /// The end of the response.
+        response-end(model-response),
+    }
+
+    /// A model output.
+    variant model-output {
+        /// Text.
+        text(string),
+        /// Reasoning.
+        reasoning(model-reasoning),
+        /// Tool call.
+        tool-call(tool-call),
+    }
+
+    /// Reasoning output from a model.
+    record model-reasoning {
+        /// Readable content. This may be the full content or a summary.
+        content: option<string>,
+        /// Opaque content that the model can read on future turns.
+        redacted-content: option<string>,
+        /// An attestation of this output. This may be a signature or an ID.
+        attestation: option<string>,
+    }
+
+    /// A response from compacting model input.
+    record model-compaction-response {
+        /// The input that replaces the compacted context.
+        input: list<model-input>,
+        /// How many tokens were used for compaction.
+        usage: model-usage,
+    }
+
+    /// Compaction output from a model.
+    record model-compaction {
+        /// Readable summary.
+        content: option<string>,
+        /// Opaque content that the model can read on future turns.
+        redacted-content: option<string>,
+        /// An attestation of this output. This may be a signature or an ID.
+        attestation: option<string>,
+    }
+
+    /// Token usage of a model call.
+    record model-usage {
+        /// Input tokens, including cache reads and writes.
+        input: u32,
+        /// Output tokens.
+        output: u32,
+        /// Tokens read from cache.
+        cache-read: u32,
+        /// Tokens written to cache.
+        cache-write: u32,
+    }
+
+    /// Continuation from a model response.
+    record model-continuation {
+        /// The continuation token.
+        token: string,
+        /// Provenance to identify which underlying model the token can be used with.
+        provenance: model-provenance,
+    }
+
+    /// Identifies the underlying model that produced an output.
+    record model-provenance {
+        /// The model provider ID.
+        provider-id: string,
+        /// The model ID.
+        model-id: string,
+    }
+
+    // === Tools ===
+
+    /// The metadata of a tool.
+    record tool {
+        /// The name that uniquely identifies this tool.
+        name: tool-name,
+        /// A description of how to use this tool.
+        description: option<string>,
+        /// Whether the model may continue without waiting for this tool's result.
+        is-async: bool,
+        /// The JSON schema for this tool's input.
+        input-schema: json-object,
+        /// The JSON schema for structured output, if supported.
+        output-schema: option<json-object>,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The name of a tool.
+    type tool-name = string;
+
+    /// The name models use to refer to a tool.
+    type tool-alias = string;
+
+    /// The context passed to a tool.
+    record tool-context {
+        /// The tool name and config.
+        tool: configured,
+        /// The ID of the agent using the tool.
+        agent-id: agent-id,
+        /// The tool call ID.
+        call-id: tool-call-id,
+        /// The role's extensions.
+        role-extensions: json-object,
+    }
+
+    /// A request to call a tool.
+    record tool-call {
+        /// The ID of this tool call, unique within the agent's history.
+        id: tool-call-id,
+        /// The tool to call.
+        tool: tool-alias,
+        /// Whether the model may continue without waiting for this tool call's result.
+        is-async: bool,
+        /// The input passed to the tool.
+        input: json-object,
+    }
+
+    /// The result of a tool call.
+    record tool-result {
+        /// The ID of the corresponding tool call.
+        call-id: tool-call-id,
+        /// The output of the tool.
+        output: tool-output,
+    }
+
+    /// The ID of a tool call.
+    type tool-call-id = string;
+
+    /// The output of a tool call.
+    record tool-output {
+        /// The output content.
+        content: list<content-block>,
+        /// The output structured content.
+        structured-content: option<json-object>,
+        /// Whether the tool returned an error.
+        is-error: bool,
+    }
+
+    // === Prompts ===
+
+    /// The metadata of a prompt.
+    record prompt {
+        /// The name that uniquely identifies this prompt.
+        name: prompt-name,
+        /// The JSON schema for this prompt's input.
+        input-schema: json-object,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The name of a prompt.
+    type prompt-name = string;
+
+    /// The context passed to a prompt.
+    record prompt-context {
+        /// The prompt name and config.
+        prompt: configured,
+        /// The ID of the agent the prompt is being rendered for.
+        agent-id: agent-id,
+    }
+
+    /// A response from rendering a prompt.
+    record prompt-response {
+        /// The response output items.
+        output: list<prompt-output>,
+    }
+
+    /// A rendered prompt output.
+    variant prompt-output {
+        /// Content attributed to the user.
+        user(list<content-block>),
+        /// Content attributed to the assistant.
+        assistant(list<content-block>),
+    }
+
+    // === Configuration ===
+
+    /// An item's name and config.
+    record configured {
+        /// The name of the item being configured.
+        name: string,
+        /// The config object.
+        config: json-object,
+    }
+
+    // === Content ===
+
+    /// A content block.
+    variant content-block {
+        /// Text content.
+        text(string),
+    }
+}
