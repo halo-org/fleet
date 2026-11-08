@@ -1,21 +1,11 @@
-pub mod roles {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "role-provider",
-    });
-}
-
-pub use roles::fleet::providers::types;
-
 pub mod models {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "model-provider",
-        with: {
-            "fleet:providers/types": super::types,
-        },
     });
 }
+
+pub use models::fleet::providers::types;
 
 pub mod tools {
     wasmtime::component::bindgen!({

@@ -3,10 +3,8 @@ use fleet_core::{
     AgentId, Configured, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
     ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
     ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext, PromptOutput,
-    PromptResponse, Role, RoleCompaction, RoleParameter, RoleParameterName, RoleParameterTarget,
-    Tool, ToolAlias, ToolCall, ToolContext, ToolOutput, ToolResult,
+    PromptResponse, Tool, ToolCall, ToolContext, ToolOutput, ToolResult,
 };
-use std::collections::BTreeMap;
 
 fn json(object: &JsonObject) -> String {
     serde_json::to_string(object).expect("JSON objects can be serialized")
@@ -27,80 +25,6 @@ impl<N: AsRef<str>> From<&Configured<N>> for types::Configured {
         Self {
             name: value.name.as_ref().into(),
             config: json(&value.config),
-        }
-    }
-}
-
-impl<N: From<String>> TryFrom<types::Configured> for Configured<N> {
-    type Error = WasmError;
-
-    fn try_from(value: types::Configured) -> Result<Self, Self::Error> {
-        Ok(Self {
-            name: value.name.into(),
-            config: serde_json::from_str(&value.config)?,
-        })
-    }
-}
-
-impl TryFrom<types::Role> for Role {
-    type Error = WasmError;
-
-    fn try_from(value: types::Role) -> Result<Self, Self::Error> {
-        let mut parameters = BTreeMap::new();
-        for (name, parameter) in value.parameters {
-            let name = RoleParameterName::from(name);
-            if parameters
-                .insert(name.clone(), parameter.try_into()?)
-                .is_some()
-            {
-                return Err(WasmError::duplicate_role_parameter(name));
-            }
-        }
-
-        let mut tools = BTreeMap::new();
-        for (alias, tool) in value.tools {
-            let alias = ToolAlias::from(alias);
-            if tools.insert(alias.clone(), tool.try_into()?).is_some() {
-                return Err(WasmError::duplicate_tool_alias(alias));
-            }
-        }
-
-        Ok(Self {
-            name: value.name.into(),
-            parameters,
-            model: value.model.try_into()?,
-            tools,
-            system_prompt: value.system_prompt,
-            compaction: value.compaction.map(Into::into),
-            extensions: serde_json::from_str(&value.extensions)?,
-        })
-    }
-}
-
-impl TryFrom<types::RoleParameter> for RoleParameter {
-    type Error = WasmError;
-
-    fn try_from(value: types::RoleParameter) -> Result<Self, Self::Error> {
-        Ok(Self {
-            target: match value.target {
-                types::RoleParameterTarget::Model(path) => RoleParameterTarget::Model(path),
-                types::RoleParameterTarget::Tool((alias, path)) => {
-                    RoleParameterTarget::Tool(alias.into(), path)
-                }
-                types::RoleParameterTarget::Extensions(path) => {
-                    RoleParameterTarget::Extensions(path)
-                }
-            },
-            extensions: serde_json::from_str(&value.extensions)?,
-        })
-    }
-}
-
-impl From<types::RoleCompaction> for RoleCompaction {
-    fn from(value: types::RoleCompaction) -> Self {
-        Self {
-            threshold: value.threshold,
-            instructions: value.instructions,
         }
     }
 }

@@ -15,63 +15,6 @@ interface types {
         low: u64,
     }
 
-    // === Roles ===
-
-    /// The metadata of a role.
-    record role {
-        /// The name that uniquely identifies this role.
-        name: role-name,
-        /// The parameters this role exposes. Names must be unique.
-        parameters: list<tuple<role-parameter-name, role-parameter>>,
-        /// The model that powers agents with this role.
-        model: configured,
-        /// The tools available to agents with this role. Aliases must be unique.
-        tools: list<tuple<tool-alias, configured>>,
-        /// The system prompt to pass to the model.
-        system-prompt: string,
-        /// The compaction settings. When absent, the model's defaults are used.
-        compaction: option<role-compaction>,
-        /// Additional data not interpreted by core.
-        extensions: json-object,
-    }
-
-    /// The name of a role.
-    type role-name = string;
-
-    /// The metadata of a role parameter.
-    record role-parameter {
-        /// Where the value of this role parameter should replace.
-        target: role-parameter-target,
-        /// Additional data not interpreted by core.
-        extensions: json-object,
-    }
-
-    /// The name of a role parameter.
-    type role-parameter-name = string;
-
-    /// Where a role parameter should override.
-    /// Paths contain object keys as separate segments.
-    variant role-parameter-target {
-        /// A path in the model's config.
-        model(list<string>),
-        /// A path in a tool's config.
-        tool(tuple<tool-alias, list<string>>),
-        /// A path in the role's extensions.
-        extensions(list<string>),
-    }
-
-    /// The compaction settings of a role.
-    record role-compaction {
-        /// The input token count that triggers compaction.
-        ///
-        /// When absent, the model's compaction threshold is used.
-        threshold: option<u32>,
-        /// Custom summarization instructions.
-        ///
-        /// When absent, the model provider uses its default instructions.
-        instructions: option<string>,
-    }
-
     // === Models ===
 
     /// The metadata of a model.

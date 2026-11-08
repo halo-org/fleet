@@ -2,7 +2,7 @@ use crate::bindings::{
     models::exports::fleet::providers::models, tools::exports::fleet::providers::tools,
 };
 use core::fmt;
-use fleet_core::{ModelsErrorKind, RoleParameterName, ToolAlias, ToolsErrorKind};
+use fleet_core::{ModelsErrorKind, ToolsErrorKind};
 
 /// An error returned by the WebAssembly host or a provider.
 #[derive(Debug)]
@@ -21,8 +21,6 @@ enum Kind {
         kind: ToolsErrorKind,
         message: String,
     },
-    DuplicateRoleParameter(RoleParameterName),
-    DuplicateToolAlias(ToolAlias),
     IncompleteResponse,
 }
 
@@ -33,14 +31,6 @@ impl WasmError {
 
     pub(crate) const fn provider(message: String) -> Self {
         Self(Kind::Provider(message))
-    }
-
-    pub(crate) const fn duplicate_role_parameter(name: RoleParameterName) -> Self {
-        Self(Kind::DuplicateRoleParameter(name))
-    }
-
-    pub(crate) const fn duplicate_tool_alias(alias: ToolAlias) -> Self {
-        Self(Kind::DuplicateToolAlias(alias))
     }
 
     pub(crate) const fn incomplete_response() -> Self {
@@ -80,8 +70,6 @@ impl fmt::Display for WasmError {
             Kind::Provider(message)
             | Kind::Model { message, kind: _ }
             | Kind::Tool { message, kind: _ } => f.write_str(message),
-            Kind::DuplicateRoleParameter(name) => write!(f, "role repeats parameter {name}"),
-            Kind::DuplicateToolAlias(alias) => write!(f, "role repeats tool alias {alias}"),
             Kind::IncompleteResponse => f.write_str("model response is incomplete"),
         }
     }
@@ -101,8 +89,6 @@ impl core::error::Error for WasmError {
                 kind: _,
                 message: _,
             }
-            | Kind::DuplicateRoleParameter(_)
-            | Kind::DuplicateToolAlias(_)
             | Kind::IncompleteResponse => None,
         }
     }

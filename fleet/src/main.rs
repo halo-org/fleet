@@ -6,6 +6,7 @@ mod directories;
 mod error_handler;
 mod fleet;
 mod idle_handler;
+mod roles;
 mod server;
 mod signals;
 mod subscription;
@@ -19,6 +20,7 @@ pub(crate) use self::{
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
+    roles::Roles,
 };
 
 use core::{
@@ -27,7 +29,7 @@ use core::{
     pin::pin,
     time::Duration,
 };
-use fleet_wasm::{Wasm, WasmCapabilities, WasmModels, WasmMount, WasmRoles, WasmTools};
+use fleet_wasm::{Wasm, WasmCapabilities, WasmModels, WasmMount, WasmTools};
 use futures_util::future;
 use std::{fs, io, path::Path, process::ExitCode};
 
@@ -46,7 +48,8 @@ fn main() -> ExitCode {
         }
     };
     let providers_path = config_dir.join("providers.wasm");
-    let (roles, models, tools) = match load_providers(&providers_path, &config_dir) {
+    let roles = Roles;
+    let (models, tools) = match load_providers(&providers_path, &config_dir) {
         Ok(providers) => providers,
         Err(error) => {
             eprintln!("Could not load {}: {error}", providers_path.display());
@@ -92,7 +95,7 @@ fn main() -> ExitCode {
 fn load_providers(
     path: &Path,
     config_dir: &Path,
-) -> Result<(WasmRoles, WasmModels, WasmTools), Box<dyn Error>> {
+) -> Result<(WasmModels, WasmTools), Box<dyn Error>> {
     let bytes = fs::read(path)?;
     let wasm = Wasm::new()?;
     let component = wasm.compile(&bytes)?;
@@ -104,10 +107,9 @@ fn load_providers(
         }],
         ..WasmCapabilities::default()
     };
-    let roles = wasm.roles(&component, capabilities.clone())?;
     let models = wasm.models(&component, capabilities.clone())?;
     let tools = wasm.tools(&component, capabilities)?;
-    Ok((roles, models, tools))
+    Ok((models, tools))
 }
 
 async fn run(

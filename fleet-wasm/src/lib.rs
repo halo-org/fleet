@@ -13,12 +13,12 @@
 //! # fn example(bytes: &[u8]) -> Result<(), WasmError> {
 //! let wasm = Wasm::new()?;
 //! let component = wasm.compile(bytes)?;
-//! let roles = wasm.roles(
+//! let tools = wasm.tools(
 //!     &component,
 //!     WasmCapabilities {
 //!         filesystem: vec![WasmMount {
-//!             host_path: "./roles".into(),
-//!             guest_path: "/roles".into(),
+//!             host_path: "./workspace".into(),
+//!             guest_path: "/workspace".into(),
 //!             read_only: true,
 //!         }],
 //!         ..WasmCapabilities::default()
@@ -35,7 +35,6 @@ mod wasm_capabilities;
 mod wasm_error;
 mod wasm_models;
 mod wasm_prompts;
-mod wasm_roles;
 mod wasm_state;
 mod wasm_tools;
 
@@ -45,7 +44,6 @@ pub use self::{
     wasm_error::WasmError,
     wasm_models::WasmModels,
     wasm_prompts::WasmPrompts,
-    wasm_roles::WasmRoles,
     wasm_tools::WasmTools,
 };
 

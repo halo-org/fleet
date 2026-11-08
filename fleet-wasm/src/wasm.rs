@@ -1,6 +1,4 @@
-use crate::{
-    WasmCapabilities, WasmError, WasmModels, WasmPrompts, WasmRoles, WasmState, WasmTools,
-};
+use crate::{WasmCapabilities, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools};
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy,
     component::{Component, Linker},
@@ -45,21 +43,6 @@ impl Wasm {
     pub fn compile(&self, bytes: &[u8]) -> Result<WasmComponent, WasmError> {
         let component = Component::new(&self.engine, bytes).map_err(WasmError::runtime)?;
         Ok(WasmComponent { component })
-    }
-
-    /// Creates a role provider from a compiled component.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the component belongs to another host, has unsupported
-    /// imports, does not export the role interface or a directory cannot be opened.
-    pub fn roles(
-        &self,
-        component: &WasmComponent,
-        capabilities: WasmCapabilities,
-    ) -> Result<WasmRoles, WasmError> {
-        let linker = self.linker(&capabilities)?;
-        WasmRoles::new(&component.component, &linker, capabilities)
     }
 
     /// Creates a model provider from a compiled component.
