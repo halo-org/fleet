@@ -16,13 +16,13 @@ impl fleet_core::Roles for Roles {
             name: name.clone(),
             parameters: BTreeMap::new(),
             model: Configured {
-                name: "test".into(),
+                name: "example:test".into(),
                 config: JsonObject::new(),
             },
             tools: BTreeMap::from([(
                 "echo".into(),
                 Configured {
-                    name: "echo".into(),
+                    name: "example:echo".into(),
                     config: JsonObject::new(),
                 },
             )]),

@@ -5,13 +5,14 @@ pub mod models {
     });
 }
 
-pub use models::fleet::providers::types;
+pub use models::fleet::providers::{configuration, types};
 
 pub mod tools {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "tool-provider",
         with: {
+            "fleet:providers/configuration": super::configuration,
             "fleet:providers/types": super::types,
         },
     });
@@ -22,6 +23,7 @@ pub mod prompts {
         path: "wit",
         world: "prompt-provider",
         with: {
+            "fleet:providers/configuration": super::configuration,
             "fleet:providers/types": super::types,
         },
     });

@@ -29,7 +29,8 @@ use core::{
     pin::pin,
     time::Duration,
 };
-use fleet_wasm::{Wasm, WasmCapabilities, WasmModels, WasmMount, WasmTools};
+use fleet_core::JsonObject;
+use fleet_wasm::{Wasm, WasmCapabilities, WasmMount, WasmRegistry};
 use futures_util::future;
 use std::{fs, io, path::Path, process::ExitCode};
 
@@ -49,7 +50,7 @@ fn main() -> ExitCode {
     };
     let providers_path = config_dir.join("providers.wasm");
     let roles = Roles;
-    let (models, tools) = match load_providers(&providers_path, &config_dir) {
+    let providers = match load_providers(&providers_path, &config_dir) {
         Ok(providers) => providers,
         Err(error) => {
             eprintln!("Could not load {}: {error}", providers_path.display());
@@ -82,7 +83,7 @@ fn main() -> ExitCode {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1337));
     let shutdown_timeout = Some(Duration::from_secs(10));
 
-    let agents = fleet.run(&roles, &models, &tools);
+    let agents = fleet.run(&roles, &providers, &providers);
     match tokio_runtime.block_on(run(fleet.clone(), agents, address, shutdown_timeout)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -92,10 +93,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn load_providers(
-    path: &Path,
-    config_dir: &Path,
-) -> Result<(WasmModels, WasmTools), Box<dyn Error>> {
+fn load_providers(path: &Path, config_dir: &Path) -> Result<WasmRegistry, Box<dyn Error>> {
     let bytes = fs::read(path)?;
     let wasm = Wasm::new()?;
     let component = wasm.compile(&bytes)?;
@@ -107,9 +105,10 @@ fn load_providers(
         }],
         ..WasmCapabilities::default()
     };
-    let models = wasm.models(&component, capabilities.clone())?;
-    let tools = wasm.tools(&component, capabilities)?;
-    Ok((models, tools))
+    let provider = wasm.provider(&component, &JsonObject::new(), capabilities)?;
+    let mut providers = WasmRegistry::new();
+    providers.insert("example", provider)?;
+    Ok(providers)
 }
 
 async fn run(

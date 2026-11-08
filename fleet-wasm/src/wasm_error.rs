@@ -2,7 +2,7 @@ use crate::bindings::{
     models::exports::fleet::providers::models, tools::exports::fleet::providers::tools,
 };
 use core::fmt;
-use fleet_core::{ModelsErrorKind, ToolsErrorKind};
+use fleet_core::{ModelName, ModelsErrorKind, PromptName, ToolName, ToolsErrorKind};
 
 /// An error returned by the WebAssembly host or a provider.
 #[derive(Debug)]
@@ -12,6 +12,12 @@ pub struct WasmError(Kind);
 enum Kind {
     Runtime(wasmtime::Error),
     Json(serde_json::Error),
+    InvalidNamespace(String),
+    DuplicateNamespace(String),
+    NoProviderInterfaces,
+    ModelNotFound(ModelName),
+    ToolNotFound(ToolName),
+    PromptNotFound(PromptName),
     Provider(String),
     Model {
         kind: ModelsErrorKind,
@@ -27,6 +33,30 @@ enum Kind {
 impl WasmError {
     pub(crate) const fn runtime(error: wasmtime::Error) -> Self {
         Self(Kind::Runtime(error))
+    }
+
+    pub(crate) fn invalid_namespace(namespace: &str) -> Self {
+        Self(Kind::InvalidNamespace(namespace.into()))
+    }
+
+    pub(crate) const fn duplicate_namespace(namespace: String) -> Self {
+        Self(Kind::DuplicateNamespace(namespace))
+    }
+
+    pub(crate) const fn no_provider_interfaces() -> Self {
+        Self(Kind::NoProviderInterfaces)
+    }
+
+    pub(crate) fn model_not_found(name: &ModelName) -> Self {
+        Self(Kind::ModelNotFound(name.clone()))
+    }
+
+    pub(crate) fn tool_not_found(name: &ToolName) -> Self {
+        Self(Kind::ToolNotFound(name.clone()))
+    }
+
+    pub(crate) fn prompt_not_found(name: &PromptName) -> Self {
+        Self(Kind::PromptNotFound(name.clone()))
     }
 
     pub(crate) const fn provider(message: String) -> Self {
@@ -67,6 +97,18 @@ impl fmt::Display for WasmError {
         match &self.0 {
             Kind::Runtime(_) => f.write_str("WebAssembly operation failed"),
             Kind::Json(_) => f.write_str("WebAssembly provider returned an invalid JSON object"),
+            Kind::InvalidNamespace(namespace) => {
+                write!(f, "invalid provider namespace \"{namespace}\"")
+            }
+            Kind::DuplicateNamespace(namespace) => {
+                write!(f, "provider namespace {namespace} is already registered")
+            }
+            Kind::NoProviderInterfaces => {
+                f.write_str("component does not export models, tools or prompts")
+            }
+            Kind::ModelNotFound(name) => write!(f, "model {name} was not found"),
+            Kind::ToolNotFound(name) => write!(f, "tool {name} was not found"),
+            Kind::PromptNotFound(name) => write!(f, "prompt {name} was not found"),
             Kind::Provider(message)
             | Kind::Model { message, kind: _ }
             | Kind::Tool { message, kind: _ } => f.write_str(message),
@@ -80,7 +122,13 @@ impl core::error::Error for WasmError {
         match &self.0 {
             Kind::Runtime(error) => Some(error.as_ref()),
             Kind::Json(error) => Some(error),
-            Kind::Provider(_)
+            Kind::InvalidNamespace(_)
+            | Kind::DuplicateNamespace(_)
+            | Kind::NoProviderInterfaces
+            | Kind::ModelNotFound(_)
+            | Kind::ToolNotFound(_)
+            | Kind::PromptNotFound(_)
+            | Kind::Provider(_)
             | Kind::Model {
                 kind: _,
                 message: _,

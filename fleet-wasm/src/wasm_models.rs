@@ -1,5 +1,5 @@
 use crate::{
-    WasmCapabilities, WasmError, WasmState,
+    WasmError, WasmState,
     bindings::{
         models::{ModelProviderPre, exports::fleet::providers::models},
         types,
@@ -10,14 +10,14 @@ use core::{
     task::{Context, Poll},
 };
 use fleet_core::{
-    Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName,
-    ModelResponseChunk, Models,
+    Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelResponseChunk,
 };
 use futures_channel::{mpsc, oneshot};
 use futures_util::{Sink as _, Stream, StreamExt as _, future, stream};
+use std::sync::Arc;
 use wasmtime::{
     Store, StoreContextMut,
-    component::{Component, Linker, Source, StreamConsumer, StreamResult},
+    component::{InstancePre, Source, StreamConsumer, StreamResult},
 };
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
@@ -26,6 +26,7 @@ use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 /// A response stream keeps its instance until the response ends or the stream is dropped.
 pub struct WasmModels {
     instance: ModelProviderPre<WasmState>,
+    config: Arc<str>,
     filesystem: WasiFilesystemCtx,
 }
 
@@ -36,27 +37,21 @@ struct ResponseConsumer {
 
 impl WasmModels {
     pub(crate) fn new(
-        component: &Component,
-        linker: &Linker<WasmState>,
-        capabilities: WasmCapabilities,
+        instance: InstancePre<WasmState>,
+        config: Arc<str>,
+        filesystem: WasiFilesystemCtx,
     ) -> Result<Self, WasmError> {
-        let instance = linker
-            .instantiate_pre(component)
-            .map_err(WasmError::runtime)?;
         Ok(Self {
             instance: ModelProviderPre::new(instance).map_err(WasmError::runtime)?,
-            filesystem: capabilities.open_filesystem()?,
+            config,
+            filesystem,
         })
     }
-}
 
-impl Models for WasmModels {
-    type Error = WasmError;
-
-    async fn get(&self, name: &ModelName) -> Result<Option<Model>, Self::Error> {
+    pub(crate) async fn get(&self, name: &str) -> Result<Option<Model>, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.filesystem.clone()),
+            WasmState::new(self.config.clone(), self.filesystem.clone()),
         );
         let instance = self
             .instance
@@ -67,7 +62,7 @@ impl Models for WasmModels {
             .run_concurrent(async |accessor| {
                 instance
                     .fleet_providers_models()
-                    .call_get(accessor, name.as_ref().into())
+                    .call_get(accessor, name.into())
                     .await
             })
             .await
@@ -78,20 +73,22 @@ impl Models for WasmModels {
         model.map(TryInto::try_into).transpose()
     }
 
-    fn generate(
+    pub(crate) fn generate(
         &self,
+        name: &str,
         context: &ModelContext,
         continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
-    ) -> impl Stream<Item = Result<ModelResponseChunk, Self::Error>> + Send {
+    ) -> impl Stream<Item = Result<ModelResponseChunk, WasmError>> + Send + use<> {
         let instance = self.instance.clone();
+        let config = self.config.clone();
         let filesystem = self.filesystem.clone();
-        let context = types::ModelContext::from(context);
+        let context = types::ModelContext::new(name, context);
         let continuation = continuation.map(types::ModelContinuation::from);
         let input = input.iter().map(types::ModelInput::from).collect();
         let (sender, receiver) = mpsc::channel(0);
         let run = async move {
-            let mut store = Store::new(instance.engine(), WasmState::new(filesystem));
+            let mut store = Store::new(instance.engine(), WasmState::new(config, filesystem));
             let instance = instance
                 .instantiate_async(&mut store)
                 .await
@@ -142,16 +139,17 @@ impl Models for WasmModels {
         })
     }
 
-    async fn compact(
+    pub(crate) async fn compact(
         &self,
+        name: &str,
         context: &ModelContext,
         continuation: Option<&ModelContinuation>,
         input: &[ModelInput],
         instructions: Option<&str>,
-    ) -> Result<ModelCompactionResponse, Self::Error> {
+    ) -> Result<ModelCompactionResponse, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.filesystem.clone()),
+            WasmState::new(self.config.clone(), self.filesystem.clone()),
         );
         let instance = self
             .instance
@@ -164,7 +162,7 @@ impl Models for WasmModels {
                     .fleet_providers_models()
                     .call_compact(
                         accessor,
-                        context.into(),
+                        types::ModelContext::new(name, context),
                         continuation.map(Into::into),
                         input.iter().map(Into::into).collect(),
                         instructions.map(Into::into),

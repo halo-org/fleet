@@ -14,5 +14,6 @@ interface prompts {
 
 /// A component that provides prompts.
 world prompt-provider {
+    import configuration;
     export prompts;
 }

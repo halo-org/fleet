@@ -1,40 +1,36 @@
-use crate::{WasmCapabilities, WasmError, WasmState, bindings::prompts::PromptProviderPre};
-use fleet_core::{JsonObject, Prompt, PromptContext, PromptName, PromptResponse, Prompts};
-use wasmtime::{
-    Store,
-    component::{Component, Linker},
+use crate::{
+    WasmError, WasmState,
+    bindings::{prompts::PromptProviderPre, types},
 };
+use fleet_core::{JsonObject, Prompt, PromptContext, PromptResponse};
+use std::sync::Arc;
+use wasmtime::{Store, component::InstancePre};
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly prompt provider.
 pub struct WasmPrompts {
     instance: PromptProviderPre<WasmState>,
+    config: Arc<str>,
     filesystem: WasiFilesystemCtx,
 }
 
 impl WasmPrompts {
     pub(crate) fn new(
-        component: &Component,
-        linker: &Linker<WasmState>,
-        capabilities: WasmCapabilities,
+        instance: InstancePre<WasmState>,
+        config: Arc<str>,
+        filesystem: WasiFilesystemCtx,
     ) -> Result<Self, WasmError> {
-        let instance = linker
-            .instantiate_pre(component)
-            .map_err(WasmError::runtime)?;
         Ok(Self {
             instance: PromptProviderPre::new(instance).map_err(WasmError::runtime)?,
-            filesystem: capabilities.open_filesystem()?,
+            config,
+            filesystem,
         })
     }
-}
 
-impl Prompts for WasmPrompts {
-    type Error = WasmError;
-
-    async fn get(&self, name: &PromptName) -> Result<Option<Prompt>, Self::Error> {
+    pub(crate) async fn get(&self, name: &str) -> Result<Option<Prompt>, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.filesystem.clone()),
+            WasmState::new(self.config.clone(), self.filesystem.clone()),
         );
         let instance = self
             .instance
@@ -45,7 +41,7 @@ impl Prompts for WasmPrompts {
             .run_concurrent(async |accessor| {
                 instance
                     .fleet_providers_prompts()
-                    .call_get(accessor, name.as_ref().into())
+                    .call_get(accessor, name.into())
                     .await
             })
             .await
@@ -56,14 +52,15 @@ impl Prompts for WasmPrompts {
         prompt.map(TryInto::try_into).transpose()
     }
 
-    async fn render(
+    pub(crate) async fn render(
         &self,
+        name: &str,
         context: &PromptContext,
         input: &JsonObject,
-    ) -> Result<PromptResponse, Self::Error> {
+    ) -> Result<PromptResponse, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.filesystem.clone()),
+            WasmState::new(self.config.clone(), self.filesystem.clone()),
         );
         let instance = self
             .instance
@@ -75,7 +72,7 @@ impl Prompts for WasmPrompts {
             .run_concurrent(async |accessor| {
                 instance
                     .fleet_providers_prompts()
-                    .call_render(accessor, context.into(), input)
+                    .call_render(accessor, types::PromptContext::new(name, context), input)
                     .await
             })
             .await

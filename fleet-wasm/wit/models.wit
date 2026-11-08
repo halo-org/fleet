@@ -55,5 +55,6 @@ interface models {
 
 /// A component that provides models.
 world model-provider {
+    import configuration;
     export models;
 }

@@ -1,7 +1,8 @@
-use crate::{WasmCapabilities, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools};
+use crate::{WasmCapabilities, WasmError, WasmProvider, WasmState, bindings::configuration};
+use fleet_core::JsonObject;
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy,
-    component::{Component, Linker},
+    component::{Component, HasSelf, Linker},
 };
 
 /// A host for WebAssembly providers.
@@ -28,6 +29,8 @@ impl Wasm {
         config.allocation_strategy(InstanceAllocationStrategy::pooling());
         let engine = Engine::new(&config).map_err(WasmError::runtime)?;
         let mut linker = Linker::new(&engine);
+        configuration::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::cli::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::clocks::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::random::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
@@ -45,49 +48,20 @@ impl Wasm {
         Ok(WasmComponent { component })
     }
 
-    /// Creates a model provider from a compiled component.
+    /// Configures a provider from a compiled component.
     ///
     /// # Errors
     ///
     /// Returns an error if the component belongs to another host, has unsupported
-    /// imports, does not export the model interface or a directory cannot be opened.
-    pub fn models(
+    /// imports, has no supported provider interfaces or a directory cannot be opened.
+    pub fn provider(
         &self,
         component: &WasmComponent,
+        config: &JsonObject,
         capabilities: WasmCapabilities,
-    ) -> Result<WasmModels, WasmError> {
+    ) -> Result<WasmProvider, WasmError> {
         let linker = self.linker(&capabilities)?;
-        WasmModels::new(&component.component, &linker, capabilities)
-    }
-
-    /// Creates a tool provider from a compiled component.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the component belongs to another host, has unsupported
-    /// imports, does not export the tool interface or a directory cannot be opened.
-    pub fn tools(
-        &self,
-        component: &WasmComponent,
-        capabilities: WasmCapabilities,
-    ) -> Result<WasmTools, WasmError> {
-        let linker = self.linker(&capabilities)?;
-        WasmTools::new(&component.component, &linker, capabilities)
-    }
-
-    /// Creates a prompt provider from a compiled component.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the component belongs to another host, has unsupported
-    /// imports, does not export the prompt interface or a directory cannot be opened.
-    pub fn prompts(
-        &self,
-        component: &WasmComponent,
-        capabilities: WasmCapabilities,
-    ) -> Result<WasmPrompts, WasmError> {
-        let linker = self.linker(&capabilities)?;
-        WasmPrompts::new(&component.component, &linker, capabilities)
+        WasmProvider::new(&component.component, &linker, config, capabilities)
     }
 
     fn linker(&self, capabilities: &WasmCapabilities) -> Result<Linker<WasmState>, WasmError> {

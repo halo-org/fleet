@@ -1,0 +1,7 @@
+/// Configuration supplied by the host.
+interface configuration {
+    use types.{json-object};
+
+    /// Returns the provider's configuration.
+    get: func() -> json-object;
+}

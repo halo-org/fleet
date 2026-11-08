@@ -1,6 +1,6 @@
 /// Provides access to tools.
 interface tools {
-    use types.{agent-id, json-object, tool, tool-name, tool-context, tool-call, tool-output};
+    use types.{json-object, tool, tool-name, tool-context, tool-output};
 
     /// The kind of error returned by a tools provider.
     enum tools-error-kind {
@@ -39,12 +39,10 @@ interface tools {
         context: tool-context,
         input: json-object,
     ) -> result<tool-output, tools-error>;
-
-    /// Returns the output for an unknown tool.
-    unknown-tool-output: func(agent-id: agent-id, call: tool-call) -> tool-output;
 }
 
 /// A component that provides tools.
 world tool-provider {
+    import configuration;
     export tools;
 }

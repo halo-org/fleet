@@ -1,6 +1,6 @@
 use crate::{WasmError, bindings::types};
 use fleet_core::{
-    AgentId, Configured, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
+    AgentId, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
     ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
     ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext, PromptOutput,
     PromptResponse, Tool, ToolCall, ToolContext, ToolOutput, ToolResult,
@@ -20,15 +20,6 @@ impl From<AgentId> for types::AgentId {
     }
 }
 
-impl<N: AsRef<str>> From<&Configured<N>> for types::Configured {
-    fn from(value: &Configured<N>) -> Self {
-        Self {
-            name: value.name.as_ref().into(),
-            config: json(&value.config),
-        }
-    }
-}
-
 impl TryFrom<types::Model> for Model {
     type Error = WasmError;
 
@@ -42,10 +33,13 @@ impl TryFrom<types::Model> for Model {
     }
 }
 
-impl From<&ModelContext> for types::ModelContext {
-    fn from(value: &ModelContext) -> Self {
+impl types::ModelContext {
+    pub(crate) fn new(name: &str, value: &ModelContext) -> Self {
         Self {
-            model: (&value.model).into(),
+            model: types::Configured {
+                name: name.into(),
+                config: json(&value.model.config),
+            },
             system_prompt: value.system_prompt.clone(),
             tools: value.tools.iter().map(Into::into).collect(),
             role_extensions: json(&value.role_extensions),
@@ -282,10 +276,13 @@ impl TryFrom<types::Tool> for Tool {
     }
 }
 
-impl From<&ToolContext> for types::ToolContext {
-    fn from(value: &ToolContext) -> Self {
+impl types::ToolContext {
+    pub(crate) fn new(name: &str, value: &ToolContext) -> Self {
         Self {
-            tool: (&value.tool).into(),
+            tool: types::Configured {
+                name: name.into(),
+                config: json(&value.tool.config),
+            },
             agent_id: value.agent_id.into(),
             call_id: value.call_id.as_ref().into(),
             role_extensions: json(&value.role_extensions),
@@ -375,10 +372,13 @@ impl TryFrom<types::Prompt> for Prompt {
     }
 }
 
-impl From<&PromptContext> for types::PromptContext {
-    fn from(value: &PromptContext) -> Self {
+impl types::PromptContext {
+    pub(crate) fn new(name: &str, value: &PromptContext) -> Self {
         Self {
-            prompt: (&value.prompt).into(),
+            prompt: types::Configured {
+                name: name.into(),
+                config: json(&value.prompt.config),
+            },
             agent_id: value.agent_id.into(),
         }
     }
