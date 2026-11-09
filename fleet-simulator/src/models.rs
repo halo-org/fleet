@@ -563,6 +563,13 @@ fn chunk_response(
                         .map(|text| ModelResponseChunk::ToolInputDelta(index, text)),
                 );
             }
+            ModelOutput::ProviderToolCall(call) => {
+                chunks.push(ModelResponseChunk::ProviderToolCallStart(
+                    index,
+                    call.call_id.clone(),
+                    call.name.clone(),
+                ));
+            }
         }
 
         chunks.push(ModelResponseChunk::OutputEnd(index, output.clone()));
@@ -1071,6 +1078,7 @@ mod tests {
                     ModelOutput::Text(_) => 'T',
                     ModelOutput::Reasoning(_) => 'R',
                     ModelOutput::ToolCall(_) => 'C',
+                    ModelOutput::ProviderToolCall(_) => 'P',
                 })
                 .collect::<String>();
 

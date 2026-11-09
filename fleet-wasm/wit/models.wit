@@ -1,4 +1,7 @@
 /// Provides access to models.
+///
+/// Use the input provenance to determine whether provider tool calls can be replayed.
+/// Omit incompatible calls or replace them with a text marker.
 interface models {
     use types.{
         model, model-name, model-context, model-continuation, model-input,
@@ -32,6 +35,9 @@ interface models {
     ///
     /// A successful stream emits exactly one response-end as its final item.
     /// Ending without it means an incomplete response. An error ends the stream.
+    ///
+    /// Provider tool calls must finish before response-end. They may succeed or fail. Any
+    /// requests needed to finish them must be handled internally.
     generate: async func(
         context: model-context,
         continuation: option<model-continuation>,

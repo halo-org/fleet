@@ -3,8 +3,8 @@
 use core::{assert_matches, pin::pin};
 use fleet_core::{
     Agent, ClientStore as _, Compaction, Configured, ContentBlock, EventPayload, JsonObject,
-    Message, MessageMode, ModelOutput, ModelProvenance, ModelReasoning, ModelResponse, ModelUsage,
-    RuntimeStore as _, ToolCall, ToolOutput, ToolResult, TurnEnd, Wake,
+    Message, MessageMode, ModelOutput, ModelProvenance, ModelProviderToolCall, ModelReasoning,
+    ModelResponse, ModelUsage, RuntimeStore as _, ToolCall, ToolOutput, ToolResult, TurnEnd, Wake,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -76,6 +76,12 @@ fn open_preserves_records_and_idempotency() {
             redacted_content: Some("opaque".into()),
             attestation: Some("signature".into()),
         }),
+        ModelOutput::ProviderToolCall(ModelProviderToolCall {
+            call_id: "search-1".into(),
+            name: "search".into(),
+            content: Some("Found results".into()),
+            payload: "opaque call".into(),
+        }),
         ModelOutput::Text("Hello".into()),
         ModelOutput::ToolCall(tool_call("async", true)),
     ]);
@@ -122,6 +128,12 @@ fn open_preserves_records_and_idempotency() {
             events[2].payload,
             EventPayload::Input(message.id, message.content)
         );
+
+        let error = store
+            .prepare_tool_call(agent.id, &"search-1".into())
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::Conflict(_));
 
         let mut wakes = pin!(store.wakes());
         let wake = wakes.next().await.unwrap().unwrap();

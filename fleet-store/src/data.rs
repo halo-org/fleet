@@ -54,6 +54,7 @@ pub enum ModelOutput {
     Text(String),
     Reasoning(ModelReasoning),
     ToolCall(ToolCall),
+    ProviderToolCall(ModelProviderToolCall),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,14 @@ pub struct ModelReasoning {
     pub content: Option<String>,
     pub redacted_content: Option<String>,
     pub attestation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProviderToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub content: Option<String>,
+    pub payload: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +292,9 @@ impl From<fleet_core::ModelOutput> for ModelOutput {
             fleet_core::ModelOutput::Text(value_0) => Self::Text(value_0),
             fleet_core::ModelOutput::Reasoning(value_0) => Self::Reasoning(value_0.into()),
             fleet_core::ModelOutput::ToolCall(value_0) => Self::ToolCall(value_0.into()),
+            fleet_core::ModelOutput::ProviderToolCall(value_0) => {
+                Self::ProviderToolCall(value_0.into())
+            }
         }
     }
 }
@@ -293,6 +305,7 @@ impl From<ModelOutput> for fleet_core::ModelOutput {
             ModelOutput::Text(value_0) => Self::Text(value_0),
             ModelOutput::Reasoning(value_0) => Self::Reasoning(value_0.into()),
             ModelOutput::ToolCall(value_0) => Self::ToolCall(value_0.into()),
+            ModelOutput::ProviderToolCall(value_0) => Self::ProviderToolCall(value_0.into()),
         }
     }
 }
@@ -313,6 +326,28 @@ impl From<ModelReasoning> for fleet_core::ModelReasoning {
             content: value.content,
             redacted_content: value.redacted_content,
             attestation: value.attestation,
+        }
+    }
+}
+
+impl From<fleet_core::ModelProviderToolCall> for ModelProviderToolCall {
+    fn from(value: fleet_core::ModelProviderToolCall) -> Self {
+        Self {
+            call_id: value.call_id.into(),
+            name: value.name.into(),
+            content: value.content,
+            payload: value.payload,
+        }
+    }
+}
+
+impl From<ModelProviderToolCall> for fleet_core::ModelProviderToolCall {
+    fn from(value: ModelProviderToolCall) -> Self {
+        Self {
+            call_id: value.call_id.into(),
+            name: value.name.into(),
+            content: value.content,
+            payload: value.payload,
         }
     }
 }

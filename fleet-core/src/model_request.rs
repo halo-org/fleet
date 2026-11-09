@@ -188,8 +188,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        Compaction, Configured, ContentBlock, JsonObject, ModelCompaction, ModelProvenance,
-        ModelResponse, ModelUsage, TurnEnd,
+        Compaction, Configured, ContentBlock, JsonObject, ModelCompaction, ModelOutput,
+        ModelProvenance, ModelProviderToolCall, ModelResponse, ModelUsage, TurnEnd,
     };
     use alloc::vec;
     use core::fmt;
@@ -277,6 +277,38 @@ mod tests {
         ];
 
         let events = [event_c, event_b, event_a].map(Ok::<_, fmt::Error>);
+        let stream = stream::iter(events);
+
+        let mut event_log = EventLog::new(stream);
+
+        futures_executor::block_on(async {
+            let request = ModelRequest::prepare(&mut event_log, context(), 4096, false)
+                .await
+                .unwrap();
+            assert_eq!(request.input(), &expected);
+        });
+    }
+
+    #[test]
+    fn prepare_preserves_provider_tool_calls() {
+        let output = vec![ModelOutput::ProviderToolCall(ModelProviderToolCall {
+            call_id: "search-1".into(),
+            name: "search".into(),
+            content: Some("Found results".into()),
+            payload: "opaque call".into(),
+        })];
+        let event = Event {
+            cursor: 1.into(),
+            payload: EventPayload::ModelResponse(ModelResponse {
+                output: output.clone(),
+                usage: USAGE,
+                provenance: provenance(),
+                continuation_token: None,
+            }),
+        };
+        let expected = [ModelInput::Assistant(provenance(), output)];
+
+        let events = [Ok::<_, fmt::Error>(event)];
         let stream = stream::iter(events);
 
         let mut event_log = EventLog::new(stream);

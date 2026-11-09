@@ -150,6 +150,12 @@ impl PreviewStream {
                             id: id.as_ref(),
                             tool: tool.as_ref(),
                         },
+                        PreviewContent::ProviderToolCall { call_id, name, .. } => {
+                            ApiPreviewKind::ProviderToolCall {
+                                call_id: call_id.as_ref(),
+                                name: name.as_ref(),
+                            }
+                        }
                     });
                     json_event(
                         &mut buffer,
@@ -189,7 +195,8 @@ fn appended_text<'a>(
             None,
             PreviewContent::Text(text)
             | PreviewContent::Reasoning(text)
-            | PreviewContent::ToolCall { input: text, .. },
+            | PreviewContent::ToolCall { input: text, .. }
+            | PreviewContent::ProviderToolCall { content: text, .. },
         ) => Some(text),
         (Some(PreviewContent::Text(previous)), PreviewContent::Text(text))
         | (Some(PreviewContent::Reasoning(previous)), PreviewContent::Reasoning(text)) => {
@@ -203,6 +210,18 @@ fn appended_text<'a>(
             }),
             PreviewContent::ToolCall { id, tool, input },
         ) if id == previous_id && tool == previous_tool => input.strip_prefix(previous),
+        (
+            Some(PreviewContent::ProviderToolCall {
+                call_id: previous_id,
+                name: previous_name,
+                content: previous,
+            }),
+            PreviewContent::ProviderToolCall {
+                call_id,
+                name,
+                content,
+            },
+        ) if call_id == previous_id && name == previous_name => content.strip_prefix(previous),
         _ => None,
     }
 }

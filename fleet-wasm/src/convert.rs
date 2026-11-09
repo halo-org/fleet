@@ -4,9 +4,10 @@ use crate::{
 };
 use fleet_core::{
     AgentId, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
-    ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
-    ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext, PromptOutput,
-    PromptResponse, Tool, ToolCall, ToolContext, ToolOutput, ToolResult,
+    ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance,
+    ModelProviderToolCall, ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool,
+    ModelUsage, Prompt, PromptContext, PromptOutput, PromptResponse, Tool, ToolCall, ToolContext,
+    ToolOutput, ToolResult,
 };
 use fleet_kit::{
     Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceOutput,
@@ -130,6 +131,9 @@ impl TryFrom<types::ModelResponseChunk> for ModelResponseChunk {
             types::ModelResponseChunk::ToolCallStart((index, id, tool)) => {
                 Self::ToolCallStart(index, id.into(), tool.into())
             }
+            types::ModelResponseChunk::ProviderToolCallStart((index, call_id, name)) => {
+                Self::ProviderToolCallStart(index, call_id.into(), name.into())
+            }
             types::ModelResponseChunk::TextDelta((index, content)) => {
                 Self::TextDelta(index, content)
             }
@@ -155,6 +159,7 @@ impl From<&ModelOutput> for types::ModelOutput {
             ModelOutput::Text(content) => Self::Text(content.clone()),
             ModelOutput::Reasoning(reasoning) => Self::Reasoning(reasoning.into()),
             ModelOutput::ToolCall(call) => Self::ToolCall(call.into()),
+            ModelOutput::ProviderToolCall(call) => Self::ProviderToolCall(call.into()),
         }
     }
 }
@@ -167,6 +172,7 @@ impl TryFrom<types::ModelOutput> for ModelOutput {
             types::ModelOutput::Text(content) => Self::Text(content),
             types::ModelOutput::Reasoning(reasoning) => Self::Reasoning(reasoning.into()),
             types::ModelOutput::ToolCall(call) => Self::ToolCall(call.try_into()?),
+            types::ModelOutput::ProviderToolCall(call) => Self::ProviderToolCall(call.into()),
         })
     }
 }
@@ -187,6 +193,28 @@ impl From<types::ModelReasoning> for ModelReasoning {
             content: value.content,
             redacted_content: value.redacted_content,
             attestation: value.attestation,
+        }
+    }
+}
+
+impl From<&ModelProviderToolCall> for types::ModelProviderToolCall {
+    fn from(value: &ModelProviderToolCall) -> Self {
+        Self {
+            call_id: value.call_id.as_ref().into(),
+            name: value.name.as_ref().into(),
+            content: value.content.clone(),
+            payload: value.payload.clone(),
+        }
+    }
+}
+
+impl From<types::ModelProviderToolCall> for ModelProviderToolCall {
+    fn from(value: types::ModelProviderToolCall) -> Self {
+        Self {
+            call_id: value.call_id.into(),
+            name: value.name.into(),
+            content: value.content,
+            payload: value.payload,
         }
     }
 }

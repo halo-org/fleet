@@ -417,6 +417,15 @@ impl From<crate::preview::PreviewContent> for PreviewContent {
             crate::preview::PreviewContent::ToolCall { id, tool, input } => {
                 Self::ToolCall { id, tool, input }
             }
+            crate::preview::PreviewContent::ProviderToolCall {
+                call_id,
+                name,
+                content,
+            } => Self::ProviderToolCall {
+                call_id,
+                name,
+                content,
+            },
         }
     }
 }

@@ -184,6 +184,8 @@ pub enum ModelResponseChunk {
     ReasoningStart(u32),
     /// The start of a tool call block.
     ToolCallStart(u32, ToolCallId, ToolAlias),
+    /// The start of a provider tool call block.
+    ProviderToolCallStart(u32, ToolCallId, ModelProviderToolName),
     /// An update to a text block.
     TextDelta(u32, String),
     /// An update to a reasoning block.
@@ -205,6 +207,8 @@ pub enum ModelOutput {
     Reasoning(ModelReasoning),
     /// Tool call.
     ToolCall(ToolCall),
+    /// Provider tool call.
+    ProviderToolCall(ModelProviderToolCall),
 }
 
 /// Reasoning output from a model.
@@ -223,6 +227,23 @@ pub struct ModelReasoning {
     /// Depending on the model, this may be a signature or an ID.
     pub attestation: Option<String>,
 }
+
+/// A tool call handled by the model provider.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelProviderToolCall {
+    /// The call ID assigned by the provider.
+    pub call_id: ToolCallId,
+    /// The provider's name for the tool.
+    pub name: ModelProviderToolName,
+    /// Readable content.
+    pub content: Option<String>,
+    /// Opaque provider data for replay.
+    pub payload: String,
+}
+
+/// The name of a model provider's tool.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ModelProviderToolName(String);
 
 /// A response from compacting model input.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -616,6 +637,7 @@ impl_newtype!(AgentId, u128);
 impl_newtype!(RoleName, String);
 impl_newtype!(RoleParameterName, String);
 impl_newtype!(ModelName, String);
+impl_newtype!(ModelProviderToolName, String);
 impl_newtype!(ToolName, String);
 impl_newtype!(ToolAlias, String);
 impl_newtype!(ToolCallId, String);

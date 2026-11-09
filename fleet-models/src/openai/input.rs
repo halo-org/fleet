@@ -131,7 +131,7 @@ fn encode_output(output: &[ModelOutput], compatible: bool) -> Vec<Value> {
                     items.push(item.into());
                 }
             }
-            ModelOutput::Reasoning(_) => {}
+            ModelOutput::Reasoning(_) | ModelOutput::ProviderToolCall(_) => {}
             ModelOutput::ToolCall(call) => {
                 items.push(json!({
                     "type": "function_call",

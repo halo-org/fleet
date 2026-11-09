@@ -1,9 +1,9 @@
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
-    MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
-    ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput, ToolResult,
-    TurnEnd,
+    MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelProviderToolCall,
+    ModelReasoning, ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput,
+    ToolResult, TurnEnd,
 };
 use fleet_kit::{
     AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord, Preview,
@@ -441,6 +441,15 @@ pub enum ApiPreviewContent {
         /// The partial JSON input.
         input: String,
     },
+    /// A tool call handled by the model provider.
+    ProviderToolCall {
+        /// The call ID assigned by the provider.
+        call_id: String,
+        /// The provider's name for the tool.
+        name: String,
+        /// The content received so far.
+        content: String,
+    },
 }
 
 /// Selects the block receiving preview text.
@@ -467,6 +476,13 @@ pub enum ApiPreviewKind<'a> {
         id: &'a str,
         /// The tool alias.
         tool: &'a str,
+    },
+    /// A tool call handled by the model provider.
+    ProviderToolCall {
+        /// The call ID assigned by the provider.
+        call_id: &'a str,
+        /// The provider's name for the tool.
+        name: &'a str,
     },
 }
 
@@ -526,6 +542,8 @@ pub enum ApiModelOutput {
     Reasoning(ApiModelReasoning),
     /// A tool call.
     ToolCall(ApiToolCall),
+    /// A tool call handled by the model provider.
+    ProviderToolCall(ApiModelProviderToolCall),
 }
 
 /// Reasoning output from a model.
@@ -537,6 +555,19 @@ pub struct ApiModelReasoning {
     pub redacted_content: Option<String>,
     /// The content's signature or ID.
     pub attestation: Option<String>,
+}
+
+/// A tool call handled by the model provider.
+#[derive(Debug, Serialize)]
+pub struct ApiModelProviderToolCall {
+    /// The call ID assigned by the provider.
+    pub call_id: String,
+    /// The provider's name for the tool.
+    pub name: String,
+    /// The readable content.
+    pub content: Option<String>,
+    /// The opaque provider data.
+    pub payload: String,
 }
 
 /// Compacted context from a model.
@@ -938,6 +969,7 @@ impl From<ModelOutput> for ApiModelOutput {
             ModelOutput::Text(text) => Self::Text { text },
             ModelOutput::Reasoning(reasoning) => Self::Reasoning(reasoning.into()),
             ModelOutput::ToolCall(call) => Self::ToolCall(call.into()),
+            ModelOutput::ProviderToolCall(call) => Self::ProviderToolCall(call.into()),
         }
     }
 }
@@ -953,6 +985,23 @@ impl From<ModelReasoning> for ApiModelReasoning {
             content,
             redacted_content,
             attestation,
+        }
+    }
+}
+
+impl From<ModelProviderToolCall> for ApiModelProviderToolCall {
+    fn from(call: ModelProviderToolCall) -> Self {
+        let ModelProviderToolCall {
+            call_id,
+            name,
+            content,
+            payload,
+        } = call;
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            content,
+            payload,
         }
     }
 }
@@ -1252,6 +1301,15 @@ impl From<PreviewContent> for ApiPreviewContent {
                 tool: tool.into(),
                 input,
             },
+            PreviewContent::ProviderToolCall {
+                call_id,
+                name,
+                content,
+            } => Self::ProviderToolCall {
+                call_id: call_id.into(),
+                name: name.into(),
+                content,
+            },
         }
     }
 }
@@ -1433,6 +1491,12 @@ mod tests {
                         }))
                         .unwrap(),
                     }),
+                    ModelOutput::ProviderToolCall(ModelProviderToolCall {
+                        call_id: "search-1".into(),
+                        name: "search".into(),
+                        content: Some("Found results".into()),
+                        payload: "opaque call".into(),
+                    }),
                 ],
                 usage: ModelUsage {
                     input: 100,
@@ -1476,6 +1540,13 @@ mod tests {
                             "input": {
                                 "command": "pwd",
                             },
+                        },
+                        {
+                            "type": "provider_tool_call",
+                            "call_id": "search-1",
+                            "name": "search",
+                            "content": "Found results",
+                            "payload": "opaque call",
                         },
                     ],
                     "usage": {

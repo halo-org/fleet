@@ -1,4 +1,4 @@
-use fleet_core::{ModelOutput, ModelResponseChunk, ToolAlias, ToolCallId};
+use fleet_core::{ModelOutput, ModelProviderToolName, ModelResponseChunk, ToolAlias, ToolCallId};
 use std::collections::BTreeMap;
 
 pub struct PreviewState {
@@ -15,6 +15,11 @@ pub enum PreviewContent {
         id: ToolCallId,
         tool: ToolAlias,
         input: String,
+    },
+    ProviderToolCall {
+        call_id: ToolCallId,
+        name: ModelProviderToolName,
+        content: String,
     },
 }
 
@@ -55,6 +60,14 @@ impl PreviewState {
                     id: id.clone(),
                     tool: tool.clone(),
                     input: String::new(),
+                },
+            ),
+            ModelResponseChunk::ProviderToolCallStart(index, call_id, name) => (
+                *index,
+                PreviewContent::ProviderToolCall {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    content: String::new(),
                 },
             ),
             ModelResponseChunk::TextDelta(index, text)
@@ -105,6 +118,11 @@ impl From<&ModelOutput> for PreviewContent {
                 id: call.id.clone(),
                 tool: call.tool.clone(),
                 input: fleet_core::JsonValue::Object(call.input.clone()).to_string(),
+            },
+            ModelOutput::ProviderToolCall(call) => Self::ProviderToolCall {
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                content: call.content.clone().unwrap_or_default(),
             },
         }
     }

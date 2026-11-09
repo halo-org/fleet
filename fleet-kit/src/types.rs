@@ -1,6 +1,9 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{fmt, num::NonZeroUsize};
-use fleet_core::{Agent, Event, EventCursor, Message, MessageId, ToolAlias, ToolCallId, TurnEnd};
+use fleet_core::{
+    Agent, Event, EventCursor, Message, MessageId, ModelProviderToolName, ToolAlias, ToolCallId,
+    TurnEnd,
+};
 
 // === Queries ===
 
@@ -129,6 +132,15 @@ pub enum PreviewContent {
         tool: ToolAlias,
         /// The input received so far.
         input: String,
+    },
+    /// A tool call handled by the model provider.
+    ProviderToolCall {
+        /// The call ID assigned by the provider.
+        call_id: ToolCallId,
+        /// The provider's name for the tool.
+        name: ModelProviderToolName,
+        /// The content received so far.
+        content: String,
     },
 }
 
