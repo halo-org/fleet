@@ -28,7 +28,7 @@ pub fn encode(
                 }));
             }
             ModelInput::Assistant(source, output) => {
-                items.extend(encode_output(output, source == provenance));
+                items.extend(encode_output(output, source == provenance)?);
             }
             ModelInput::ToolResult(result) => {
                 let mut content: Vec<_> = result
@@ -83,7 +83,7 @@ pub fn encode(
     Ok(items)
 }
 
-fn encode_output(output: &[ModelOutput], compatible: bool) -> Vec<Value> {
+fn encode_output(output: &[ModelOutput], compatible: bool) -> Result<Vec<Value>, OpenAiError> {
     let mut items = Vec::new();
     let has_tool_call = output
         .iter()
@@ -131,7 +131,6 @@ fn encode_output(output: &[ModelOutput], compatible: bool) -> Vec<Value> {
                     items.push(item.into());
                 }
             }
-            ModelOutput::Reasoning(_) | ModelOutput::ProviderToolCall(_) => {}
             ModelOutput::ToolCall(call) => {
                 items.push(json!({
                     "type": "function_call",
@@ -141,8 +140,28 @@ fn encode_output(output: &[ModelOutput], compatible: bool) -> Vec<Value> {
                     "status": "completed",
                 }));
             }
+            ModelOutput::ProviderToolCall(call) if compatible => {
+                let item: Value = serde_json::from_str(&call.payload).map_err(|error| {
+                    OpenAiError::source("failed to decode provider tool call", error)
+                })?;
+                if call.name.as_ref() != "web_search"
+                    || item.get("type").and_then(Value::as_str) != Some("web_search_call")
+                    || item.get("id").and_then(Value::as_str) != Some(call.call_id.as_ref())
+                    || !matches!(
+                        item.get("status").and_then(Value::as_str),
+                        Some("completed" | "failed")
+                    )
+                {
+                    return Err(OpenAiError::new(
+                        ModelsErrorKind::Other,
+                        "invalid provider tool call",
+                    ));
+                }
+                items.push(item);
+            }
+            ModelOutput::Reasoning(_) | ModelOutput::ProviderToolCall(_) => {}
         }
     }
 
-    items
+    Ok(items)
 }

@@ -85,6 +85,23 @@ The Markdown body is the system prompt. YAML frontmatter supports `model`,
 Each model or tool selection has a `name` and an optional `config` object.
 Tools are keyed by their alias.
 
+OpenAI web search is enabled through the model's configuration:
+
+```yaml
+model:
+  name: openai:gpt-6-astra
+  config:
+    tools:
+      - type: web_search
+```
+
+These tools run within the model provider and can be used alongside the role's
+ordinary tools. Each definition accepts OpenAI's web search options, such as
+`search_context_size` and `filters`. Missing, null or empty `tools` disables
+provider tools. Role parameters can target `[tools]` in the model configuration.
+Provider tool calls are retained for replay with the same provider and model.
+They are omitted when either changes.
+
 Parameters have a `target` and optional `extensions`. Targets use `type: model`,
 `type: tool` or `type: extensions`, with a `path` array of object keys. Tool
 targets also specify the tool alias in `tool`. Compaction accepts `threshold`

@@ -47,6 +47,8 @@ impl Default for OpenAiConfig {
 ///
 /// Model config accepts optional `effort` and `speed` strings. These select the
 /// reasoning effort and service tier. Missing or null values leave them unset.
+/// The optional `tools` array accepts `web_search` tool definitions.
+/// Missing, null or empty `tools` disables provider tools.
 ///
 /// Commentary and token limit continuations are handled within each response.
 /// Compaction retains the complete API output as opaque state for later requests.
@@ -124,6 +126,8 @@ impl<H, C> OpenAiModels<H, C> {
                 parameters: tool.input_schema.clone().into(),
                 strict: false,
             })
+            .map(api::Tool::Function)
+            .chain(config.tools.into_iter().flatten().map(api::Tool::Provider))
             .collect();
 
         Ok(api::Request {
@@ -296,8 +300,9 @@ mod tests {
     };
     use fleet_core::{
         Configured, ContentBlock, Error as _, JsonObject, Model, ModelCompaction, ModelContext,
-        ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelResponse,
-        ModelResponseChunk, ModelTool, ModelUsage, Models as _, ModelsErrorKind, ToolCall,
+        ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelProviderToolCall,
+        ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Models as _, ModelsErrorKind,
+        ToolCall,
     };
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
     use http::{HeaderMap, Request, Response, StatusCode, header};
@@ -478,6 +483,10 @@ mod tests {
             json!({
                 "effort": null,
                 "speed": null,
+                "tools": null,
+            }),
+            json!({
+                "tools": [],
             }),
         ] {
             context.model.config = serde_json::from_value(config).unwrap();
@@ -485,6 +494,7 @@ mod tests {
             let request = serde_json::to_value(request).unwrap();
             assert_eq!(request.get("reasoning"), None);
             assert_eq!(request.get("service_tier"), None);
+            assert_eq!(request.get("tools"), None);
         }
 
         context.model.config = serde_json::from_value(json!({
@@ -501,6 +511,51 @@ mod tests {
             })
         );
         assert_eq!(request["service_tier"], "priority");
+    }
+
+    #[test]
+    fn request_combines_function_and_provider_tools() {
+        let models = models(TestHttp::default());
+        let mut context = context();
+        context.tools.push(ModelTool {
+            name: "read".into(),
+            description: None,
+            is_async: false,
+            input_schema: JsonObject::new(),
+        });
+        let tools = json!([{
+            "type": "web_search",
+            "search_context_size": "low",
+            "filters": {
+                "allowed_domains": ["example.com"],
+            },
+        }]);
+        context.model.config.insert("tools".into(), tools.clone());
+
+        let request = models.request(&context, None, &[]).unwrap();
+        let request = serde_json::to_value(request).unwrap();
+        assert_eq!(request["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(request["tools"][0]["type"], "function");
+        assert_eq!(request["tools"][0]["name"], "read");
+        assert_eq!(request["tools"][1], tools[0]);
+    }
+
+    #[test]
+    fn generate_rejects_unsupported_provider_tools() {
+        let models = models(TestHttp::default());
+        let mut context = context();
+        context.model.config.insert(
+            "tools".into(),
+            json!([{
+                "type": "computer",
+            }]),
+        );
+
+        let error = futures_executor::block_on(
+            models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ModelsErrorKind::Other);
     }
 
     #[test]
@@ -658,6 +713,141 @@ mod tests {
         let request = models.request(&context, None, &input).unwrap();
         assert_eq!(request.input[0], reasoning);
         assert_eq!(request.input[1]["phase"], "final_answer");
+    }
+
+    #[test]
+    fn generate_preserves_web_search_on_replay() {
+        let tool_call = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "queries": ["Fleet documentation"],
+                "sources": [{
+                    "type": "url",
+                    "url": "https://example.com",
+                }],
+            },
+        });
+        let http = TestHttp::new([response(
+            &[tool_call.clone(), message("Found it.", None)],
+            false,
+        )]);
+        let models = models(http.clone());
+        let context = context();
+
+        let chunks = futures_executor::block_on(
+            models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            chunks[0],
+            ModelResponseChunk::ProviderToolCallStart(0, "ws_test".into(), "web_search".into(),)
+        );
+        assert_eq!(
+            chunks[1],
+            ModelResponseChunk::OutputEnd(
+                0,
+                ModelOutput::ProviderToolCall(ModelProviderToolCall {
+                    call_id: "ws_test".into(),
+                    name: "web_search".into(),
+                    content: Some("Search: Fleet documentation".into()),
+                    payload: tool_call.to_string(),
+                }),
+            )
+        );
+        let ModelResponseChunk::ResponseEnd(response) = chunks.into_iter().last().unwrap() else {
+            panic!("expected response end");
+        };
+        assert_eq!(http.requests().len(), 1);
+
+        let input = [ModelInput::Assistant(response.provenance, response.output)];
+        let request = models.request(&context, None, &input).unwrap();
+        assert_eq!(request.input[0], tool_call);
+        assert_eq!(request.input[1]["phase"], "final_answer");
+
+        let mut context = context;
+        context.model.name = "another-model".into();
+        let request = models.request(&context, None, &input).unwrap();
+        assert_eq!(request.input.len(), 1);
+        assert_eq!(request.input[0]["content"][0]["text"], "Found it.");
+
+        context.model.name = "test-model".into();
+        let models = OpenAiModels::new(
+            TestHttp::default(),
+            HeaderMap::new(),
+            OpenAiConfig {
+                provider_id: "another-provider".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let request = models.request(&context, None, &input).unwrap();
+        assert_eq!(request.input.len(), 1);
+        assert_eq!(request.input[0]["content"][0]["text"], "Found it.");
+    }
+
+    #[test]
+    fn generate_continues_after_web_search_commentary() {
+        let tool_call = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "completed",
+            "action": {
+                "type": "open_page",
+                "url": "https://example.com",
+            },
+        });
+        let http = TestHttp::new([
+            response(
+                &[tool_call.clone(), message("Reading…", Some("commentary"))],
+                false,
+            ),
+            response(&[message("Done.", Some("final_answer"))], false),
+        ]);
+        let models = models(http.clone());
+        let context = context();
+
+        let chunks = futures_executor::block_on(
+            models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let ModelResponseChunk::ResponseEnd(response) = chunks.last().unwrap() else {
+            panic!("expected response end");
+        };
+        assert_eq!(response.output.len(), 3);
+        assert_eq!(response.output[2], ModelOutput::Text("Done.".into()));
+
+        let requests = http.requests();
+        assert_eq!(requests.len(), 2);
+        let request: Value = serde_json::from_slice(requests[1].body()).unwrap();
+        assert_eq!(request["input"][0], tool_call);
+    }
+
+    #[test]
+    fn generate_rejects_unfinished_web_search() {
+        let tool_call = json!({
+            "type": "web_search_call",
+            "id": "ws_test",
+            "status": "searching",
+        });
+        let http = TestHttp::new([response(&[tool_call], true)]);
+        let models = models(http.clone());
+        let context = context();
+
+        let chunks =
+            futures_executor::block_on(models.generate(&context, None, &[]).collect::<Vec<_>>());
+        assert_eq!(chunks.len(), 2);
+        let mut chunks = chunks.into_iter();
+        let start = chunks.next().unwrap().unwrap();
+        assert_eq!(
+            start,
+            ModelResponseChunk::ProviderToolCallStart(0, "ws_test".into(), "web_search".into(),)
+        );
+        let error = chunks.next().unwrap().unwrap_err();
+        assert_eq!(error.kind(), ModelsErrorKind::Other);
+        assert_eq!(http.requests().len(), 1);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use fleet_core::{ModelUsage, ModelsErrorKind};
+use fleet_core::{JsonObject, ModelUsage, ModelsErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -7,6 +7,7 @@ use serde_json::Value;
 pub struct Config {
     pub effort: Option<String>,
     pub speed: Option<String>,
+    pub tools: Option<Vec<ProviderTool>>,
 }
 
 #[derive(Serialize)]
@@ -16,7 +17,7 @@ pub struct Request {
     pub instructions: Option<String>,
     pub input: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<FunctionTool>,
+    pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +35,13 @@ pub struct Reasoning {
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+pub enum Tool {
+    Function(FunctionTool),
+    Provider(ProviderTool),
+}
+
+#[derive(Serialize)]
 pub struct FunctionTool {
     pub r#type: &'static str,
     pub name: String,
@@ -41,6 +49,15 @@ pub struct FunctionTool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderTool {
+    WebSearch {
+        #[serde(flatten)]
+        config: JsonObject,
+    },
 }
 
 #[derive(Serialize)]
@@ -85,6 +102,11 @@ pub enum Output {
         name: String,
         arguments: String,
         status: Option<String>,
+    },
+    WebSearchCall {
+        id: String,
+        status: String,
+        action: Option<Value>,
     },
 }
 

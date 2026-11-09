@@ -1,8 +1,8 @@
 use super::api;
 use crate::OpenAiError;
 use fleet_core::{
-    ModelOutput, ModelProvenance, ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool,
-    ModelUsage, ModelsErrorKind, ToolCall,
+    ModelOutput, ModelProvenance, ModelProviderToolCall, ModelReasoning, ModelResponse,
+    ModelResponseChunk, ModelTool, ModelUsage, ModelsErrorKind, ToolCall,
 };
 use serde::Deserialize as _;
 use serde_json::Value;
@@ -18,6 +18,7 @@ enum Start {
     Text,
     Reasoning,
     ToolCall(String, String),
+    ProviderToolCall(String),
 }
 
 pub struct Decoder<'a> {
@@ -149,6 +150,14 @@ impl<'a> Decoder<'a> {
                 );
                 (Start::ToolCall(call_id, name), chunk)
             }
+            api::Output::WebSearchCall { id, .. } => {
+                let chunk = ModelResponseChunk::ProviderToolCallStart(
+                    index,
+                    id.clone().into(),
+                    "web_search".into(),
+                );
+                (Start::ProviderToolCall(id), chunk)
+            }
         };
         self.started.push(start);
         Ok(chunk)
@@ -222,6 +231,26 @@ impl<'a> Decoder<'a> {
                     })?,
                 })
             }
+            (
+                Start::ProviderToolCall(start_id),
+                api::Output::WebSearchCall { id, status, action },
+            ) if *start_id == id => {
+                let content = match status.as_str() {
+                    "completed" => action.as_ref().and_then(web_search_content),
+                    "failed" => Some("Web search failed.".into()),
+                    _ => {
+                        return Err(protocol(
+                            "model response contains an unfinished provider tool call",
+                        ));
+                    }
+                };
+                ModelOutput::ProviderToolCall(ModelProviderToolCall {
+                    call_id: id.into(),
+                    name: "web_search".into(),
+                    content,
+                    payload: item.to_string(),
+                })
+            }
             _ => return Err(protocol("model output does not match its start")),
         };
 
@@ -277,6 +306,33 @@ impl<'a> Decoder<'a> {
                 continuation_token,
             },
         )))
+    }
+}
+
+fn web_search_content(action: &Value) -> Option<String> {
+    match action.get("type")?.as_str()? {
+        "search" => {
+            let queries = action
+                .get("queries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            let query = if queries.is_empty() {
+                action.get("query")?.as_str()?.to_owned()
+            } else {
+                queries.join("; ")
+            };
+            Some(format!("Search: {query}"))
+        }
+        "open_page" => Some(format!("Open: {}", action.get("url")?.as_str()?)),
+        "find_in_page" => Some(format!(
+            "Find {} in {}",
+            action.get("pattern")?.as_str()?,
+            action.get("url")?.as_str()?,
+        )),
+        _ => None,
     }
 }
 
