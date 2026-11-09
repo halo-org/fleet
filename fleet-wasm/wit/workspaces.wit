@@ -2,7 +2,8 @@
 ///
 /// Environment identity survives provider restarts. Sharing a context shares the environment.
 /// Different IDs do not guarantee isolation, for example when they name the same local directory.
-/// Paths use / separators and are relative to the workspace directory.
+/// Paths use / separators. Relative paths start in the workspace directory.
+/// Absolute paths refer to the workspace environment. Access is controlled by the provider.
 interface workspaces {
     use types.{json-object, configured};
 
@@ -32,7 +33,7 @@ interface workspaces {
 
     /// A file to create or replace in a workspace.
     record workspace-write {
-        /// The path relative to the workspace directory.
+        /// The file path in the workspace environment.
         path: string,
         /// The new contents.
         content: list<u8>,
@@ -52,7 +53,7 @@ interface workspaces {
         args: list<string>,
         /// Environment variables to set for this execution.
         env: list<tuple<string, string>>,
-        /// The working directory relative to the workspace, or none for its root.
+        /// The working directory, or none for the workspace directory.
         cwd: option<string>,
         /// The bytes sent to standard input before closing it.
         stdin: list<u8>,

@@ -13,15 +13,10 @@ impl Config {
             crate::error(WorkspacesErrorKind::InvalidConfiguration, error.to_string())
         })?;
         config.cwd = config.cwd.replace('\\', "/");
-        let absolute =
-            config.cwd.starts_with('/') || config.cwd.as_bytes().get(1..3) == Some(b":/");
-        if !absolute
-            || config.cwd.contains('\0')
-            || config.cwd.split('/').any(|part| matches!(part, "." | ".."))
-        {
+        if !is_absolute(&config.cwd) || config.cwd.contains('\0') {
             return Err(crate::error(
                 WorkspacesErrorKind::InvalidConfiguration,
-                "cwd must be an absolute host path without . or .. components",
+                "cwd must be an absolute host path without null bytes",
             ));
         }
         while config.cwd.len() > 1 && config.cwd.ends_with('/') && !config.cwd.ends_with(":/") {
@@ -29,19 +24,29 @@ impl Config {
         }
         Ok(config)
     }
+
+    pub fn path(&self, path: &str) -> Result<String, WorkspacesError> {
+        if path.contains('\0') {
+            return Err(crate::error(
+                WorkspacesErrorKind::InvalidConfiguration,
+                "path must not contain null bytes",
+            ));
+        }
+        let path = path.replace('\\', "/");
+        Ok(if is_absolute(&path) {
+            path
+        } else if path.is_empty() {
+            self.cwd.clone()
+        } else {
+            format!("{}/{path}", self.cwd.trim_end_matches('/'))
+        })
+    }
 }
 
-pub fn relative_path(path: &str) -> Result<&str, WorkspacesError> {
-    if path.starts_with('/')
-        || path.contains(['\\', ':', '\0'])
-        || path.split('/').any(|part| part == "..")
-    {
-        return Err(crate::error(
-            WorkspacesErrorKind::InvalidConfiguration,
-            "path must be relative to the workspace without .. components",
-        ));
-    }
-    Ok(if path.is_empty() { "." } else { path })
+fn is_absolute(path: &str) -> bool {
+    path.starts_with('/')
+        || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && path.as_bytes().get(1..3) == Some(b":/"))
 }
 
 #[cfg(test)]
@@ -85,7 +90,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_ambiguous_directories() {
-        for path in ["project", "/project/../other", "/project/./src", ""] {
+        for path in ["project", "C:project", "", "/project\0"] {
             let config = json!({
                 "cwd": path,
             })
@@ -101,14 +106,28 @@ mod tests {
     }
 
     #[test]
-    fn relative_path_rejects_parent_and_rooted_paths() {
-        for path in ["../file", "/file", "dir/../../file", "C:/file", "dir\\file"] {
-            let error = relative_path(path).unwrap_err();
+    fn path_joins_relative_paths_without_resolving_parents() {
+        let config = Config {
+            cwd: "/project".into(),
+        };
 
-            assert!(matches!(
-                error.kind,
-                WorkspacesErrorKind::InvalidConfiguration
-            ));
-        }
+        let path = config.path("link/../file").unwrap();
+        assert_eq!(path, "/project/link/../file");
+
+        let path = config.path("../other/file").unwrap();
+        assert_eq!(path, "/project/../other/file");
+    }
+
+    #[test]
+    fn path_preserves_absolute_paths() {
+        let config = Config {
+            cwd: "/project".into(),
+        };
+
+        let path = config.path("/other/file").unwrap();
+        assert_eq!(path, "/other/file");
+
+        let path = config.path("C:\\other\\file").unwrap();
+        assert_eq!(path, "C:/other/file");
     }
 }

@@ -12,61 +12,11 @@ use wit_bindgen::StreamResult;
 pub struct Directory(Descriptor);
 
 impl Directory {
-    pub async fn open(path: &str) -> Result<Self, WorkspacesError> {
-        let mut mounts = preopens::get_directories();
-        mounts.sort_by_key(|(_, path)| core::cmp::Reverse(path.len()));
-        for (descriptor, mount) in mounts {
-            let relative = if path == mount {
-                Some(".")
-            } else if mount == "/" {
-                path.strip_prefix('/')
-            } else {
-                path.strip_prefix(mount.trim_end_matches('/'))
-                    .and_then(|path| path.strip_prefix('/'))
-            };
-            if let Some(relative) = relative {
-                return Self(descriptor).directory(relative, false).await;
-            }
-        }
-        Err(crate::error(
-            WorkspacesErrorKind::InvalidConfiguration,
-            format!("no filesystem mount covers {path}"),
-        ))
-    }
-
-    pub async fn directory(&self, path: &str, create: bool) -> Result<Self, WorkspacesError> {
-        let path = crate::config::relative_path(path)?;
-        let flags = DescriptorFlags::READ | DescriptorFlags::MUTATE_DIRECTORY;
-        let mut directory = self
-            .0
-            .open_at(
-                PathFlags::SYMLINK_FOLLOW,
-                ".".into(),
-                OpenFlags::DIRECTORY,
-                flags,
-            )
-            .await?;
-        for part in path.split('/').filter(|part| !matches!(*part, "" | ".")) {
-            if create {
-                match directory.create_directory_at(part.into()).await {
-                    Ok(()) | Err(ErrorCode::Exist) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            directory = directory
-                .open_at(
-                    PathFlags::SYMLINK_FOLLOW,
-                    part.into(),
-                    OpenFlags::DIRECTORY,
-                    flags,
-                )
-                .await?;
-        }
-        Ok(Self(directory))
+    pub async fn open(path: &str, create: bool) -> Result<Self, WorkspacesError> {
+        open(path, create, true).await.map(Self)
     }
 
     pub async fn read(&self, path: &str, limit: u64) -> Result<Vec<u8>, WorkspacesError> {
-        let path = crate::config::relative_path(path)?;
         let file = self
             .0
             .open_at(
@@ -76,37 +26,7 @@ impl Directory {
                 DescriptorFlags::READ,
             )
             .await?;
-        let stat = file.stat().await?;
-        if !matches!(stat.type_, DescriptorType::RegularFile) {
-            return Err(crate::error(
-                WorkspacesErrorKind::Other,
-                "path is not a regular file",
-            ));
-        }
-        if stat.size > limit {
-            return Err(crate::error(
-                WorkspacesErrorKind::FileTooLarge,
-                "file exceeds the read limit",
-            ));
-        }
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        let (mut stream, result) = file.read_via_stream(0);
-        let mut content = Vec::new();
-        loop {
-            let (status, bytes) = stream.read(Vec::with_capacity(16 * 1024)).await;
-            if bytes.len() > limit.saturating_sub(content.len()) {
-                return Err(crate::error(
-                    WorkspacesErrorKind::FileTooLarge,
-                    "file exceeds the read limit",
-                ));
-            }
-            content.extend(bytes);
-            if matches!(status, StreamResult::Dropped) {
-                break;
-            }
-        }
-        result.await?;
-        Ok(content)
+        read_file(file, limit).await
     }
 
     pub async fn publish(
@@ -174,6 +94,95 @@ impl Directory {
         }
         result
     }
+}
+
+pub async fn read(path: &str, limit: u64) -> Result<Vec<u8>, WorkspacesError> {
+    read_file(open(path, false, false).await?, limit).await
+}
+
+async fn read_file(file: Descriptor, limit: u64) -> Result<Vec<u8>, WorkspacesError> {
+    let stat = file.stat().await?;
+    if !matches!(stat.type_, DescriptorType::RegularFile) {
+        return Err(crate::error(
+            WorkspacesErrorKind::Other,
+            "path is not a regular file",
+        ));
+    }
+    if stat.size > limit {
+        return Err(crate::error(
+            WorkspacesErrorKind::FileTooLarge,
+            "file exceeds the read limit",
+        ));
+    }
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let (mut stream, result) = file.read_via_stream(0);
+    let mut content = Vec::new();
+    loop {
+        let (status, bytes) = stream.read(Vec::with_capacity(16 * 1024)).await;
+        if bytes.len() > limit.saturating_sub(content.len()) {
+            return Err(crate::error(
+                WorkspacesErrorKind::FileTooLarge,
+                "file exceeds the read limit",
+            ));
+        }
+        content.extend(bytes);
+        if matches!(status, StreamResult::Dropped) {
+            break;
+        }
+    }
+    result.await?;
+    Ok(content)
+}
+
+async fn open(path: &str, create: bool, directory: bool) -> Result<Descriptor, WorkspacesError> {
+    let mut mounts = preopens::get_directories();
+    mounts.sort_by_key(|(_, path)| core::cmp::Reverse(path.len()));
+    let (descriptor, relative) = mounts
+        .into_iter()
+        .find_map(|(descriptor, mount)| {
+            let mount = mount.trim_end_matches('/');
+            let relative = if path.trim_end_matches('/') == mount {
+                Some(".")
+            } else {
+                path.strip_prefix(mount)?.strip_prefix('/')
+            }?;
+            Some((descriptor, relative.to_owned()))
+        })
+        .ok_or_else(|| {
+            crate::error(
+                WorkspacesErrorKind::InvalidConfiguration,
+                format!("no filesystem mount covers {path}"),
+            )
+        })?;
+
+    if create {
+        for end in relative
+            .match_indices('/')
+            .map(|(index, _)| index)
+            .chain(core::iter::once(relative.len()))
+        {
+            let parent = relative.get(..end).expect("path boundary is valid");
+            if parent.is_empty() {
+                continue;
+            }
+            match descriptor.create_directory_at(parent.into()).await {
+                Ok(()) | Err(ErrorCode::Exist) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let (flags, permissions) = if directory {
+        (
+            OpenFlags::DIRECTORY,
+            DescriptorFlags::READ | DescriptorFlags::MUTATE_DIRECTORY,
+        )
+    } else {
+        (OpenFlags::empty(), DescriptorFlags::READ)
+    };
+    descriptor
+        .open_at(PathFlags::SYMLINK_FOLLOW, relative, flags, permissions)
+        .await
+        .map_err(Into::into)
 }
 
 impl From<ErrorCode> for WorkspacesError {

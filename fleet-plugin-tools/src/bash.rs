@@ -14,7 +14,7 @@ pub fn metadata() -> Tool {
     crate::metadata(
         "bash",
         "Bash",
-        "Runs a Bash command in the workspace and returns its output. Each call starts a new shell. Paths are relative to the workspace.",
+        "Runs a Bash command in the workspace and returns its output. Each call starts a new shell.",
         &json!({
             "type": "object",
             "properties": {
@@ -24,7 +24,7 @@ pub fn metadata() -> Tool {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Working directory relative to the workspace.",
+                    "description": "Working directory. Relative paths start in the workspace directory.",
                 },
                 "timeout_ms": {
                     "type": "integer",

@@ -22,8 +22,8 @@ Copy `host.wasm` into Fleet's config directory under `plugins/`, then add:
         "process": true,
         "filesystem": [
           {
-            "host_path": "/home/user/project",
-            "guest_path": "/home/user/project",
+            "host_path": "/",
+            "guest_path": "/",
             "read_only": false
           },
           {
@@ -43,8 +43,9 @@ Copy `host.wasm` into Fleet's config directory under `plugins/`, then add:
 }
 ```
 
-Create the mounted directories before starting Fleet. Workspace mounts must
-use the same host and guest paths so file operations and commands agree.
+This grants access to the host filesystem with the server's permissions.
+Create the state directory before starting Fleet. Filesystem mounts must use
+the same host and guest paths so file operations and commands agree.
 Use forward slashes in configuration, including Windows paths such as `C:/project`.
 Each provider needs its own persistent directory mounted at `/state`.
 Clocks and randomness are supplied by the host. HTTP and credentials are not needed.
@@ -56,7 +57,10 @@ There is no provider-wide default directory. Opening a workspace binds its ID to
 that directory. Reopening is safe, but changing the directory for an existing ID
 is rejected. Different IDs may share a directory.
 
-File paths and command working directories are relative to the workspace.
+Relative file paths and command working directories start in the workspace directory.
+Absolute paths and `..` are supported within the granted filesystem mounts.
+WASI resolves file paths and rejects symlinks with absolute targets.
+Commands run with the host process's permissions.
 File writes replace the destination atomically. Commands enforce the requested
 timeout and retain up to the output limit from each stream while draining the
 rest. Retried commands return `UnsafeToRetry` because an earlier attempt may

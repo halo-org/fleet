@@ -37,8 +37,8 @@ impl Guest for Host {
 
     async fn open(context: WorkspaceContext) -> Result<(), WorkspacesError> {
         let config = config(&context)?;
-        Directory::open(&config.cwd).await?;
-        let state = Directory::open("/state").await?;
+        Directory::open(&config.cwd, false).await?;
+        let state = Directory::open("/state", false).await?;
         let id = binding_name(&context);
         match check_binding(&state, &id, &config.cwd).await {
             Err(WorkspacesError {
@@ -58,15 +58,15 @@ impl Guest for Host {
         path: String,
         limit: u64,
     ) -> Result<Vec<u8>, WorkspacesError> {
-        let (directory, _) = load(&context).await?;
-        directory.read(&path, limit).await
+        let config = load(&context).await?;
+        crate::filesystem::read(&config.path(&path)?, limit).await
     }
 
     async fn write(context: WorkspaceContext, file: WorkspaceWrite) -> Result<(), WorkspacesError> {
-        let (directory, _) = load(&context).await?;
-        let path = crate::config::relative_path(&file.path)?;
-        let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
-        if matches!(name, "" | ".") {
+        let config = load(&context).await?;
+        let path = config.path(&file.path)?;
+        let (parent, name) = path.rsplit_once('/').expect("absolute path has a root");
+        if matches!(name, "" | "." | "..") {
             return Err(crate::error(
                 WorkspacesErrorKind::InvalidConfiguration,
                 "path must name a file",
@@ -74,7 +74,7 @@ impl Guest for Host {
         }
         if let Some(expected) = file.expected {
             let limit = u64::try_from(expected.len()).expect("byte length fits in u64");
-            match directory.read(path, limit).await {
+            match crate::filesystem::read(&path, limit).await {
                 Ok(bytes) if bytes == expected => {}
                 Ok(_)
                 | Err(WorkspacesError {
@@ -89,7 +89,7 @@ impl Guest for Host {
                 Err(error) => return Err(error),
             }
         }
-        let directory = directory.directory(parent, file.create_parents).await?;
+        let directory = Directory::open(&format!("{parent}/"), file.create_parents).await?;
         directory.publish(name, file.content, true).await?;
         Ok(())
     }
@@ -105,10 +105,8 @@ impl Guest for Host {
                 "the command may already have run",
             ));
         }
-        let (directory, config) = load(&context).await?;
-        let relative = crate::config::relative_path(command.cwd.as_deref().unwrap_or("."))?;
-        directory.directory(relative, false).await?;
-        let cwd = format!("{}/{relative}", config.cwd.trim_end_matches('/'));
+        let config = load(&context).await?;
+        let cwd = config.path(command.cwd.as_deref().unwrap_or(""))?;
         crate::process::run(cwd, command).await
     }
 }
@@ -150,10 +148,9 @@ async fn check_binding(state: &Directory, id: &str, cwd: &str) -> Result<(), Wor
     }
 }
 
-async fn load(context: &WorkspaceContext) -> Result<(Directory, Config), WorkspacesError> {
+async fn load(context: &WorkspaceContext) -> Result<Config, WorkspacesError> {
     let config = config(context)?;
-    let state = Directory::open("/state").await?;
+    let state = Directory::open("/state", false).await?;
     check_binding(&state, &binding_name(context), &config.cwd).await?;
-    let directory = Directory::open(&config.cwd).await?;
-    Ok((directory, config))
+    Ok(config)
 }

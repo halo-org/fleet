@@ -37,7 +37,7 @@ pub struct WorkspaceContext {
 /// A file to create or replace in a workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceWrite {
-    /// The path relative to the workspace directory.
+    /// The file path in the workspace environment.
     pub path: String,
     /// The new contents.
     pub content: Vec<u8>,
@@ -60,7 +60,7 @@ pub struct WorkspaceCommand {
     pub args: Vec<String>,
     /// Environment variables to set for this execution.
     pub env: BTreeMap<String, String>,
-    /// The working directory relative to the workspace, or `None` for its root.
+    /// The working directory, or `None` for the workspace directory.
     pub cwd: Option<String>,
     /// The bytes sent to standard input before closing it.
     pub stdin: Vec<u8>,
@@ -102,7 +102,8 @@ pub enum WorkspaceExit {
 ///
 /// Environment identity survives provider restarts. Sharing a context shares the environment.
 /// Different IDs do not guarantee isolation, for example when they name the same local directory.
-/// Paths use `/` separators and are relative to the workspace directory.
+/// Paths use `/` separators. Relative paths start in the workspace directory.
+/// Absolute paths refer to the workspace environment. Access is controlled by the provider.
 pub trait Workspaces {
     /// The error type returned by this provider.
     type Error: fleet_core::Error<WorkspacesErrorKind> + 'static;

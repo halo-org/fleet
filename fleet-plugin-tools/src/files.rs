@@ -44,7 +44,7 @@ pub fn metadata(name: &str) -> Option<Tool> {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Path relative to the workspace.",
+                        "description": "File path. Relative paths start in the workspace directory.",
                     },
                 },
                 "required": ["path"],
@@ -61,7 +61,7 @@ pub fn metadata(name: &str) -> Option<Tool> {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Path relative to the workspace.",
+                        "description": "File path. Relative paths start in the workspace directory.",
                     },
                     "content": {
                         "type": "string",
@@ -82,7 +82,7 @@ pub fn metadata(name: &str) -> Option<Tool> {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Path relative to the workspace.",
+                        "description": "File path. Relative paths start in the workspace directory.",
                     },
                     "edits": {
                         "type": "array",
@@ -216,13 +216,9 @@ fn apply_edits(original: &str, edits: &[Edit]) -> Result<String, Error> {
 }
 
 pub fn validate_path(path: &str) -> Result<(), Error> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains(['\\', ':', '\0'])
-        || path.split('/').any(|part| part == "..")
-    {
+    if path.is_empty() || path.contains('\0') {
         return Err(Error::Input(
-            "Paths must be relative to the workspace without .. components.".into(),
+            "Paths must not be empty or contain null bytes.".into(),
         ));
     }
     Ok(())
@@ -238,6 +234,13 @@ fn unsafe_retry() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_path_accepts_absolute_and_parent_paths() {
+        for path in ["../file", "dir/../file", "/file", "C:\\project\\file"] {
+            validate_path(path).unwrap();
+        }
+    }
 
     #[test]
     fn apply_edits_uses_previous_replacements() {

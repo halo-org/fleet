@@ -10,8 +10,10 @@ The plugin does not need process, filesystem or HTTP access.
   overlapping matches. All edits are prepared before writing. The write checks the
   original contents to detect intervening changes.
 
-Paths are relative to the workspace. Exit codes, timeouts and file errors are
-returned to the model as tool output. Failed workspace setup remains retryable.
+Relative paths start in the workspace directory. Absolute paths and `..` are
+passed to the workspace provider, which controls access. Exit codes, timeouts
+and file errors are returned to the model as tool output. Failed workspace
+setup remains retryable.
 Retried Bash calls pass the retry flag to the workspace. File mutations refuse
 retries because the original write may have succeeded.
 
@@ -82,5 +84,5 @@ Workspace selection and config come only from the role's
 An absent or null role workspace leaves the tools without a workspace.
 
 Defaults are `bash`, 120000 milliseconds, 65536 bytes per output stream and a
-65536-byte read limit. Bash input may select a shorter timeout and a relative
+65536-byte read limit. Bash input may select a shorter timeout and a
 working directory. `read_limit` also limits the file size for editing.
