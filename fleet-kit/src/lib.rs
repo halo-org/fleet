@@ -13,7 +13,7 @@ mod workspaces;
 pub use self::{
     agents::{
         AgentCollection, AgentPosition, AgentSummary, AgentsPage, AgentsQuery, AgentsUpdates,
-        CollectionRevision, InboxAction, InboxFilter, InboxState,
+        CollectionRevision, InboxAction, InboxFilter, InboxState, agent_title,
     },
     authentication::{
         AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthConfig,
@@ -21,9 +21,9 @@ pub use self::{
     },
     ports::{Queries, QueriesErrorKind},
     types::{
-        AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord,
-        Preview, PreviewContent, QueryResponse, QueryUpdate, Revision, ToolCallRecord,
-        TurnEndEvent, TurnStatus,
+        AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
+        MessageRecord, Preview, PreviewContent, QueryResponse, QueryUpdate, Revision,
+        ToolCallRecord, TurnEndEvent, TurnStatus,
     },
     workspaces::{
         Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceName,

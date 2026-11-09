@@ -36,7 +36,7 @@ pub struct AgentUpdates {
     /// The last-change revision of every resource in this group.
     pub revision: Revision,
     /// The agent's metadata.
-    pub agent: QueryUpdate<Agent>,
+    pub agent: QueryUpdate<AgentMetadata>,
     /// The changed messages.
     pub messages: Vec<MessageRecord>,
     /// The agent's activity.
@@ -48,6 +48,18 @@ pub struct AgentUpdates {
 }
 
 // === Agents ===
+
+/// An agent's metadata and its last-change revision.
+///
+/// The version uses the agent's revision sequence, but does not advance for
+/// messages or runtime activity. It is distinct from a query's read revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMetadata {
+    /// The agent's metadata, including application extensions.
+    pub agent: Agent,
+    /// The revision at which this metadata last changed.
+    pub version: Revision,
+}
 
 /// An agent's activity.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

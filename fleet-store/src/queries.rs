@@ -2,11 +2,11 @@ use crate::{
     Store, StoreError, Topic,
     records::{self, AgentRecord, Change, Records},
 };
-use fleet_core::{Agent, AgentId, MessageId};
+use fleet_core::{AgentId, MessageId};
 use fleet_kit::{
-    AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord, Preview,
-    PreviewContent, Queries, QueriesErrorKind, QueryResponse, QueryUpdate, Revision,
-    ToolCallRecord, TurnEndEvent, TurnStatus,
+    AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
+    MessageRecord, Preview, PreviewContent, Queries, QueriesErrorKind, QueryResponse, QueryUpdate,
+    Revision, ToolCallRecord, TurnEndEvent, TurnStatus,
 };
 use futures_util::{Stream, stream};
 use redb::{ReadOnlyTable, ReadableDatabase as _};
@@ -20,13 +20,18 @@ impl Queries for Store {
         &self,
         agent_id: AgentId,
         since: Option<Revision>,
-    ) -> Result<QueryResponse<QueryUpdate<Agent>>, StoreError> {
+    ) -> Result<QueryResponse<QueryUpdate<AgentMetadata>>, StoreError> {
         self.query(agent_id, since, move |_, agent| {
-            Ok(if since.is_none_or(|since| since < 1.into()) {
-                QueryUpdate::Changed(agent.agent.into())
-            } else {
-                QueryUpdate::Unchanged
-            })
+            Ok(
+                if since.is_none_or(|since| u128::from(since) < agent.metadata_revision) {
+                    QueryUpdate::Changed(AgentMetadata {
+                        version: agent.metadata_revision.into(),
+                        agent: agent.agent.into(),
+                    })
+                } else {
+                    QueryUpdate::Unchanged
+                },
+            )
         })
         .await
     }
@@ -250,7 +255,10 @@ impl Queries for Store {
                         let key = records::key(change.kind, agent.agent.id, &change.suffix);
                         match change.kind {
                             records::AGENT => {
-                                updates.agent = QueryUpdate::Changed(agent.agent.clone().into());
+                                updates.agent = QueryUpdate::Changed(AgentMetadata {
+                                    version: agent.metadata_revision.into(),
+                                    agent: agent.agent.clone().into(),
+                                });
                             }
                             records::ACTIVITY => {
                                 updates.activity = QueryUpdate::Changed(activity(&agent));

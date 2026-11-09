@@ -1,4 +1,4 @@
-use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest};
+use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetTitleRequest};
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
     ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails, ErrorResponse, EventsQuery,
@@ -74,10 +74,13 @@ where
             agents_subscription(fleet, &parts.headers).await
         }
         (_, ["", "agents", "subscription"]) => Err(ApiError::MethodNotAllowed("GET")),
+        (&Method::PUT, ["", "agents", agent_id, "title"]) => {
+            set_title(fleet, parse_id(agent_id)?, &parts.headers, body).await
+        }
         (&Method::PUT, ["", "agents", agent_id, "inbox"]) => {
             set_inbox(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
-        (_, ["", "agents", _, "inbox"]) => Err(ApiError::MethodNotAllowed("PUT")),
+        (_, ["", "agents", _, "title" | "inbox"]) => Err(ApiError::MethodNotAllowed("PUT")),
         (&Method::POST, ["", "agents", agent_id, "messages"]) => {
             send_message(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
@@ -197,6 +200,44 @@ async fn agents_subscription(
     )))
 }
 
+fn expected_version(headers: &HeaderMap, resource: &str) -> Result<u128, ApiError> {
+    let mut values = headers.get_all(header::IF_MATCH).iter();
+    let expected = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "If-Match must contain the quoted {resource} version"
+            ))
+        })?;
+    if values.next().is_some() {
+        return Err(ApiError::BadRequest("If-Match must occur once".into()));
+    }
+    parse_id(expected)
+}
+
+async fn set_title<B>(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    let key = idempotency_key(headers)?;
+    let expected = expected_version(headers, "metadata")?.into();
+    let request: SetTitleRequest = read_json(headers, body).await?;
+    fleet
+        .set_title(key, agent_id, expected, request.title)
+        .await
+        .map_err(ApiError::Fleet)?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
 async fn set_inbox<B>(
     fleet: &Fleet,
     agent_id: AgentId,
@@ -208,19 +249,7 @@ where
     B::Error: Into<Box<dyn Error + Send + Sync>>,
 {
     let key = idempotency_key(headers)?;
-    let mut values = headers.get_all(header::IF_MATCH).iter();
-    let expected = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix('"'))
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| {
-            ApiError::BadRequest("If-Match must contain the quoted summary version".into())
-        })?;
-    if values.next().is_some() {
-        return Err(ApiError::BadRequest("If-Match must occur once".into()));
-    }
-    let expected = fleet_kit::CollectionRevision(parse_id::<u128>(expected)?);
+    let expected = fleet_kit::CollectionRevision(expected_version(headers, "summary")?);
     let request: SetInboxRequest = read_json(headers, body).await?;
     fleet
         .set_inbox(key, agent_id, expected, request.into())
@@ -608,7 +637,7 @@ impl ApiError {
             Self::Fleet(FleetError::Store(fleet_store::StoreError::PreconditionFailed)) => (
                 StatusCode::PRECONDITION_FAILED,
                 "precondition_failed",
-                "Agent summary changed",
+                "Agent resource changed",
             ),
             Self::Fleet(FleetError::Store(error)) => match error.kind() {
                 ClientStoreErrorKind::Conflict => (

@@ -4,9 +4,9 @@ use fleet_core::{
     Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, Roles, Tools,
 };
 use fleet_kit::{
-    AgentActivity, AgentCollection as _, AgentUpdates, AgentsPage, AgentsQuery, AgentsUpdates,
-    CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord, Preview, Queries as _,
-    QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
+    AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
+    AgentsUpdates, CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord,
+    Preview, Queries as _, QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
@@ -232,6 +232,24 @@ impl Fleet {
             .map_err(FleetError::Query)
     }
 
+    /// Sets or clears an agent's title if its metadata has not changed.
+    pub async fn set_title(
+        &self,
+        key: String,
+        agent: AgentId,
+        expected: Revision,
+        title: Option<String>,
+    ) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| {
+            fleet
+                .state
+                .store
+                .set_title(&key, agent, expected, title.as_deref())
+                .await
+        })
+        .await
+    }
+
     /// Applies a version-checked, idempotent inbox action.
     pub async fn set_inbox(
         &self,
@@ -269,7 +287,7 @@ impl Fleet {
         &self,
         agent_id: AgentId,
         since: Option<Revision>,
-    ) -> Result<QueryResponse<QueryUpdate<Agent>>, FleetError> {
+    ) -> Result<QueryResponse<QueryUpdate<AgentMetadata>>, FleetError> {
         self.state
             .store
             .agent(agent_id, since)
@@ -564,6 +582,267 @@ mod tests {
             .uri(path)
             .body(Full::new(Bytes::new()))
             .unwrap()
+    }
+
+    fn title_request(key: &str, expected: &str, body: &Value) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method("PUT")
+            .uri("/agents/1/title")
+            .header("content-type", "application/json")
+            .header("idempotency-key", key)
+            .header("if-match", format!("\"{expected}\""))
+            .body(Full::new(Bytes::from(serde_json::to_vec(body).unwrap())))
+            .unwrap()
+    }
+
+    #[test]
+    fn set_title_updates_reads_and_subscriptions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = json!({
+            "title": "Review 🚀",
+        });
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+            let revision = fleet.collection_revision().await.unwrap();
+            let mut subscription = request("/agents/subscription");
+            subscription
+                .headers_mut()
+                .insert("last-event-id", revision.to_string().parse().unwrap());
+            let mut collection = crate::api::handle(fleet.clone(), subscription)
+                .await
+                .unwrap()
+                .into_body();
+            let mut subscription = request("/agents/1/subscription");
+            subscription
+                .headers_mut()
+                .insert("last-event-id", "1".parse().unwrap());
+            let mut updates = crate::api::handle(fleet.clone(), subscription)
+                .await
+                .unwrap()
+                .into_body();
+
+            let rename = title_request("rename", "1", &body);
+            let response = crate::api::handle(fleet.clone(), rename).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            let frame = next_frame(&mut updates).await;
+            let update: Value =
+                serde_json::from_str(frame.strip_prefix("id: 2\nevent: update\ndata: ").unwrap())
+                    .unwrap();
+            assert_eq!(update["agent"]["title"], "Review 🚀");
+            assert_eq!(update["agent"]["metadata_version"], "2");
+            assert_eq!(update.get("events"), None);
+            assert_eq!(update.get("activity"), None);
+
+            let frame = next_frame(&mut collection).await;
+            let update: Value =
+                serde_json::from_str(frame.split_once("data: ").unwrap().1).unwrap();
+            assert_eq!(update["agents"][0]["title"], "Review 🚀");
+            assert_eq!(update["agents"][0]["metadata_version"], "2");
+
+            fleet
+                .state
+                .store
+                .consume_messages(1.into(), None, true)
+                .await
+                .unwrap();
+            let response = crate::api::handle(fleet.clone(), request("/agents/1?since=1"))
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["read-revision"], "3");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let agent: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(agent["title"], "Review 🚀");
+            assert_eq!(agent["metadata_version"], "2");
+            assert_eq!(agent.get("extensions"), None);
+
+            let response = crate::api::handle(fleet, request("/agents/1?since=2"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(response.headers()["read-revision"], "3");
+        });
+    }
+
+    #[test]
+    fn set_title_checks_preconditions_and_retries() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cases = [
+            ("rename", "1", Some("Title"), StatusCode::NO_CONTENT),
+            ("rename", "1", Some("Title"), StatusCode::NO_CONTENT),
+            ("unchanged", "2", Some("Title"), StatusCode::NO_CONTENT),
+            ("stale", "1", Some("Other"), StatusCode::PRECONDITION_FAILED),
+            ("rename", "1", Some("Other"), StatusCode::CONFLICT),
+            ("clear", "2", None, StatusCode::NO_CONTENT),
+        ];
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+
+            for (key, version, title, status) in cases {
+                let body = json!({
+                    "title": title,
+                });
+                let request = title_request(key, version, &body);
+
+                let response = crate::api::handle(fleet.clone(), request).await.unwrap();
+                assert_eq!(response.status(), status);
+            }
+
+            let response = crate::api::handle(fleet, request("/agents/1"))
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let agent: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(agent.get("title"), Some(&Value::Null));
+            assert_eq!(agent["metadata_version"], "3");
+        });
+    }
+
+    #[test]
+    fn set_title_rejects_invalid_bodies() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let bodies = [
+            json!({}),
+            json!({
+                "title": 1,
+            }),
+            json!({
+                "title": "Title",
+                "extensions": {},
+            }),
+        ];
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+
+            for body in bodies {
+                let request = title_request("invalid", "1", &body);
+
+                let response = crate::api::handle(fleet.clone(), request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+        });
+    }
+
+    #[test]
+    fn set_title_requires_mutation_headers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = json!({
+            "title": "Title",
+        });
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+
+            for header in ["idempotency-key", "if-match"] {
+                let mut request = title_request("missing", "1", &body);
+                request.headers_mut().remove(header);
+
+                let response = crate::api::handle(fleet.clone(), request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+
+            for value in ["1", "*", "W/\"1\"", "\"bad\"", "\"1\", \"2\""] {
+                let mut request = title_request("invalid", "1", &body);
+                request
+                    .headers_mut()
+                    .insert("if-match", value.parse().unwrap());
+
+                let response = crate::api::handle(fleet.clone(), request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            }
+
+            let mut request = title_request("duplicate", "1", &body);
+            request
+                .headers_mut()
+                .append("if-match", "\"1\"".parse().unwrap());
+
+            let response = crate::api::handle(fleet, request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        });
+    }
+
+    #[test]
+    fn set_title_rejects_missing_agents_and_wrong_methods() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = json!({
+            "title": "Title",
+        });
+        let mut missing = title_request("missing", "1", &body);
+        *missing.uri_mut() = "/agents/99/title".parse().unwrap();
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+
+            let response = crate::api::handle(fleet.clone(), missing).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            let response = crate::api::handle(fleet, request("/agents/1/title"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        });
+    }
+
+    #[test]
+    fn create_agent_accepts_title() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = json!({
+            "id": "2",
+            "role": "assistant",
+            "title": "Initial title",
+        });
+        let create = Request::builder()
+            .method("POST")
+            .uri("/agents")
+            .header("content-type", "application/json")
+            .header("idempotency-key", "create-titled")
+            .body(Full::new(Bytes::from(serde_json::to_vec(&body).unwrap())))
+            .unwrap();
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+
+            let response = crate::api::handle(fleet.clone(), create).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+
+            let response = crate::api::handle(fleet, request("/agents/2"))
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["read-revision"], "1");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let agent: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                agent,
+                json!({
+                    "id": "2",
+                    "role": "assistant",
+                    "parameters": {},
+                    "title": "Initial title",
+                    "metadata_version": "1",
+                })
+            );
+        });
     }
 
     #[test]

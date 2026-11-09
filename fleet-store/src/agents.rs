@@ -11,7 +11,7 @@ use fleet_core::AgentId;
 #[cfg(feature = "queries")]
 use fleet_kit::{
     AgentCollection, AgentPosition, AgentSummary, AgentsPage, AgentsQuery, AgentsUpdates,
-    CollectionRevision, EventDirection, InboxAction, InboxFilter, InboxState,
+    CollectionRevision, EventDirection, InboxAction, InboxFilter, InboxState, Revision,
 };
 #[cfg(feature = "queries")]
 use redb::ReadableDatabase as _;
@@ -34,6 +34,10 @@ const SETTLED: u8 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Summary {
     role: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "records::initial_metadata_revision")]
+    metadata_version: u128,
     inbox: u8,
     since: u64,
     until: Option<u64>,
@@ -57,6 +61,8 @@ impl SummaryRecord {
         Some(AgentSummary {
             id: self.id.into(),
             role: value.role.into(),
+            title: value.title,
+            metadata_version: value.metadata_version.into(),
             version: CollectionRevision(self.version),
             inbox,
             since: value.since,
@@ -209,6 +215,8 @@ pub fn sync_agent(
         .and_then(|row| row.value.clone())
         .unwrap_or_else(|| Summary {
             role: agent.agent.role.name.clone(),
+            title: None,
+            metadata_version: agent.metadata_revision,
             inbox: PENDING,
             since: now,
             until: None,
@@ -228,6 +236,8 @@ pub fn sync_agent(
         value.until = None;
     }
     value.role.clone_from(&agent.agent.role.name);
+    value.title = crate::metadata::agent_title(&agent.agent.extensions).map(str::to_owned);
+    value.metadata_version = agent.metadata_revision;
     value.interrupt_pending = agent.interrupt_intent;
     write_summary(records, id, old.as_ref(), value)
 }
@@ -420,6 +430,24 @@ impl AgentCollection for Store {
         }
     }
 
+    async fn set_title(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
+        expected: Revision,
+        title: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.request(
+            idempotency_key.into(),
+            Request::SetTitle {
+                id: agent.into(),
+                expected: expected.into(),
+                title: title.map(str::to_owned),
+            },
+        )
+        .await
+    }
+
     async fn set_inbox(
         &self,
         idempotency_key: &str,
@@ -510,10 +538,21 @@ impl Store {
     }
 }
 
-#[cfg(all(test, feature = "queries"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_core::{Agent, ClientStore as _, Configured, JsonObject};
+    use crate::{Store, records::Request};
+    use core::assert_matches;
+    use fleet_core::{
+        Agent, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
+        RuntimeStore,
+    };
+    #[cfg(feature = "queries")]
+    use fleet_kit::{AgentMetadata, Queries, QueryUpdate};
+    #[cfg(not(feature = "queries"))]
+    use redb::ReadableDatabase as _;
+    #[cfg(feature = "queries")]
+    use serde_json::{Value, json};
 
     fn agent() -> Agent {
         Agent {
@@ -526,6 +565,165 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sync_agent_preserves_metadata_after_reopening() {
+        let path =
+            std::env::temp_dir().join(format!("fleet-core-metadata-{}.redb", std::process::id()));
+        let agent = agent();
+        let message = Message {
+            id: 1.into(),
+            mode: MessageMode::Steer,
+            content: vec![ContentBlock::Text("Hello".into())],
+        };
+        let title_request = || Request::SetTitle {
+            id: 1,
+            expected: 1,
+            title: Some("Title".into()),
+        };
+
+        futures_executor::block_on(async {
+            {
+                let store = Store::open(&path).unwrap();
+                store.create_agent("create", &agent, None).await.unwrap();
+                store
+                    .request("title".into(), title_request())
+                    .await
+                    .unwrap();
+            }
+
+            let store = Store::open(&path).unwrap();
+            let error = store
+                .send_message("title", agent.id, &message)
+                .await
+                .unwrap_err();
+            assert_matches!(error, StoreError::IdempotencyConflict);
+
+            store
+                .send_message("send", agent.id, &message)
+                .await
+                .unwrap();
+            store.consume_messages(agent.id, None, true).await.unwrap();
+            store
+                .request("title".into(), title_request())
+                .await
+                .unwrap();
+            let stored = RuntimeStore::agent(&store, agent.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.extensions["fleet"]["title"], "Title");
+
+            let (agent, summary) = store
+                .worker()
+                .call(|worker| {
+                    let transaction = worker.database.begin_read()?;
+                    let records = Records(transaction.open_table(records::RECORDS)?);
+                    let agent = records.agent(1)?;
+                    let summary = records
+                        .get::<SummaryRecord>(&records::key(SUMMARY, 1, &[]))?
+                        .unwrap();
+                    Ok((agent, summary))
+                })
+                .await
+                .unwrap();
+            let value = summary.value.unwrap();
+            assert_eq!(agent.revision, 4);
+            assert_eq!(agent.metadata_revision, 2);
+            assert_eq!(summary.version, 3);
+            assert_eq!(value.title.as_deref(), Some("Title"));
+            assert_eq!(value.metadata_version, 2);
+            assert_eq!(value.inbox, BUSY);
+        });
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "queries")]
+    #[test]
+    fn open_migrates_metadata_and_titles() {
+        let path = std::env::temp_dir().join(format!(
+            "fleet-metadata-upgrade-{}.redb",
+            std::process::id()
+        ));
+        let mut agent = agent();
+        agent.extensions.insert(
+            "fleet".into(),
+            json!({
+                "title": "Legacy title",
+            }),
+        );
+        let message = Message {
+            id: 1.into(),
+            mode: MessageMode::Steer,
+            content: vec![ContentBlock::Text("Hello".into())],
+        };
+
+        futures_executor::block_on(async {
+            {
+                let store = Store::open(&path).unwrap();
+                store.create_agent("create", &agent, None).await.unwrap();
+                store
+                    .send_message("send", agent.id, &message)
+                    .await
+                    .unwrap();
+                store
+                    .worker()
+                    .call(|worker| {
+                        let transaction = worker.database.begin_write()?;
+                        {
+                            let mut records = Records(transaction.open_table(records::RECORDS)?);
+                            let key = records::key(records::AGENT, 1, &[]);
+                            let mut agent = records.get::<Value>(&key)?.unwrap();
+                            agent.as_object_mut().unwrap().remove("metadata_revision");
+                            records.put(&key, &agent)?;
+
+                            let key = records::key(SUMMARY, 1, &[]);
+                            let mut summary = records.get::<Value>(&key)?.unwrap();
+                            let value = summary["value"].as_object_mut().unwrap();
+                            value.remove("title");
+                            value.remove("metadata_version");
+                            records.put(&key, &summary)?;
+                            records.put(&[], &2_u32)?;
+                        }
+                        transaction.commit()?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            let store = Store::open(&path).unwrap();
+            let response = Queries::agent(&store, agent.id, None).await.unwrap();
+            assert_eq!(response.revision, 2.into());
+            assert_eq!(
+                response.value,
+                QueryUpdate::Changed(AgentMetadata {
+                    agent: agent.clone(),
+                    version: 1.into(),
+                }),
+            );
+
+            let page = store.agents(AgentsQuery::default()).await.unwrap();
+            assert_eq!(page.agents.len(), 1);
+            assert_eq!(page.agents[0].title.as_deref(), Some("Legacy title"));
+            assert_eq!(page.agents[0].metadata_version, 1.into());
+
+            store
+                .set_title("rename", agent.id, 1.into(), Some("New title"))
+                .await
+                .unwrap();
+            let update = store.updates(agent.id, 2.into()).await.unwrap();
+            assert_eq!(update.revision, 3.into());
+            assert_matches!(
+                update.agent,
+                QueryUpdate::Changed(metadata) if metadata.version == 3.into(),
+            );
+        });
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "queries")]
     #[test]
     fn overdue_snoozes_expire_before_reads_after_reopening() {
         let path =
@@ -570,6 +768,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[cfg(feature = "queries")]
     #[test]
     fn deletion_tombstones_are_repeatable_and_absent_from_scans() {
         futures_executor::block_on(async {

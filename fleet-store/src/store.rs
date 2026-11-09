@@ -34,6 +34,9 @@ struct WakeStream {
 impl Store {
     /// Opens a store, creating it if needed.
     ///
+    /// Format 2 databases are upgraded transactionally to format 3 for metadata
+    /// revisions. Older binaries cannot reopen an upgraded database.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be opened or the worker cannot be started.
@@ -57,8 +60,23 @@ impl Store {
         {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             match records.get::<u32>(&[])? {
-                Some(2) => {}
-                None => records.put(&[], &2_u32)?,
+                Some(3) => {}
+                Some(2) => {
+                    // Legacy metadata last changed at creation. Refresh the projection
+                    // in case an agent already carried an application title.
+                    let agents = records
+                        .prefix::<AgentRecord>(&[records::AGENT])?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for agent in agents {
+                        crate::agents::sync_agent(
+                            &mut records,
+                            &agent,
+                            crate::agents::now_millis(),
+                        )?;
+                    }
+                    records.put(&[], &3_u32)?;
+                }
+                None => records.put(&[], &3_u32)?,
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
             crate::agents::expire(&mut records, crate::agents::now_millis())?;
@@ -97,6 +115,30 @@ impl Store {
                         } else {
                             Err(StoreError::IdempotencyConflict)
                         };
+                    }
+                    if let Request::SetTitle {
+                        id,
+                        expected,
+                        title,
+                    } = &request
+                    {
+                        let (changed, summary_changed) = crate::metadata::set_title(
+                            &mut records,
+                            *id,
+                            *expected,
+                            title.as_deref(),
+                        )?;
+                        records.put(&request_key, &request)?;
+                        drop(records);
+                        transaction.commit()?;
+                        if changed {
+                            worker.notifications.notify(Topic::Agent(*id));
+                        }
+                        if summary_changed {
+                            worker.notifications.notify(Topic::Agents);
+                            worker.notifications.notify(Topic::Snoozes);
+                        }
+                        return Ok(());
                     }
                     if let Request::SetInbox {
                         id,
@@ -171,6 +213,7 @@ fn apply_agent_request(
                 parked_at: None,
                 interrupt_intent: false,
                 revision: 1,
+                metadata_revision: records::initial_metadata_revision(),
                 activity_revision: 1,
                 turn_active: false,
                 next_position: 0,
@@ -184,7 +227,7 @@ fn apply_agent_request(
         Request::InterruptAgent(id, message) => {
             (records.agent(*id)?, message.as_ref(), true, false)
         }
-        Request::SetInbox { .. } => unreachable!(),
+        Request::SetInbox { .. } | Request::SetTitle { .. } => unreachable!(),
     };
     let id = agent.agent.id;
     if !create {

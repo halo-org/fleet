@@ -1,10 +1,10 @@
 use crate::{
-    AgentActivity, AgentUpdates, EventQuery, EventRecord, MessageRecord, Preview, QueryResponse,
-    QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
+    AgentActivity, AgentMetadata, AgentUpdates, EventQuery, EventRecord, MessageRecord, Preview,
+    QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::fmt;
-use fleet_core::{Agent, AgentId, MessageId};
+use fleet_core::{AgentId, MessageId};
 use futures_util::Stream;
 
 // === Queries ===
@@ -24,7 +24,10 @@ pub trait Queries {
     /// The error type returned by this provider.
     type Error: fleet_core::Error<QueriesErrorKind> + 'static;
 
-    /// Returns the agent's metadata.
+    /// Returns the agent's metadata and its last-change version.
+    ///
+    /// The metadata version is suitable for edit preconditions; the response's
+    /// read revision still identifies the snapshot and may be newer.
     ///
     /// # Errors
     ///
@@ -40,7 +43,7 @@ pub trait Queries {
         &self,
         agent_id: AgentId,
         since: Option<Revision>,
-    ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<Agent>>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<AgentMetadata>>, Self::Error>> + Send;
 
     /// Returns the agent's pending messages in queue order.
     ///
@@ -219,7 +222,7 @@ macro_rules! impl_queries_for_pointer {
                 &self,
                 agent_id: AgentId,
                 since: Option<Revision>,
-            ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<Agent>>, Self::Error>> + Send {
+            ) -> impl Future<Output = Result<QueryResponse<QueryUpdate<AgentMetadata>>, Self::Error>> + Send {
                 (**self).agent(agent_id, since)
             }
 

@@ -4,7 +4,7 @@ use fleet_core::{ClientStoreErrorKind, RuntimeStoreErrorKind};
 /// An error returned by the store.
 #[derive(Debug)]
 pub enum StoreError {
-    /// The summary changed since the caller read it.
+    /// The resource changed since the caller read it.
     PreconditionFailed,
     /// The operation conflicts with the stored state.
     Conflict(&'static str),
@@ -31,7 +31,7 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PreconditionFailed => f.write_str("agent summary changed"),
+            Self::PreconditionFailed => f.write_str("agent resource changed"),
             Self::Conflict(message) => f.write_str(message),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::AgentNotFound => f.write_str("agent not found"),

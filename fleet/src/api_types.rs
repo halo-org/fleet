@@ -6,8 +6,8 @@ use fleet_core::{
     ToolResult, TurnEnd,
 };
 use fleet_kit::{
-    AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord, Preview,
-    PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
+    AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
+    MessageRecord, Preview, PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
 use std::collections::BTreeMap;
@@ -87,8 +87,19 @@ pub struct CreateAgentRequest {
     /// The role parameters.
     #[serde(default)]
     pub parameters: JsonObject,
+    /// The optional display title.
+    pub title: Option<String>,
     /// The initial message.
     pub message: Option<ApiMessage>,
+}
+
+/// A request to set or clear an agent's display title.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTitleRequest {
+    /// The new title, or null to clear it. The field must be present.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub title: Option<String>,
 }
 
 /// A request to interrupt an agent.
@@ -280,6 +291,9 @@ pub struct ApiAgentSummary {
     #[serde(serialize_with = "serialize_id")]
     id: u128,
     role: String,
+    title: Option<String>,
+    #[serde(serialize_with = "serialize_id")]
+    metadata_version: u128,
     #[serde(serialize_with = "serialize_id")]
     version: u128,
     inbox: &'static str,
@@ -295,6 +309,8 @@ impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
         Self {
             id: value.id.into(),
             role: value.role.to_string(),
+            title: value.title,
+            metadata_version: value.metadata_version.into(),
             version: value.version.0,
             inbox: inbox_name(value.inbox),
             since: value.since,
@@ -369,6 +385,11 @@ pub struct ApiAgent {
     pub role: String,
     /// The role parameters.
     pub parameters: JsonObject,
+    /// The optional display title.
+    pub title: Option<String>,
+    /// The last metadata change, used by title edits' If-Match precondition.
+    #[serde(serialize_with = "serialize_id")]
+    pub metadata_version: u128,
 }
 
 /// An agent's activity.
@@ -901,9 +922,10 @@ impl CreateAgentRequest {
             id,
             role,
             parameters,
+            title,
             message,
         } = self;
-        let agent = Agent {
+        let mut agent = Agent {
             id: id.into(),
             role: Configured {
                 name: role.into(),
@@ -911,6 +933,11 @@ impl CreateAgentRequest {
             },
             extensions: JsonObject::new(),
         };
+        if let Some(title) = title {
+            agent
+                .extensions
+                .insert("fleet".into(), serde_json::json!({ "title": title }));
+        }
 
         (agent, message.map(Into::into))
     }
@@ -1247,12 +1274,16 @@ impl From<AgentUpdates> for ApiAgentUpdates {
     }
 }
 
-impl From<Agent> for ApiAgent {
-    fn from(agent: Agent) -> Self {
+impl From<AgentMetadata> for ApiAgent {
+    fn from(metadata: AgentMetadata) -> Self {
+        let agent = metadata.agent;
+        let title = fleet_kit::agent_title(&agent.extensions).map(str::to_owned);
         Self {
             id: agent.id.into(),
             role: agent.role.name.into(),
             parameters: agent.role.config,
+            title,
+            metadata_version: metadata.version.into(),
         }
     }
 }

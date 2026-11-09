@@ -25,12 +25,18 @@ pub struct AgentRecord {
     pub parked_at: Option<u128>,
     pub interrupt_intent: bool,
     pub revision: u128,
+    #[serde(default = "initial_metadata_revision")]
+    pub metadata_revision: u128,
     pub activity_revision: u128,
     pub turn_active: bool,
     pub next_position: u128,
     pub pending_messages: u64,
     pub pending_tool_calls: u64,
     pub synchronous_tool_calls: u64,
+}
+
+pub const fn initial_metadata_revision() -> u128 {
+    1
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +75,11 @@ pub enum Request {
     CreateAgent(data::Agent, Option<data::Message>),
     SendMessage(u128, data::Message),
     InterruptAgent(u128, Option<data::Message>),
+    SetTitle {
+        id: u128,
+        expected: u128,
+        title: Option<String>,
+    },
     SetInbox {
         id: u128,
         expected: u128,
@@ -195,6 +206,35 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
             self.put(&key, &change)?;
         }
         Ok(())
+    }
+
+    /// Commits a metadata-only edit within the caller's transaction.
+    pub fn update_metadata(
+        &mut self,
+        agent: &mut AgentRecord,
+        metadata: data::Agent,
+    ) -> Result<bool, StoreError> {
+        if metadata.id != agent.agent.id {
+            return Err(StoreError::Conflict("agent ID cannot change"));
+        }
+        if metadata == agent.agent {
+            return Ok(false);
+        }
+        agent.revision = agent
+            .revision
+            .checked_add(1)
+            .expect("revisions do not overflow");
+        self.change(
+            agent.agent.id,
+            AGENT,
+            &[],
+            Some(agent.metadata_revision),
+            agent.revision,
+        )?;
+        agent.metadata_revision = agent.revision;
+        agent.agent = metadata;
+        self.save_agent(agent)?;
+        Ok(true)
     }
 
     pub fn save_agent(&mut self, agent: &AgentRecord) -> Result<(), StoreError> {

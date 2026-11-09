@@ -1,4 +1,4 @@
-//! Agent collection scans and inbox management, independent of core execution.
+//! Agent collection scans, application metadata, and inbox management, independent of core execution.
 //!
 //! Bootstrap with independent scans and resume changes from the minimum of their
 //! read revisions. Merge summaries by their version; keep deletion versions while
@@ -6,11 +6,17 @@
 //! applied revision. Persist applied state and the subscription revision together.
 //! Scans have no effect on the change stream, which always covers all agents.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::{fmt, num::NonZeroUsize};
-use fleet_core::{AgentId, RoleName};
+use fleet_core::{AgentId, JsonObject, RoleName};
 
-use crate::EventDirection;
+use crate::{EventDirection, Revision};
+
+/// Returns the application title stored in an agent's extensions.
+#[must_use]
+pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
+    extensions.get("fleet")?.get("title")?.as_str()
+}
 
 /// A durable collection revision. Comparable only within the same store.
 ///
@@ -71,6 +77,10 @@ pub struct AgentSummary {
     pub id: AgentId,
     /// Its configured role.
     pub role: RoleName,
+    /// The optional display title.
+    pub title: Option<String>,
+    /// Last metadata change, in this agent's revision sequence.
+    pub metadata_version: Revision,
     /// Last collection change to this summary.
     pub version: CollectionRevision,
     /// The inbox section.
@@ -173,6 +183,19 @@ pub trait AgentCollection {
         &self,
         after: CollectionRevision,
     ) -> impl Future<Output = Result<AgentsUpdates, Self::Error>> + Send;
+
+    /// Sets or clears the title if the metadata is still at `expected`.
+    ///
+    /// `expected` is [`AgentSummary::metadata_version`], not its collection version.
+    /// Successful retries with the same key and arguments never reapply an edit.
+    /// Unchanged titles do not advance revisions. Activity does not prevent edits.
+    fn set_title(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
+        expected: Revision,
+        title: Option<&str>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Applies an idempotent action if the agent is idle at `expected`.
     fn set_inbox(
