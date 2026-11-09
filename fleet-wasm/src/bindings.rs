@@ -7,6 +7,23 @@ pub mod models {
 
 pub use models::fleet::providers::{configuration, types};
 
+pub mod authentication {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "authentication-provider",
+        with: { "fleet:providers/configuration": super::configuration },
+    });
+}
+
+pub mod credential_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "credential-host",
+    });
+}
+
+pub use credential_host::fleet::providers::credentials;
+
 pub mod tools {
     wasmtime::component::bindgen!({
         path: "wit",

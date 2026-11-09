@@ -1,4 +1,4 @@
-use crate::{ErrorHandler, IdleHandler};
+use crate::{Authentication, ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId, Models, Roles, Tools};
 use fleet_kit::{
@@ -17,6 +17,7 @@ use std::{
 #[derive(Clone)]
 pub struct Fleet {
     state: Arc<State>,
+    authentication: Option<Authentication>,
 }
 
 /// An error returned by [`Fleet`].
@@ -40,11 +41,28 @@ impl Fleet {
     #[must_use]
     pub fn new(store: Store, idle_timeout: Option<Duration>) -> Self {
         Self {
+            authentication: None,
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
                 store,
             }),
         }
+    }
+
+    /// Enables provider authentication.
+    pub fn with_authentication(mut self, authentication: Authentication) -> Self {
+        self.authentication = Some(authentication);
+        self
+    }
+
+    /// Returns provider authentication when configured.
+    pub const fn authentication(&self) -> Option<&Authentication> {
+        self.authentication.as_ref()
+    }
+
+    /// Returns the shared idle handler.
+    pub fn idle_handler(&self) -> &IdleHandler {
+        &self.state.idle_handler
     }
 
     /// Runs agents until shutdown and waits for pending mutations.

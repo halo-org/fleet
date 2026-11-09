@@ -11,4 +11,17 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+bytes = { workspace = true, features = ["std"] }
 fleet-core.workspace = true
+futures-util = { workspace = true, features = ["std"] }
+http = { workspace = true, features = ["std"] }
+reqwest = { workspace = true, features = ["http2", "rustls", "stream"], optional = true }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+sse-stream.workspace = true
+
+[dev-dependencies]
+futures-executor = { workspace = true, features = ["std"] }
+
+[features]
+reqwest = ["dep:reqwest"]

@@ -1,5 +1,5 @@
 use crate::{
-    WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState,
     bindings::{tools::ToolProviderPre, types},
 };
 use fleet_core::{JsonObject, Tool, ToolContext, ToolOutput};
@@ -12,6 +12,7 @@ pub struct WasmTools {
     instance: ToolProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
+    credentials: Option<WasmCredentials>,
 }
 
 impl WasmTools {
@@ -19,18 +20,24 @@ impl WasmTools {
         instance: InstancePre<WasmState>,
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
+        credentials: Option<WasmCredentials>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: ToolProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
+            credentials,
         })
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Tool>, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance
@@ -61,7 +68,11 @@ impl WasmTools {
     ) -> Result<ToolOutput, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance
@@ -97,7 +108,11 @@ impl WasmTools {
     ) -> Result<ToolOutput, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance

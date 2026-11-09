@@ -1,4 +1,9 @@
-use crate::{WasmCapabilities, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools};
+use crate::{
+    WasmCapabilities, WasmCredentials, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools,
+    bindings::authentication::{
+        AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
+    },
+};
 use core::future;
 use fleet_core::{
     AgentId, ContentBlock, JsonObject, Model, ModelCompactionResponse, ModelContext,
@@ -10,7 +15,9 @@ use std::{
     collections::{BTreeMap, btree_map::Entry},
     sync::Arc,
 };
+use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
+use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// Named WebAssembly providers.
 ///
@@ -27,6 +34,10 @@ pub struct WasmProvider {
     models: Option<WasmModels>,
     tools: Option<WasmTools>,
     prompts: Option<WasmPrompts>,
+    authentication: Option<AuthenticationProviderPre<WasmState>>,
+    config: Arc<str>,
+    filesystem: WasiFilesystemCtx,
+    credentials: Option<WasmCredentials>,
 }
 
 impl WasmRegistry {
@@ -84,19 +95,45 @@ impl WasmProvider {
             .instantiate_pre(component)
             .map_err(WasmError::runtime)?;
         let config: Arc<str> = serde_json::to_string(config)?.into();
+        let credentials = capabilities.credentials.clone();
         let filesystem = capabilities.open_filesystem()?;
 
         let models = component
             .get_export_index(None, "fleet:providers/models@0.0.0")
-            .map(|_| WasmModels::new(instance.clone(), config.clone(), filesystem.clone()))
+            .map(|_| {
+                WasmModels::new(
+                    instance.clone(),
+                    config.clone(),
+                    filesystem.clone(),
+                    credentials.clone(),
+                )
+            })
             .transpose()?;
         let tools = component
             .get_export_index(None, "fleet:providers/tools@0.0.0")
-            .map(|_| WasmTools::new(instance.clone(), config.clone(), filesystem.clone()))
+            .map(|_| {
+                WasmTools::new(
+                    instance.clone(),
+                    config.clone(),
+                    filesystem.clone(),
+                    credentials.clone(),
+                )
+            })
             .transpose()?;
         let prompts = component
             .get_export_index(None, "fleet:providers/prompts@0.0.0")
-            .map(|_| WasmPrompts::new(instance, config, filesystem))
+            .map(|_| {
+                WasmPrompts::new(
+                    instance.clone(),
+                    config.clone(),
+                    filesystem.clone(),
+                    credentials.clone(),
+                )
+            })
+            .transpose()?;
+        let authentication = component
+            .get_export_index(None, "fleet:providers/authentication@0.0.0")
+            .map(|_| AuthenticationProviderPre::new(instance).map_err(WasmError::runtime))
             .transpose()?;
 
         if models.is_none() && tools.is_none() && prompts.is_none() {
@@ -107,7 +144,92 @@ impl WasmProvider {
             models,
             tools,
             prompts,
+            authentication,
+            config,
+            filesystem,
+            credentials,
         })
+    }
+
+    /// Returns the connections used by this provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the provider fails to describe its connections.
+    pub async fn connections(
+        &self,
+        host_id: &str,
+    ) -> Result<Vec<fleet_kit::Connection>, WasmError> {
+        let Some(instance) = &self.authentication else {
+            return Ok(Vec::new());
+        };
+        let mut store = Store::new(
+            instance.engine(),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
+        );
+        let instance = instance
+            .instantiate_async(&mut store)
+            .await
+            .map_err(WasmError::runtime)?;
+        let connections = store
+            .run_concurrent(async |accessor| {
+                instance
+                    .fleet_providers_authentication()
+                    .call_connections(accessor, host_id.into())
+                    .await
+            })
+            .await
+            .flatten()
+            .map_err(WasmError::runtime)?
+            .map_err(|message| WasmError::runtime(wasmtime::Error::msg(message)))?;
+        Ok(connections
+            .into_iter()
+            .map(|connection| fleet_kit::Connection {
+                name: connection.name,
+                title: connection.title,
+                description: connection.description,
+                manage_url: connection.manage_url,
+                methods: connection
+                    .methods
+                    .into_iter()
+                    .map(|method| fleet_kit::AuthenticationMethod {
+                        name: method.name,
+                        title: method.title,
+                        kind: match method.kind {
+                            auth::AuthenticationKind::ApiKey => {
+                                fleet_kit::AuthenticationKind::ApiKey
+                            }
+                            auth::AuthenticationKind::Oauth(config) => {
+                                fleet_kit::AuthenticationKind::OAuth(Box::new(
+                                    fleet_kit::OAuthConfig {
+                                        authorization_url: config.authorization_url,
+                                        token_url: config.token_url,
+                                        client_id: config.client_id,
+                                        redirect_uri: config.redirect_uri,
+                                        scopes: config.scopes,
+                                        parameters: config.parameters,
+                                        resource: config.resource,
+                                        issuer: config.issuer,
+                                        registration: config.registration.map(|registration| {
+                                            fleet_kit::OAuthRegistration {
+                                                client_id_parameter: registration
+                                                    .client_id_parameter,
+                                                parameters: registration.parameters,
+                                            }
+                                        }),
+                                        required_scopes: config.required_scopes,
+                                    },
+                                ))
+                            }
+                        },
+                    })
+                    .collect(),
+            })
+            .collect())
     }
 }
 
@@ -262,6 +384,10 @@ mod tests {
             models: None,
             tools: None,
             prompts: None,
+            authentication: None,
+            config: "{}".into(),
+            filesystem: WasiFilesystemCtx::default(),
+            credentials: None,
         }
     }
 

@@ -38,6 +38,7 @@ mod bindings;
 mod convert;
 mod wasm;
 mod wasm_capabilities;
+mod wasm_credentials;
 mod wasm_error;
 mod wasm_models;
 mod wasm_prompts;
@@ -48,6 +49,7 @@ mod wasm_tools;
 pub use self::{
     wasm::{Wasm, WasmComponent},
     wasm_capabilities::{WasmCapabilities, WasmMount},
+    wasm_credentials::WasmCredentials,
     wasm_error::WasmError,
     wasm_registry::{WasmProvider, WasmRegistry},
 };

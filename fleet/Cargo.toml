@@ -11,18 +11,27 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+base64 = { workspace = true, features = ["alloc"] }
 fleet-core.workspace = true
 fleet-kit.workspace = true
 fleet-store = { workspace = true, features = ["queries"] }
 fleet-wasm.workspace = true
 form_urlencoded = { workspace = true, features = ["alloc"] }
 futures-util = { workspace = true, features = ["std"] }
+getrandom.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server"] }
 hyper-util = { workspace = true, features = ["server-auto", "server-graceful", "tokio"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+percent-encoding = { workspace = true, features = ["alloc"] }
+redb.workspace = true
+reqwest = { workspace = true, features = ["rustls", "form"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "std"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }
+sha2.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
+url = { workspace = true, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Com", "Win32_UI_Shell"] }

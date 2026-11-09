@@ -20,7 +20,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 const MAX_BODY_BYTES: usize = 1_048_576;
 
-type ResponseBody = UnsyncBoxBody<Bytes, Box<dyn Error + Send + Sync>>;
+pub type ResponseBody = UnsyncBoxBody<Bytes, Box<dyn Error + Send + Sync>>;
 
 // === Routing ===
 
@@ -48,6 +48,10 @@ where
 {
     let (parts, body) = request.into_parts();
     let segments: Vec<_> = parts.uri.path().split('/').collect();
+
+    if segments.get(1) == Some(&"connections") {
+        return crate::authentication_api::route(fleet, &parts, &segments, body).await;
+    }
 
     match (&parts.method, segments.as_slice()) {
         (&Method::POST, ["", "agents"]) => create_agent(fleet, &parts.headers, body).await,
@@ -443,7 +447,7 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
-async fn read_json<T: DeserializeOwned, B>(headers: &HeaderMap, body: B) -> Result<T, ApiError>
+pub async fn read_json<T: DeserializeOwned, B>(headers: &HeaderMap, body: B) -> Result<T, ApiError>
 where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn Error + Send + Sync>>,
@@ -493,7 +497,7 @@ fn read_response(
     response
 }
 
-fn empty_response(status: StatusCode) -> Response<ResponseBody> {
+pub fn empty_response(status: StatusCode) -> Response<ResponseBody> {
     let mut response = Response::new(ResponseBody::default());
     *response.status_mut() = status;
     response
@@ -510,7 +514,7 @@ fn created_response(location: &str) -> Response<ResponseBody> {
     response
 }
 
-fn json_response(status: StatusCode, value: &impl Serialize) -> Response<ResponseBody> {
+pub fn json_response(status: StatusCode, value: &impl Serialize) -> Response<ResponseBody> {
     let bytes = serde_json::to_vec(value).expect("response is serializable");
     let body = Full::new(Bytes::from(bytes))
         .map_err(Into::into)
@@ -526,18 +530,20 @@ fn json_response(status: StatusCode, value: &impl Serialize) -> Response<Respons
 
 // === Errors ===
 
-enum ApiError {
+pub enum ApiError {
     BadRequest(String),
     NotFound,
     MethodNotAllowed(&'static str),
     UnsupportedMediaType,
     BodyTooLarge,
     Fleet(FleetError),
+    Authentication(crate::AuthenticationError),
 }
 
 impl ApiError {
     fn into_response(self) -> Response<ResponseBody> {
         let (status, code, message) = match &self {
+            Self::Authentication(error) => crate::authentication_api::error_details(error),
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "invalid_request", message.as_str())
             }

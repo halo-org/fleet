@@ -1,5 +1,5 @@
 use crate::{
-    WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState,
     bindings::{
         models::{ModelProviderPre, exports::fleet::providers::models},
         types,
@@ -28,6 +28,7 @@ pub struct WasmModels {
     instance: ModelProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
+    credentials: Option<WasmCredentials>,
 }
 
 struct ResponseConsumer {
@@ -40,18 +41,24 @@ impl WasmModels {
         instance: InstancePre<WasmState>,
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
+        credentials: Option<WasmCredentials>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: ModelProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
+            credentials,
         })
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Model>, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance
@@ -83,12 +90,16 @@ impl WasmModels {
         let instance = self.instance.clone();
         let config = self.config.clone();
         let filesystem = self.filesystem.clone();
+        let credentials = self.credentials.clone();
         let context = types::ModelContext::new(name, context);
         let continuation = continuation.map(types::ModelContinuation::from);
         let input = input.iter().map(types::ModelInput::from).collect();
         let (sender, receiver) = mpsc::channel(0);
         let run = async move {
-            let mut store = Store::new(instance.engine(), WasmState::new(config, filesystem));
+            let mut store = Store::new(
+                instance.engine(),
+                WasmState::new(config, filesystem, credentials),
+            );
             let instance = instance
                 .instantiate_async(&mut store)
                 .await
@@ -149,7 +160,11 @@ impl WasmModels {
     ) -> Result<ModelCompactionResponse, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance

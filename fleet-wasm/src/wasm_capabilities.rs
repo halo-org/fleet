@@ -1,17 +1,19 @@
-use crate::WasmError;
+use crate::{WasmCredentials, WasmError};
 use core::mem;
 use std::path::PathBuf;
 use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
 
 /// Access granted to a WebAssembly provider.
 ///
-/// Defaults to no HTTP or filesystem access.
+/// Defaults to no HTTP, filesystem or credential access.
 #[derive(Clone, Debug, Default)]
 pub struct WasmCapabilities {
     /// Whether outgoing HTTP requests are allowed.
     pub http: bool,
     /// Directories available to the provider.
     pub filesystem: Vec<WasmMount>,
+    /// Credentials available to this provider.
+    pub credentials: Option<WasmCredentials>,
 }
 
 /// A host directory exposed to a WebAssembly provider.

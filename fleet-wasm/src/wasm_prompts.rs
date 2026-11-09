@@ -1,5 +1,5 @@
 use crate::{
-    WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState,
     bindings::{prompts::PromptProviderPre, types},
 };
 use fleet_core::{JsonObject, Prompt, PromptContext, PromptResponse};
@@ -12,6 +12,7 @@ pub struct WasmPrompts {
     instance: PromptProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
+    credentials: Option<WasmCredentials>,
 }
 
 impl WasmPrompts {
@@ -19,18 +20,24 @@ impl WasmPrompts {
         instance: InstancePre<WasmState>,
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
+        credentials: Option<WasmCredentials>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: PromptProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
+            credentials,
         })
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Prompt>, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance
@@ -60,7 +67,11 @@ impl WasmPrompts {
     ) -> Result<PromptResponse, WasmError> {
         let mut store = Store::new(
             self.instance.engine(),
-            WasmState::new(self.config.clone(), self.filesystem.clone()),
+            WasmState::new(
+                self.config.clone(),
+                self.filesystem.clone(),
+                self.credentials.clone(),
+            ),
         );
         let instance = self
             .instance

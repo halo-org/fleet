@@ -2,10 +2,16 @@
 
 mod api;
 mod api_types;
+mod authentication;
+mod authentication_api;
+mod authentication_error;
+mod credential_store;
 mod directories;
 mod error_handler;
 mod fleet;
 mod idle_handler;
+mod oauth;
+mod oauth_callback;
 mod roles;
 mod server;
 mod signals;
@@ -17,6 +23,9 @@ pub(crate) use self::{
         ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiToolCallRecord, CreateAgentRequest,
         ErrorDetails, ErrorResponse, EventsQuery, InterruptAgentRequest, SinceQuery,
     },
+    authentication::Authentication,
+    authentication_error::AuthenticationError,
+    credential_store::CredentialStore,
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
@@ -30,11 +39,15 @@ use core::{
     time::Duration,
 };
 use fleet_core::JsonObject;
-use fleet_wasm::{Wasm, WasmCapabilities, WasmMount, WasmRegistry};
+use fleet_wasm::{Wasm, WasmCapabilities, WasmCredentials, WasmMount, WasmRegistry};
 use futures_util::future;
 use std::{fs, io, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("can install TLS provider");
+
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -48,21 +61,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let providers_path = config_dir.join("providers.wasm");
     let roles = Roles;
-    let providers = match load_providers(&providers_path, &config_dir) {
-        Ok(providers) => providers,
-        Err(error) => {
-            eprintln!("Could not load {}: {error}", providers_path.display());
-            let mut source = error.source();
-            while let Some(error) = source {
-                eprintln!("  {error}");
-                source = error.source();
-            }
-            return ExitCode::FAILURE;
-        }
-    };
-
     let data_dir = match directories::create_data_dir() {
         Ok(path) => path,
         Err(error) => {
@@ -79,6 +78,32 @@ fn main() -> ExitCode {
         }
     };
     let fleet = Fleet::new(store, idle_timeout);
+    let authentication = match tokio_runtime.block_on(Authentication::open(
+        &data_dir.join("authentication"),
+        fleet.idle_handler().clone(),
+    )) {
+        Ok(authentication) => authentication,
+        Err(error) => {
+            eprintln!("Could not open authentication: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let providers = match tokio_runtime.block_on(load_providers(&config_dir, &authentication)) {
+        Ok(providers) => providers,
+        Err(error) => {
+            eprintln!(
+                "Could not load providers from {}: {error}",
+                config_dir.display()
+            );
+            let mut source = error.source();
+            while let Some(error) = source {
+                eprintln!("  {error}");
+                source = error.source();
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    let fleet = fleet.with_authentication(authentication);
 
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1337));
     let shutdown_timeout = Some(Duration::from_secs(10));
@@ -93,11 +118,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn load_providers(path: &Path, config_dir: &Path) -> Result<WasmRegistry, Box<dyn Error>> {
-    let bytes = fs::read(path)?;
+async fn load_providers(
+    config_dir: &Path,
+    authentication: &Authentication,
+) -> Result<WasmRegistry, Box<dyn Error>> {
     let wasm = Wasm::new()?;
-    let component = wasm.compile(&bytes)?;
-    let capabilities = WasmCapabilities {
+    let mut providers = WasmRegistry::new();
+    let example_capabilities = WasmCapabilities {
         filesystem: vec![WasmMount {
             host_path: config_dir.into(),
             guest_path: "/config".into(),
@@ -105,9 +132,33 @@ fn load_providers(path: &Path, config_dir: &Path) -> Result<WasmRegistry, Box<dy
         }],
         ..WasmCapabilities::default()
     };
-    let provider = wasm.provider(&component, &JsonObject::new(), capabilities)?;
-    let mut providers = WasmRegistry::new();
-    providers.insert("example", provider)?;
+    let openai_capabilities = WasmCapabilities {
+        http: true,
+        ..WasmCapabilities::default()
+    };
+    for (namespace, file, mut capabilities) in [
+        ("example", "providers", example_capabilities),
+        ("openai", "openai", openai_capabilities),
+    ] {
+        let bytes = match fs::read(config_dir.join(format!("{file}.wasm"))) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let config = match fs::read(config_dir.join(format!("{file}.json"))) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => JsonObject::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let component = wasm.compile(&bytes)?;
+        capabilities.credentials = Some(WasmCredentials::new(authentication.scope(namespace)));
+        let provider = wasm.provider(&component, &config, capabilities)?;
+        authentication.register(
+            namespace,
+            provider.connections(authentication.host_id()).await?,
+        )?;
+        providers.insert(namespace, provider)?;
+    }
     Ok(providers)
 }
 

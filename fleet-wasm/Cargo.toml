@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 fleet-core.workspace = true
+fleet-kit.workspace = true
 futures-channel = { workspace = true, features = ["std", "sink"] }
 futures-util = { workspace = true, features = ["std", "sink"] }
 serde_json = { workspace = true, features = ["std"] }

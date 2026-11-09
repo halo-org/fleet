@@ -1,0 +1,105 @@
+/// Declares connections used by a provider.
+interface authentication {
+    /// Client registration completed during authorization.
+    record oauth-registration {
+        /// The callback parameter containing the issued client ID.
+        client-id-parameter: string,
+        /// Authorization parameters used only for a new registration.
+        parameters: list<tuple<string, string>>,
+    }
+
+    /// Settings for OAuth authorization with PKCE.
+    record oauth-config {
+        /// The authorization endpoint.
+        authorization-url: string,
+        /// The token endpoint.
+        token-url: string,
+        /// The public client ID.
+        client-id: string,
+        /// The registered redirect URI.
+        redirect-uri: string,
+        /// The requested scopes.
+        scopes: list<string>,
+        /// Additional authorization parameters.
+        parameters: list<tuple<string, string>>,
+        /// The API resource requested during authorization and renewal.
+        %resource: option<string>,
+        /// The identity provider's issuer URL.
+        issuer: option<string>,
+        /// Client registration completed during authorization.
+        registration: option<oauth-registration>,
+        /// Scopes that must be granted before credentials can be used.
+        required-scopes: list<string>,
+    }
+
+    /// How credentials are obtained.
+    variant authentication-kind {
+        /// A key supplied by the user.
+        api-key,
+        /// OAuth authorization with PKCE.
+        oauth(oauth-config),
+    }
+
+    /// A way to authenticate a connection.
+    record authentication-method {
+        /// The method name within its connection.
+        name: string,
+        /// The display name.
+        title: string,
+        /// How credentials are obtained.
+        kind: authentication-kind,
+    }
+
+    /// A named connection to an external service.
+    record connection {
+        /// The connection name within its provider.
+        name: string,
+        /// The display name.
+        title: string,
+        /// A description shown with the connection.
+        description: option<string>,
+        /// Where the user can manage the connection's usage.
+        manage-url: option<string>,
+        /// The supported sign-in methods.
+        methods: list<authentication-method>,
+    }
+
+    /// Returns the connections used by this provider configuration.
+    connections: async func(host-id: string) -> result<list<connection>, string>;
+}
+
+/// Provides credentials for this provider's connections.
+interface credentials {
+    /// An OAuth access token and optional identity token.
+    record oauth-credential {
+        /// The access token.
+        access-token: string,
+        /// The identity token returned by the provider.
+        id-token: option<string>,
+    }
+
+    /// Credentials for a connection.
+    variant credential {
+        /// A key supplied by the user.
+        api-key(string),
+        /// An OAuth access token and optional identity token.
+        oauth(oauth-credential),
+    }
+
+    /// Returns current credentials, refreshing expired tokens if needed.
+    get: async func(name: string) -> result<option<credential>, string>;
+
+    /// Refreshes a rejected access token if it is still current.
+    refresh: async func(name: string, rejected: string) -> result<bool, string>;
+}
+
+/// A component that declares authentication methods.
+world authentication-provider {
+    import configuration;
+    export authentication;
+}
+
+/// A host that provides credentials.
+world credential-host {
+    import credentials;
+}
