@@ -1052,6 +1052,34 @@ mod tests {
     }
 
     #[test]
+    fn generate_preserves_http_error_details() {
+        for body in [
+            json!({
+                "detail": "Unsupported service_tier: fast",
+            })
+            .to_string(),
+            "Unsupported service_tier: fast".into(),
+        ] {
+            let response = Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(stream::iter(vec![Ok(Bytes::from(body))]))
+                .unwrap();
+            let models = models(TestHttp::new([response]));
+            let context = context();
+
+            let error = futures_executor::block_on(
+                models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ModelsErrorKind::Other);
+            assert_eq!(
+                error.to_string(),
+                "OpenAI request failed with HTTP 400 Bad Request: Unsupported service_tier: fast",
+            );
+        }
+    }
+
+    #[test]
     fn generate_rejects_incompatible_saved_state_before_sending() {
         let http = TestHttp::default();
         let models = models(http.clone());

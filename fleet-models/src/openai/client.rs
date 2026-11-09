@@ -24,7 +24,9 @@ pub struct ErrorScope {
 
 #[derive(Deserialize)]
 struct ErrorResponse {
+    #[serde(default)]
     error: api::ApiError,
+    detail: Option<String>,
 }
 
 impl<H, C> Client<H, C> {
@@ -177,9 +179,15 @@ where
             let status = response.status();
             let request_id = request_id(&response);
             let body = read_body(response.into_body(), 65_536).await?;
-            let detail = serde_json::from_slice::<ErrorResponse>(&body)
-                .map(|response| response.error)
+            let mut detail = serde_json::from_slice::<ErrorResponse>(&body)
+                .map(|response| api::ApiError {
+                    message: response.error.message.or(response.detail),
+                    ..response.error
+                })
                 .unwrap_or_default();
+            if detail.message.is_none() && !body.is_empty() {
+                detail.message = Some(String::from_utf8_lossy(&body).into_owned());
+            }
             return Err(api_error(detail, Some(status), request_id, scope));
         }
     }
