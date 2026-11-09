@@ -1,4 +1,4 @@
-use crate::{Authentication, Config, ErrorHandler, IdleHandler};
+use crate::{Authentication, Config, ErrorChain, ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
     Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, Roles, Tools,
@@ -152,7 +152,7 @@ impl Fleet {
             let deadline = match self.state.store.next_snooze().await {
                 Ok(deadline) => deadline,
                 Err(error) => {
-                    eprintln!("Could not read snooze deadlines: {error}");
+                    eprintln!("Could not read snooze deadlines: {}", ErrorChain(&error));
                     drop(guard);
                     future::select(
                         pin!(self.wait_for_shutdown()),
@@ -170,7 +170,7 @@ impl Fleet {
                 .unwrap_or(u64::MAX);
             if deadline.is_some_and(|deadline| deadline <= now) {
                 if let Err(error) = self.state.store.expire_snoozes(now).await {
-                    eprintln!("Could not expire snoozes: {error}");
+                    eprintln!("Could not expire snoozes: {}", ErrorChain(&error));
                     future::select(
                         pin!(self.wait_for_shutdown()),
                         pin!(tokio::time::sleep(Duration::from_secs(1))),

@@ -8,6 +8,7 @@ mod authentication_error;
 mod config;
 mod credential_store;
 mod directories;
+mod error_chain;
 mod error_handler;
 mod fleet;
 mod idle_handler;
@@ -30,6 +31,7 @@ pub(crate) use self::{
     authentication_error::AuthenticationError,
     config::Config,
     credential_store::CredentialStore,
+    error_chain::ErrorChain,
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
@@ -54,12 +56,7 @@ fn main() -> ExitCode {
     match tokio_runtime.block_on(start()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Fleet failed: {error}");
-            let mut source = error.source();
-            while let Some(error) = source {
-                eprintln!("  {error}");
-                source = error.source();
-            }
+            eprintln!("Fleet failed: {}", ErrorChain(error.as_ref()));
             ExitCode::FAILURE
         }
     }

@@ -1,4 +1,4 @@
-use crate::Fleet;
+use crate::{ErrorChain, Fleet};
 use core::{net::SocketAddr, pin::pin, time::Duration};
 use futures_util::future::{self, Either};
 use hyper_util::{
@@ -62,7 +62,10 @@ async fn serve(
             let connection = http.serve_connection(io, service);
 
             if let Err(error) = watcher.watch(connection).await {
-                eprintln!("HTTP connection from {peer} failed: {error}");
+                eprintln!(
+                    "HTTP connection from {peer} failed: {}",
+                    ErrorChain(error.as_ref()),
+                );
             }
         });
     }

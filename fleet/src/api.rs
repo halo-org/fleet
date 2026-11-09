@@ -1,8 +1,8 @@
 use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest};
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
-    ApiToolCallRecord, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet,
-    FleetError, InterruptAgentRequest, SinceQuery,
+    ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails, ErrorResponse, EventsQuery,
+    Fleet, FleetError, InterruptAgentRequest, SinceQuery,
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
@@ -684,13 +684,7 @@ impl ApiError {
 
     fn log(&self) {
         if let Self::Fleet(error) = self {
-            eprintln!("HTTP request failed: {error}");
-            let mut source = error.source();
-
-            while let Some(error) = source {
-                eprintln!("Caused by: {error}");
-                source = error.source();
-            }
+            eprintln!("HTTP request failed: {}", ErrorChain(error));
         }
     }
 }

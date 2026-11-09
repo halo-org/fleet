@@ -1,3 +1,4 @@
+use crate::ErrorChain;
 use core::{error::Error, future, time::Duration};
 
 /// Logs runtime errors and delays retries.
@@ -8,7 +9,7 @@ impl fleet_core::ErrorHandler for ErrorHandler {
     where
         E: Error,
     {
-        eprintln!("{error}");
+        eprintln!("{}", ErrorChain(&error));
         future::ready(())
     }
 
@@ -20,7 +21,7 @@ impl fleet_core::ErrorHandler for ErrorHandler {
     where
         E: Error,
     {
-        eprintln!("{error}");
+        eprintln!("{}", ErrorChain(&error));
 
         let delay = Duration::from_millis(100)
             .saturating_mul(2_u32.saturating_pow(retries))
