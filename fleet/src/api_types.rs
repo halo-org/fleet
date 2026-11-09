@@ -10,6 +10,24 @@ use fleet_kit::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
 
+// === Configuration ===
+
+/// A configured provider.
+#[derive(Serialize)]
+pub struct ApiProvider<'a> {
+    /// The provider name.
+    pub name: &'a str,
+    /// The plugin supplying the provider.
+    pub plugin: &'a str,
+}
+
+/// An available role.
+#[derive(Serialize)]
+pub struct ApiRole {
+    /// The role name.
+    pub name: String,
+}
+
 // === Requests ===
 
 /// A request to create an agent.

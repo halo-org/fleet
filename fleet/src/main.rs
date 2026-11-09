@@ -5,6 +5,7 @@ mod api_types;
 mod authentication;
 mod authentication_api;
 mod authentication_error;
+mod config;
 mod credential_store;
 mod directories;
 mod error_handler;
@@ -12,6 +13,7 @@ mod fleet;
 mod idle_handler;
 mod oauth;
 mod oauth_callback;
+mod plugins;
 mod roles;
 mod server;
 mod signals;
@@ -20,28 +22,24 @@ mod subscription;
 pub(crate) use self::{
     api_types::{
         ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
-        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiToolCallRecord, CreateAgentRequest,
-        ErrorDetails, ErrorResponse, EventsQuery, InterruptAgentRequest, SinceQuery,
+        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRole, ApiToolCallRecord,
+        CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, InterruptAgentRequest,
+        SinceQuery,
     },
     authentication::Authentication,
     authentication_error::AuthenticationError,
+    config::Config,
     credential_store::CredentialStore,
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
+    plugins::{PluginConfig, ProviderConfig},
     roles::Roles,
 };
 
-use core::{
-    error::Error,
-    net::{Ipv4Addr, SocketAddr},
-    pin::pin,
-    time::Duration,
-};
-use fleet_core::JsonObject;
-use fleet_wasm::{Wasm, WasmCapabilities, WasmCredentials, WasmMount, WasmRegistry};
+use core::{error::Error, net::SocketAddr, pin::pin, time::Duration};
 use futures_util::future;
-use std::{fs, io, path::Path, process::ExitCode};
+use std::{io, process::ExitCode};
 
 fn main() -> ExitCode {
     rustls::crypto::aws_lc_rs::default_provider()
@@ -53,113 +51,75 @@ fn main() -> ExitCode {
         .build()
         .expect("can build tokio runtime");
 
-    let idle_timeout = None;
-    let config_dir = match directories::create_config_dir() {
-        Ok(path) => path,
+    match tokio_runtime.block_on(start()) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Could not create config directory: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let roles = Roles;
-    let data_dir = match directories::create_data_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("Could not create data directory: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let database_path = data_dir.join("fleet.db");
-    let store = match fleet_store::Store::open(&database_path) {
-        Ok(store) => store,
-        Err(error) => {
-            eprintln!("Could not open {}: {error}", database_path.display());
-            return ExitCode::FAILURE;
-        }
-    };
-    let fleet = Fleet::new(store, idle_timeout);
-    let authentication = match tokio_runtime.block_on(Authentication::open(
-        &data_dir.join("authentication"),
-        fleet.idle_handler().clone(),
-    )) {
-        Ok(authentication) => authentication,
-        Err(error) => {
-            eprintln!("Could not open authentication: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let providers = match tokio_runtime.block_on(load_providers(&config_dir, &authentication)) {
-        Ok(providers) => providers,
-        Err(error) => {
-            eprintln!(
-                "Could not load providers from {}: {error}",
-                config_dir.display()
-            );
+            eprintln!("Fleet failed: {error}");
             let mut source = error.source();
             while let Some(error) = source {
                 eprintln!("  {error}");
                 source = error.source();
             }
-            return ExitCode::FAILURE;
-        }
-    };
-    let fleet = fleet.with_authentication(authentication);
-
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 1337));
-    let shutdown_timeout = Some(Duration::from_secs(10));
-
-    let agents = fleet.run(&roles, &providers, &providers);
-    match tokio_runtime.block_on(run(fleet.clone(), agents, address, shutdown_timeout)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("HTTP server failed: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-async fn load_providers(
-    config_dir: &Path,
-    authentication: &Authentication,
-) -> Result<WasmRegistry, Box<dyn Error>> {
-    let wasm = Wasm::new()?;
-    let mut providers = WasmRegistry::new();
-    let example_capabilities = WasmCapabilities {
-        filesystem: vec![WasmMount {
-            host_path: config_dir.into(),
-            guest_path: "/config".into(),
-            read_only: true,
-        }],
-        ..WasmCapabilities::default()
-    };
-    let openai_capabilities = WasmCapabilities {
-        http: true,
-        ..WasmCapabilities::default()
-    };
-    for (namespace, file, mut capabilities) in [
-        ("example", "providers", example_capabilities),
-        ("openai", "openai", openai_capabilities),
-    ] {
-        let bytes = match fs::read(config_dir.join(format!("{file}.wasm"))) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let lock = {
+        let mut arguments = std::env::args_os().skip(1);
+        let lock = match arguments.next() {
+            None => false,
+            Some(command) if command == "lock" => true,
+            _ => return Err("usage: fleet [lock]".into()),
         };
-        let config = match fs::read(config_dir.join(format!("{file}.json"))) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => JsonObject::new(),
-            Err(error) => return Err(error.into()),
-        };
-        let component = wasm.compile(&bytes)?;
-        capabilities.credentials = Some(WasmCredentials::new(authentication.scope(namespace)));
-        let provider = wasm.provider(&component, &config, capabilities)?;
-        authentication.register(
-            namespace,
-            provider.connections(authentication.host_id()).await?,
-        )?;
-        providers.insert(namespace, provider)?;
+        if arguments.next().is_some() {
+            return Err("usage: fleet [lock]".into());
+        }
+        lock
+    };
+
+    let config_dir = directories::create_config_dir()?;
+    let config = Config::load(&config_dir).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "could not load {}: {error}",
+                config_dir.join("config.json").display(),
+            ),
+        )
+    })?;
+    let cache_dir = directories::create_cache_dir()?;
+    if lock {
+        crate::plugins::lock(&config, &config_dir, &cache_dir).await?;
+        eprintln!("Updated {}", config_dir.join("plugins.lock").display());
+        return Ok(());
     }
-    Ok(providers)
+
+    let data_dir = directories::create_data_dir()?;
+    let store = fleet_store::Store::open(data_dir.join("fleet.db"))?;
+    let fleet = Fleet::new(store, None);
+    let authentication = Authentication::open(
+        &data_dir.join("authentication"),
+        fleet.idle_handler().clone(),
+    )
+    .await?;
+    let providers = crate::plugins::load(&config, &config_dir, &cache_dir, &authentication).await?;
+    let roles = Roles::new(config_dir.join("roles"));
+    let address = config.listen;
+    let fleet = fleet
+        .with_authentication(authentication)
+        .with_configuration(config, roles.clone());
+    let agents = fleet.run(&roles, &providers, &providers);
+
+    run(
+        fleet.clone(),
+        agents,
+        address,
+        Some(Duration::from_secs(10)),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn run(

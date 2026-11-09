@@ -31,6 +31,7 @@ struct State {
 }
 
 struct ConnectionState {
+    provider: String,
     definition: Connection,
     session: Mutex<Session>,
 }
@@ -83,6 +84,7 @@ pub enum AuthorizationStatus {
 #[derive(Serialize)]
 pub struct ConnectionInfo {
     pub id: String,
+    pub provider: String,
     pub title: String,
     pub description: Option<String>,
     pub manage_url: Option<String>,
@@ -183,6 +185,7 @@ impl Authentication {
             connections.insert(
                 id,
                 Arc::new(ConnectionState {
+                    provider: namespace.into(),
                     definition,
                     session: Mutex::new(Session {
                         record,
@@ -219,6 +222,7 @@ impl Authentication {
             drop(session);
             result.push(ConnectionInfo {
                 id,
+                provider: connection.provider.clone(),
                 title: connection.definition.title.clone(),
                 description: connection.definition.description.clone(),
                 manage_url: connection.definition.manage_url.clone(),

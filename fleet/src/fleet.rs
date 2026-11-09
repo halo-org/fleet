@@ -1,4 +1,4 @@
-use crate::{Authentication, ErrorHandler, IdleHandler};
+use crate::{Authentication, Config, ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId, Models, Roles, Tools};
 use fleet_kit::{
@@ -18,6 +18,7 @@ use std::{
 pub struct Fleet {
     state: Arc<State>,
     authentication: Option<Authentication>,
+    configuration: Option<Arc<Configuration>>,
 }
 
 /// An error returned by [`Fleet`].
@@ -29,11 +30,18 @@ pub enum FleetError {
     Store(StoreError),
     /// A query failed.
     Query(StoreError),
+    /// A role could not be read.
+    Role(std::io::Error),
 }
 
 struct State {
     idle_handler: IdleHandler,
     store: Store,
+}
+
+struct Configuration {
+    config: Config,
+    roles: crate::Roles,
 }
 
 impl Fleet {
@@ -42,6 +50,7 @@ impl Fleet {
     pub fn new(store: Store, idle_timeout: Option<Duration>) -> Self {
         Self {
             authentication: None,
+            configuration: None,
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
                 store,
@@ -58,6 +67,34 @@ impl Fleet {
     /// Returns provider authentication when configured.
     pub const fn authentication(&self) -> Option<&Authentication> {
         self.authentication.as_ref()
+    }
+
+    /// Sets the server configuration and role loader.
+    pub fn with_configuration(mut self, config: Config, roles: crate::Roles) -> Self {
+        self.configuration = Some(Arc::new(Configuration { config, roles }));
+        self
+    }
+
+    /// Returns the configured providers.
+    pub fn providers(&self) -> Vec<(&str, &str)> {
+        self.configuration
+            .as_ref()
+            .map_or_else(Vec::new, |configuration| {
+                configuration
+                    .config
+                    .providers
+                    .iter()
+                    .map(|(name, provider)| (name.as_str(), provider.plugin.as_str()))
+                    .collect()
+            })
+    }
+
+    /// Lists the available roles.
+    pub async fn roles(&self) -> Result<Vec<String>, FleetError> {
+        match &self.configuration {
+            Some(configuration) => configuration.roles.list().await.map_err(FleetError::Role),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Returns the shared idle handler.
@@ -457,6 +494,7 @@ impl fmt::Display for FleetError {
             Self::ShuttingDown => f.write_str("shutting down"),
             Self::Store(_) => f.write_str("store operation failed"),
             Self::Query(_) => f.write_str("query failed"),
+            Self::Role(_) => f.write_str("could not read roles"),
         }
     }
 }
@@ -466,6 +504,7 @@ impl core::error::Error for FleetError {
         match self {
             Self::ShuttingDown => None,
             Self::Store(source) | Self::Query(source) => Some(source),
+            Self::Role(source) => Some(source),
         }
     }
 }

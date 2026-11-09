@@ -1,8 +1,8 @@
 use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest};
 use crate::{
-    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiToolCallRecord,
-    CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet, FleetError,
-    InterruptAgentRequest, SinceQuery,
+    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
+    ApiToolCallRecord, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet,
+    FleetError, InterruptAgentRequest, SinceQuery,
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
@@ -54,6 +54,8 @@ where
     }
 
     match (&parts.method, segments.as_slice()) {
+        (&Method::GET, ["", "providers"]) => Ok(providers(fleet)),
+        (&Method::GET, ["", "roles"]) => roles(fleet).await,
         (&Method::POST, ["", "agents"]) => create_agent(fleet, &parts.headers, body).await,
         (&Method::GET, ["", "agents"]) => {
             let query: AgentsReadQuery = parse_query(parts.uri.query())?;
@@ -120,6 +122,7 @@ where
         (
             _,
             ["", "agents", _]
+            | ["", "providers" | "roles"]
             | [
                 "",
                 "agents",
@@ -133,6 +136,34 @@ where
 }
 
 // === Handlers ===
+
+fn providers(fleet: &Fleet) -> Response<ResponseBody> {
+    let providers: Vec<_> = fleet
+        .providers()
+        .into_iter()
+        .map(|(name, plugin)| ApiProvider { name, plugin })
+        .collect();
+    let mut response = json_response(StatusCode::OK, &providers);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn roles(fleet: &Fleet) -> Result<Response<ResponseBody>, ApiError> {
+    let roles: Vec<_> = fleet
+        .roles()
+        .await
+        .map_err(ApiError::Fleet)?
+        .into_iter()
+        .map(|name| ApiRole { name })
+        .collect();
+    let mut response = json_response(StatusCode::OK, &roles);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
 
 async fn agents_subscription(
     fleet: &Fleet,
@@ -618,18 +649,15 @@ impl ApiError {
                     "Internal server error",
                 ),
             },
+            Self::Fleet(FleetError::Role(_)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Could not read roles",
+            ),
         };
 
-        if status == StatusCode::INTERNAL_SERVER_ERROR
-            && let Self::Fleet(error) = &self
-        {
-            eprintln!("HTTP request failed: {error}");
-            let mut source = error.source();
-
-            while let Some(error) = source {
-                eprintln!("Caused by: {error}");
-                source = error.source();
-            }
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            self.log();
         }
 
         let mut response = json_response(
@@ -646,5 +674,17 @@ impl ApiError {
         }
 
         response
+    }
+
+    fn log(&self) {
+        if let Self::Fleet(error) = self {
+            eprintln!("HTTP request failed: {error}");
+            let mut source = error.source();
+
+            while let Some(error) = source {
+                eprintln!("Caused by: {error}");
+                source = error.source();
+            }
+        }
     }
 }
