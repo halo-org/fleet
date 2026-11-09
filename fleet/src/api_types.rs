@@ -2,13 +2,15 @@ use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
     MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
-    ModelResponse, ModelUsage, ToolCall, ToolOutput, ToolResult, TurnEnd,
+    ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput, ToolResult,
+    TurnEnd,
 };
 use fleet_kit::{
     AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord, Preview,
     PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
+use std::collections::BTreeMap;
 
 // === Configuration ===
 
@@ -26,6 +28,49 @@ pub struct ApiProvider<'a> {
 pub struct ApiRole {
     /// The role name.
     pub name: String,
+    /// The display title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A description of the role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether to hide the role from selection.
+    pub hidden: bool,
+    /// The available parameters.
+    pub parameters: BTreeMap<String, ApiRoleParameter>,
+}
+
+/// A role parameter.
+#[derive(Serialize)]
+pub struct ApiRoleParameter {
+    /// The display title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A description of the parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The JSON Schema for supplied values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// The value configured by the role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RoleMetadata {
+    title: Option<String>,
+    description: Option<String>,
+    hidden: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ParameterMetadata {
+    title: Option<String>,
+    description: Option<String>,
+    schema: Option<serde_json::Value>,
 }
 
 // === Requests ===
@@ -752,6 +797,71 @@ pub struct ErrorDetails<'a> {
 }
 
 // === Impls ===
+
+impl TryFrom<Role> for ApiRole {
+    type Error = serde_json::Error;
+
+    fn try_from(role: Role) -> Result<Self, Self::Error> {
+        let metadata = role
+            .extensions
+            .get("fleet")
+            .map(RoleMetadata::deserialize)
+            .transpose()?
+            .unwrap_or_default();
+        let parameters = role
+            .parameters
+            .iter()
+            .map(|(name, parameter)| {
+                let metadata = parameter
+                    .extensions
+                    .get("fleet")
+                    .map(ParameterMetadata::deserialize)
+                    .transpose()?
+                    .unwrap_or_default();
+                let default = if metadata
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.get("writeOnly") == Some(&true.into()))
+                {
+                    None
+                } else {
+                    parameter_default(&role, &parameter.target)
+                };
+                Ok((
+                    name.to_string(),
+                    ApiRoleParameter {
+                        title: metadata.title,
+                        description: metadata.description,
+                        schema: metadata.schema,
+                        default,
+                    },
+                ))
+            })
+            .collect::<Result<_, Self::Error>>()?;
+
+        Ok(Self {
+            name: role.name.to_string(),
+            title: metadata.title,
+            description: metadata.description,
+            hidden: metadata.hidden,
+            parameters,
+        })
+    }
+}
+
+fn parameter_default(role: &Role, target: &RoleParameterTarget) -> Option<serde_json::Value> {
+    let (config, path) = match target {
+        RoleParameterTarget::Model(path) => (&role.model.config, path),
+        RoleParameterTarget::Tool(alias, path) => (&role.tools.get(alias)?.config, path),
+        RoleParameterTarget::Extensions(path) => (&role.extensions, path),
+    };
+    let Some((first, rest)) = path.split_first() else {
+        return Some(config.clone().into());
+    };
+    rest.iter()
+        .try_fold(config.get(first)?, |value, key| value.get(key))
+        .cloned()
+}
 
 impl CreateAgentRequest {
     /// Converts the request to an agent and initial message.

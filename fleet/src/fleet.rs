@@ -1,6 +1,8 @@
 use crate::{Authentication, Config, ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
-use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId, Models, Roles, Tools};
+use fleet_core::{
+    Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, Roles, Tools,
+};
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentUpdates, AgentsPage, AgentsQuery, AgentsUpdates,
     CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord, Preview, Queries as _,
@@ -90,7 +92,7 @@ impl Fleet {
     }
 
     /// Lists the available roles.
-    pub async fn roles(&self) -> Result<Vec<String>, FleetError> {
+    pub async fn roles(&self) -> Result<Vec<Role>, FleetError> {
         match &self.configuration {
             Some(configuration) => configuration.roles.list().await.map_err(FleetError::Role),
             None => Ok(Vec::new()),

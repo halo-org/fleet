@@ -94,5 +94,55 @@ Role names follow the same naming rules as providers. Role files are read on eac
 lookup, so edits apply without restarting Fleet.
 
 `GET /providers` lists provider names and their plugin names. `GET /roles` lists
-role names. `GET /connections` includes each connection's owning provider.
+roles with their display metadata and parameters. `GET /connections` includes
+each connection's owning provider.
 These endpoints do not expose plugin configuration or credentials.
+
+### Role selection
+
+Role titles, descriptions and visibility are defined in `extensions.fleet`.
+Hidden roles remain usable by name but do not appear in the role picker.
+Parameters use the same namespace for titles, descriptions and JSON Schemas:
+
+```yaml
+model:
+  name: work:example
+  config:
+    effort: high
+extensions:
+  fleet:
+    title: Reviewer
+    description: Review code changes.
+    hidden: false
+parameters:
+  effort:
+    target:
+      type: model
+      path: [effort]
+    extensions:
+      fleet:
+        title: Reasoning effort
+        schema:
+          type: string
+          oneOf:
+            - const: low
+              title: Low
+            - const: high
+              title: High
+```
+
+The API exposes `title`, `description`, `hidden` and `parameters` as ordinary
+fields. Each parameter exposes its title, description, schema and configured
+default, when present. Other extensions, parameter targets and system prompts
+are not included. Parameters marked `writeOnly` do not expose their defaults.
+
+The UI uses choices for `enum` or `oneOf` with `const`, toggles for booleans,
+numeric fields for numbers, and checkboxes for unique arrays of choices. String
+formats `date`, `time`, `email` and `uri` use native controls. A string with a
+`text/*` content media type uses a multiline field. Other shapes use JSON input.
+Schema titles and descriptions also work as field labels and help text.
+
+Untouched parameters are omitted from requests, preserving the role's config.
+Reset removes an override. A supplied `null` is an explicit value, and a schema's
+`default` annotation does not change the role's config. Schemas guide the form.
+They do not add validation to core.

@@ -60,8 +60,8 @@ impl Roles {
         Self { directory }
     }
 
-    /// Lists the available role names.
-    pub async fn list(&self) -> io::Result<Vec<String>> {
+    /// Lists the available roles.
+    pub async fn list(&self) -> io::Result<Vec<Role>> {
         let mut directory = match tokio::fs::read_dir(&self.directory).await {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -81,7 +81,13 @@ impl Roles {
         }
 
         names.sort_unstable();
-        Ok(names)
+        let mut roles = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(role) = fleet_core::Roles::get(self, &name.into()).await? {
+                roles.push(role);
+            }
+        }
+        Ok(roles)
     }
 }
 
@@ -186,6 +192,83 @@ fn parse(name: RoleName, source: &str) -> io::Result<Role> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ApiRole;
+    use serde_json::json;
+
+    #[test]
+    fn role_metadata_exposes_parameters_and_configured_defaults() {
+        let source = "\
+---
+model:
+  name: provider:model
+  config:
+    effort: high
+    token: private
+tools:
+  search:
+    name: provider:search
+    config:
+      enabled: false
+extensions:
+  workspace: null
+  fleet:
+    title: Reviewer
+    description: Review changes.
+    hidden: true
+parameters:
+  effort:
+    target: {type: model, path: [effort]}
+    extensions:
+      fleet:
+        title: Reasoning
+        schema:
+          type: string
+          enum: [low, high]
+  search:
+    target: {type: tool, tool: search, path: [enabled]}
+  workspace:
+    target: {type: extensions, path: [workspace]}
+  missing:
+    target: {type: model, path: [missing]}
+  token:
+    target: {type: model, path: [token]}
+    extensions:
+      fleet:
+        schema:
+          type: string
+          writeOnly: true
+---
+Private instructions.
+";
+
+        let role = parse("reviewer".into(), source).unwrap();
+        let role = ApiRole::try_from(role).unwrap();
+        let value = serde_json::to_value(role).unwrap();
+
+        assert_eq!(value["title"], "Reviewer");
+        assert_eq!(value["description"], "Review changes.");
+        assert_eq!(value["hidden"], true);
+        assert_eq!(
+            value["parameters"]["effort"],
+            json!({
+                "title": "Reasoning",
+                "schema": {
+                    "type": "string",
+                    "enum": ["low", "high"],
+                },
+                "default": "high",
+            }),
+        );
+        assert_eq!(value["parameters"]["search"]["default"], false);
+        assert_eq!(
+            value["parameters"]["workspace"].get("default"),
+            Some(&serde_json::Value::Null),
+        );
+        assert!(value["parameters"]["missing"].get("default").is_none());
+        assert!(value["parameters"]["token"].get("default").is_none());
+        assert!(value.get("system_prompt").is_none());
+        assert!(value.get("model").is_none());
+    }
 
     #[test]
     fn parse_preserves_prompt_and_configuration() {

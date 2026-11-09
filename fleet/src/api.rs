@@ -156,8 +156,14 @@ async fn roles(fleet: &Fleet) -> Result<Response<ResponseBody>, ApiError> {
         .await
         .map_err(ApiError::Fleet)?
         .into_iter()
-        .map(|name| ApiRole { name })
-        .collect();
+        .map(ApiRole::try_from)
+        .collect::<Result<_, _>>()
+        .map_err(|error| {
+            ApiError::Fleet(FleetError::Role(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
     let mut response = json_response(StatusCode::OK, &roles);
     response
         .headers_mut()
