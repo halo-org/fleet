@@ -492,22 +492,33 @@ impl RuntimeStore for Store {
                     let ids = records
                         .prefix::<u128>(&records::key(records::QUEUE, agent.agent.id, &[]))?
                         .collect::<Result<Vec<_>, _>>()?;
-                    let mut consumed = false;
-                    let mut queued = false;
+                    let mut messages = Vec::new();
+                    let mut queued = None;
                     for id in ids {
                         let message_key =
                             records::key(records::MESSAGE, agent.agent.id, &id.to_be_bytes());
-                        let mut record = records
+                        let record = records
                             .get::<MessageRecord>(&message_key)?
                             .expect("queued message exists");
-                        let message = record.message.take().expect("queued message is pending");
-                        if message.mode == data::MessageMode::Queue {
-                            if !allow_queued || queued {
-                                continue;
+                        let message = record.message.as_ref().expect("queued message is pending");
+
+                        match message.mode {
+                            data::MessageMode::Steer => messages.push(record),
+                            data::MessageMode::Queue if allow_queued && queued.is_none() => {
+                                queued = Some(record);
                             }
-                            queued = true;
+                            data::MessageMode::Queue => {}
                         }
-                        consumed = true;
+                    }
+                    if messages.is_empty() {
+                        messages.extend(queued);
+                    }
+                    let consumed = !messages.is_empty();
+                    for mut record in messages {
+                        let id = record.id;
+                        let message_key =
+                            records::key(records::MESSAGE, agent.agent.id, &id.to_be_bytes());
+                        let message = record.message.take().expect("queued message is pending");
                         let cursor = records
                             .append_event(agent, data::EventPayload::Input(id, message.content))?;
                         records.change(

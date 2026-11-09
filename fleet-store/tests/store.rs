@@ -134,12 +134,13 @@ fn open_preserves_records_and_idempotency() {
 }
 
 #[test]
-fn consume_messages_preserves_queue_order_and_conflicts() {
+fn consume_messages_prioritizes_steering_and_preserves_queue_order() {
     let store = Store::memory().unwrap();
     let agent = agent();
     let queued_a = message(1, MessageMode::Queue);
     let queued_b = message(2, MessageMode::Queue);
-    let steering = message(3, MessageMode::Steer);
+    let steering_a = message(3, MessageMode::Steer);
+    let steering_b = message(4, MessageMode::Steer);
 
     futures_executor::block_on(async {
         store
@@ -147,11 +148,15 @@ fn consume_messages_preserves_queue_order_and_conflicts() {
             .await
             .unwrap();
         store
+            .send_message("steer-a", agent.id, &steering_a)
+            .await
+            .unwrap();
+        store
             .send_message("queue", agent.id, &queued_b)
             .await
             .unwrap();
         store
-            .send_message("steer", agent.id, &steering)
+            .send_message("steer-b", agent.id, &steering_b)
             .await
             .unwrap();
         let error = store
@@ -160,13 +165,13 @@ fn consume_messages_preserves_queue_order_and_conflicts() {
             .unwrap_err();
         assert_matches!(error, StoreError::Conflict(_));
 
-        let consumed = store.consume_messages(agent.id, None, false).await.unwrap();
+        let consumed = store.consume_messages(agent.id, None, true).await.unwrap();
         assert!(consumed);
         let consumed = store
-            .consume_messages(agent.id, Some(0.into()), true)
+            .consume_messages(agent.id, Some(1.into()), false)
             .await
             .unwrap();
-        assert!(consumed);
+        assert!(!consumed);
         let consumed = store
             .consume_messages(agent.id, Some(1.into()), true)
             .await
@@ -176,9 +181,14 @@ fn consume_messages_preserves_queue_order_and_conflicts() {
             .consume_messages(agent.id, Some(2.into()), true)
             .await
             .unwrap();
+        assert!(consumed);
+        let consumed = store
+            .consume_messages(agent.id, Some(3.into()), true)
+            .await
+            .unwrap();
         assert!(!consumed);
         let events = store
-            .events(agent.id, 2.into(), None)
+            .events(agent.id, 3.into(), None)
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -191,7 +201,8 @@ fn consume_messages_preserves_queue_order_and_conflicts() {
             vec![
                 EventPayload::Input(queued_b.id, queued_b.content),
                 EventPayload::Input(queued_a.id, queued_a.content),
-                EventPayload::Input(steering.id, steering.content),
+                EventPayload::Input(steering_b.id, steering_b.content),
+                EventPayload::Input(steering_a.id, steering_a.content),
             ]
         );
     });

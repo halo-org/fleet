@@ -357,8 +357,9 @@ pub trait RuntimeStore {
 
     /// Moves pending messages into the agent's event log.
     ///
-    /// Consumes all pending steering messages and, if `allow_queued` is true, the oldest queued
-    /// message. Appending the messages and removing them from pending storage happen atomically.
+    /// Consumes all pending steering messages. If there are none and `allow_queued` is true,
+    /// consumes the oldest queued message. Appending the messages and removing them from pending
+    /// storage happen atomically.
     ///
     /// Returns whether any messages were consumed.
     ///

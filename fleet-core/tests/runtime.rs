@@ -19,10 +19,10 @@ fn agent(role: RoleName) -> Agent {
     }
 }
 
-fn message() -> Message {
+fn message(id: u128, mode: MessageMode) -> Message {
     Message {
-        id: 0.into(),
-        mode: MessageMode::Queue,
+        id: id.into(),
+        mode,
         content: vec![ContentBlock::Text("Hello".into())],
     }
 }
@@ -50,7 +50,7 @@ fn run_processes_a_message() {
         let simulator = Simulator::new(&scheduler, seed);
         let partition = simulator.store.add_partition();
         let agent = agent(simulator.roles.role_names()[0].clone());
-        let message = message();
+        let message = message(0, MessageMode::Queue);
 
         scheduler.run(async {
             while let Err(error) = simulator
@@ -107,5 +107,66 @@ fn run_processes_a_message() {
             snapshot.parked_at,
             snapshot.events.last().map(|event| event.cursor)
         );
+    }
+}
+
+#[test]
+fn run_finishes_steering_turn_before_queued_message() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let agent = agent(simulator.roles.role_names()[0].clone());
+        let steering_a = message(0, MessageMode::Steer);
+        let steering_b = message(1, MessageMode::Steer);
+        let queued = message(2, MessageMode::Queue);
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&steering_a))
+                .await
+                .unwrap();
+            simulator
+                .store
+                .send_message("steer", agent.id, &steering_b)
+                .await
+                .unwrap();
+            simulator
+                .store
+                .send_message("queue", agent.id, &queued)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        let mut first_turn_finished = false;
+        let inputs = snapshot
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                EventPayload::Input(id, _) => Some((*id, first_turn_finished)),
+                EventPayload::TurnEnd(_) => {
+                    first_turn_finished = true;
+                    None
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            inputs,
+            [
+                (steering_a.id, false),
+                (steering_b.id, false),
+                (queued.id, true)
+            ]
+        );
+        assert_eq!(snapshot.pending_messages, []);
     }
 }

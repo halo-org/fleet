@@ -471,8 +471,8 @@ pub enum MessageMode {
     /// The message should wait until the current turn finishes.
     ///
     /// This will cause the message to be added to the conversation after the current turn finishes.
-    /// Only one queued message will be added at a time. Others will wait for their turn.
-    /// Outstanding async tool calls do not delay the next turn.
+    /// Only one queued message will be added at a time. Others will wait for their turn. Pending
+    /// steering messages take priority. Outstanding async tool calls do not delay the next turn.
     Queue,
 }
 

@@ -852,6 +852,11 @@ impl State {
             return Err(RuntimeError::conflict("agent has an interrupt intent"));
         }
 
+        let allow_queued = allow_queued
+            && !agent
+                .pending_messages
+                .iter()
+                .any(|message| message.mode == MessageMode::Steer);
         let mut queued_consumed = false;
 
         let messages = agent
@@ -2158,7 +2163,7 @@ mod tests {
     }
 
     #[test]
-    fn message_consumption_preserves_content_and_queue_order() {
+    fn message_consumption_prioritizes_steering_and_preserves_queue_order() {
         let scheduler = Scheduler::new(0);
         let store = store(&scheduler);
 
@@ -2184,7 +2189,7 @@ mod tests {
         }
 
         for (cursor, allow_queued, expected_consumed, pending_ids) in [
-            (None, false, true, vec![0, 2]),
+            (None, true, true, vec![0, 2]),
             (Some(1), false, false, vec![0, 2]),
             (Some(1), true, true, vec![2]),
             (Some(2), true, true, vec![]),
