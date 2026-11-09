@@ -1,0 +1,14 @@
+[package]
+name = "fleet-models"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fleet-core.workspace = true
