@@ -32,6 +32,10 @@ impl WasmState {
             table: ResourceTable::new(),
         }
     }
+
+    pub const fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
 }
 
 impl configuration::Host for WasmState {

@@ -24,6 +24,17 @@ pub mod credential_host {
 
 pub use credential_host::fleet::providers::credentials;
 
+pub mod process_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "process-host",
+        imports: { default: store | trappable },
+        with: { "fleet:providers/process.child": crate::wasm_process::WasmProcess },
+    });
+}
+
+pub use process_host::fleet::providers::process;
+
 pub mod tools {
     wasmtime::component::bindgen!({
         path: "wit",

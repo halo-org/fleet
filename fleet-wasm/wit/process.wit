@@ -1,0 +1,69 @@
+/// Runs programs on the host.
+///
+/// Programs use host paths and permissions, independently of WASI filesystem mounts.
+interface process {
+    /// A program to run.
+    record command {
+        /// The executable name or host path.
+        program: string,
+        /// The arguments passed to the program.
+        args: list<string>,
+        /// The host working directory, or none to inherit it.
+        cwd: option<string>,
+        /// Whether to inherit the host environment.
+        inherit-env: bool,
+        /// Environment variables to set or remove after inheritance.
+        env: list<tuple<string, option<string>>>,
+    }
+
+    /// How a program ended.
+    variant exit-status {
+        /// The platform exit code.
+        code(s32),
+        /// The program ended without an exit code.
+        terminated,
+    }
+
+    /// Output bytes and the result of reading them.
+    record output {
+        /// Bytes read from the pipe.
+        data: stream<u8>,
+        /// Resolves after the stream closes, reporting any read error.
+        %result: future<result<_, string>>,
+    }
+
+    /// A child process owned by the guest.
+    ///
+    /// Dropping this resource requests termination of the child, not its descendants.
+    resource child {
+        /// Writes standard input and closes it when the stream ends.
+        ///
+        /// May be called once, before waiting. Await completion while reading output.
+        write-stdin: func(data: stream<u8>) -> result<future<result<_, string>>, string>;
+
+        /// Takes the standard output stream. May be called once.
+        stdout: func() -> result<output, string>;
+
+        /// Takes the standard error stream. May be called once.
+        stderr: func() -> result<output, string>;
+
+        /// Waits for the child to exit. Repeated calls return the same result.
+        ///
+        /// Closes standard input if write-stdin has not been called.
+        /// Read output concurrently to prevent full pipes from blocking the child.
+        wait: async func() -> result<exit-status, string>;
+
+        /// Requests forced termination of the child, not its descendants.
+        ///
+        /// Wait for completion separately. An already exited child is unchanged.
+        kill: func() -> result<_, string>;
+    }
+
+    /// Starts a program with piped standard input, output and error.
+    spawn: func(command: command) -> result<child, string>;
+}
+
+/// A host that runs programs.
+world process-host {
+    import process;
+}

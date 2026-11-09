@@ -5,13 +5,15 @@ use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
 
 /// Access granted to a WebAssembly provider.
 ///
-/// Defaults to no HTTP, filesystem or credential access.
+/// Defaults to no HTTP, filesystem, process or credential access.
 #[derive(Clone, Debug, Default)]
 pub struct WasmCapabilities {
     /// Whether outgoing HTTP requests are allowed.
     pub http: bool,
     /// Directories available to the provider.
     pub filesystem: Vec<WasmMount>,
+    /// Whether programs can run with host permissions outside the WASI sandbox.
+    pub process: bool,
     /// Credentials available to this provider.
     pub credentials: Option<WasmCredentials>,
 }

@@ -11,11 +11,16 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 fleet-core.workspace = true
 fleet-kit.workspace = true
 futures-channel = { workspace = true, features = ["std", "sink"] }
 futures-util = { workspace = true, features = ["std", "sink"] }
 serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["io-util", "process"] }
 wasmtime = { workspace = true, features = ["component-model", "component-model-async", "cranelift", "pooling-allocator", "runtime", "std"] }
 wasmtime-wasi = { workspace = true, features = ["p3"] }
 wasmtime-wasi-http = { workspace = true, features = ["default-send-request", "p3"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "time"] }

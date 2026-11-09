@@ -5,9 +5,10 @@
 //! Registries route `namespace:item` names to configured providers. Provider config
 //! is available through the `configuration` import and is separate from call config.
 //! WASI 0.3 capabilities are configured per provider. WASI operations require
-//! a Tokio runtime with I/O and time enabled.
-//! Clocks and randomness are available. Environment variables and standard
-//! streams are not inherited, and raw sockets are unavailable.
+//! a Tokio runtime with I/O and time enabled, as do host processes.
+//! Clocks and randomness are available. The guest does not inherit environment
+//! variables or standard streams, and raw sockets are unavailable.
+//! The process capability runs host programs outside the WASI sandbox.
 //!
 //! ```no_run
 //! use fleet_core::JsonObject;
@@ -41,6 +42,7 @@ mod wasm_capabilities;
 mod wasm_credentials;
 mod wasm_error;
 mod wasm_models;
+mod wasm_process;
 mod wasm_prompts;
 mod wasm_registry;
 mod wasm_state;

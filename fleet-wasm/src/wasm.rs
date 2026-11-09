@@ -1,6 +1,6 @@
 use crate::{
     WasmCapabilities, WasmError, WasmProvider, WasmState,
-    bindings::{configuration, credentials},
+    bindings::{configuration, credentials, process},
 };
 use fleet_core::JsonObject;
 use wasmtime::{
@@ -75,6 +75,10 @@ impl Wasm {
         }
         if capabilities.http {
             wasmtime_wasi_http::p3::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
+        }
+        if capabilities.process {
+            process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+                .map_err(WasmError::runtime)?;
         }
         if capabilities.credentials.is_some() {
             credentials::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)

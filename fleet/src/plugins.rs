@@ -55,6 +55,8 @@ pub struct PluginCapabilities {
     #[serde(default)]
     filesystem: Vec<PluginMount>,
     #[serde(default)]
+    process: bool,
+    #[serde(default)]
     credentials: bool,
 }
 
@@ -149,6 +151,7 @@ pub async fn load(
                     read_only: mount.read_only,
                 })
                 .collect(),
+            process: capabilities.process,
             credentials: capabilities
                 .credentials
                 .then(|| WasmCredentials::new(authentication.scope(name))),

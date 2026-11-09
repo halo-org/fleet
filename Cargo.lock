@@ -567,11 +567,13 @@ dependencies = [
 name = "fleet-wasm"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "fleet-core",
  "fleet-kit",
  "futures-channel",
  "futures-util",
  "serde_json",
+ "tokio",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
