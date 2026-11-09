@@ -2,12 +2,16 @@ use crate::{ErrorHandler, IdleHandler};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{Agent, AgentId, ClientStore as _, Message, MessageId, Models, Roles, Tools};
 use fleet_kit::{
-    AgentActivity, AgentUpdates, EventQuery, EventRecord, MessageRecord, Preview, Queries as _,
+    AgentActivity, AgentCollection as _, AgentUpdates, AgentsPage, AgentsQuery, AgentsUpdates,
+    CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord, Preview, Queries as _,
     QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// An AI agent harness.
 #[derive(Clone)]
@@ -76,7 +80,117 @@ impl Fleet {
             state.idle_handler.wait_for_mutations().await;
         };
 
-        future::select(pin!(shutdown), pin!(agents)).await;
+        let work = future::join(self.run_snoozes(), agents);
+        future::select(pin!(shutdown), pin!(work)).await;
+    }
+
+    async fn run_snoozes(&self) {
+        loop {
+            let changed = self.state.store.snooze_changed();
+            // Keep a pending deadline alive through idle shutdown, and protect the
+            // initial deadline read from racing the runtime's idle decision.
+            let Some(guard) = self.state.idle_handler.track_mutation() else {
+                return;
+            };
+            let deadline = match self.state.store.next_snooze().await {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    eprintln!("Could not read snooze deadlines: {error}");
+                    drop(guard);
+                    future::select(
+                        pin!(self.wait_for_shutdown()),
+                        pin!(tokio::time::sleep(Duration::from_secs(1))),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            if deadline.is_some_and(|deadline| deadline <= now) {
+                if let Err(error) = self.state.store.expire_snoozes(now).await {
+                    eprintln!("Could not expire snoozes: {error}");
+                    future::select(
+                        pin!(self.wait_for_shutdown()),
+                        pin!(tokio::time::sleep(Duration::from_secs(1))),
+                    )
+                    .await;
+                }
+                continue;
+            }
+            let guard = deadline.map(|_| guard);
+            let wait = async {
+                match deadline {
+                    Some(deadline) => {
+                        // Recheck wall time periodically in case the system clock moves.
+                        let delay = Duration::from_millis(deadline.saturating_sub(now))
+                            .min(Duration::from_secs(60));
+                        future::select(pin!(changed), pin!(tokio::time::sleep(delay))).await;
+                    }
+                    None => changed.await,
+                }
+            };
+            let stopped = matches!(
+                future::select(pin!(self.wait_for_shutdown()), pin!(wait)).await,
+                future::Either::Left(_)
+            );
+            drop(guard);
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    /// Reads one collection page at a consistent collection revision.
+    pub async fn agents(&self, query: AgentsQuery) -> Result<AgentsPage, FleetError> {
+        self.state
+            .store
+            .agents(query)
+            .await
+            .map_err(FleetError::Query)
+    }
+
+    /// Reads the collection revision without scanning rows.
+    pub async fn collection_revision(&self) -> Result<CollectionRevision, FleetError> {
+        self.state
+            .store
+            .collection_revision()
+            .await
+            .map_err(FleetError::Query)
+    }
+
+    /// Waits for one complete group of changed agent summaries.
+    pub async fn agents_updates(
+        &self,
+        after: CollectionRevision,
+    ) -> Result<AgentsUpdates, FleetError> {
+        self.state
+            .store
+            .agents_updates(after)
+            .await
+            .map_err(FleetError::Query)
+    }
+
+    /// Applies a version-checked, idempotent inbox action.
+    pub async fn set_inbox(
+        &self,
+        key: String,
+        agent: AgentId,
+        expected: CollectionRevision,
+        action: InboxAction,
+    ) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| {
+            fleet
+                .state
+                .store
+                .set_inbox(&key, agent, expected, action)
+                .await
+        })
+        .await
     }
 
     /// Begins shutdown.
@@ -375,11 +489,275 @@ mod tests {
         fleet
     }
 
+    async fn idle_fleet() -> Fleet {
+        let fleet = fleet().await;
+        let store = &fleet.state.store;
+        store.consume_messages(1.into(), None, true).await.unwrap();
+        store
+            .append_model_response(1.into(), 0.into(), true, &model_response("Done"))
+            .await
+            .unwrap();
+        fleet
+    }
+
     fn request(path: &str) -> Request<Full<Bytes>> {
         Request::builder()
             .uri(path)
             .body(Full::new(Bytes::new()))
             .unwrap()
+    }
+
+    #[test]
+    fn collection_http_scans_mutations_and_resumes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = idle_fleet().await;
+            let read =
+                crate::api::handle(fleet.clone(), request("/agents?inbox=unsettled&limit=1"))
+                    .await
+                    .unwrap();
+            assert_eq!(read.status(), StatusCode::OK);
+            let revision = read.headers()["read-revision"].to_str().unwrap().to_owned();
+            let page: Value =
+                serde_json::from_slice(&read.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(page["agents"][0]["inbox"], "pending");
+            assert_eq!(page["agents"][0]["version"], revision);
+            assert!(page["next"].is_null());
+
+            let mut subscribe = request("/agents/subscription");
+            subscribe
+                .headers_mut()
+                .insert("last-event-id", revision.parse().unwrap());
+            let stream = crate::api::handle(fleet.clone(), subscribe).await.unwrap();
+            assert_eq!(stream.status(), StatusCode::OK);
+            let mut stream = stream.into_body();
+            let settle = |key: &str| {
+                Request::builder()
+                    .method("PUT")
+                    .uri("/agents/1/inbox")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", key)
+                    .header("if-match", format!("\"{revision}\""))
+                    .body(Full::new(Bytes::from_static(br#"{"state":"settled"}"#)))
+                    .unwrap()
+            };
+            assert_eq!(
+                crate::api::handle(fleet.clone(), settle("settle"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+            let frame = next_frame(&mut stream).await;
+            assert!(frame.contains("\"inbox\":\"settled\""));
+            assert!(!frame.contains("messages"));
+            assert_eq!(
+                crate::api::handle(fleet.clone(), settle("settle"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+            assert_eq!(
+                crate::api::handle(fleet.clone(), settle("stale"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::PRECONDITION_FAILED
+            );
+
+            let read = crate::api::handle(
+                fleet.clone(),
+                request("/agents?inbox=settled&direction=backward&limit=1"),
+            )
+            .await
+            .unwrap();
+            let settled_revision = read.headers()["read-revision"].to_str().unwrap().to_owned();
+            let page: Value =
+                serde_json::from_slice(&read.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let position = page["agents"][0]["position"].as_str().unwrap();
+            let last = crate::api::handle(
+                fleet.clone(),
+                request(&format!(
+                    "/agents?inbox=settled&direction=backward&from={position}"
+                )),
+            )
+            .await
+            .unwrap();
+            assert_eq!(last.status(), StatusCode::OK);
+            assert_eq!(last.headers()["read-revision"], settled_revision);
+            let last: Value =
+                serde_json::from_slice(&last.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(last["agents"], json!([]));
+
+            fleet
+                .send_message(
+                    "send".into(),
+                    1.into(),
+                    Message {
+                        id: 3.into(),
+                        mode: MessageMode::Steer,
+                        content: vec![ContentBlock::Text("Continue".into())],
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(next_frame(&mut stream).await.contains("\"inbox\":\"busy\""));
+        });
+    }
+
+    #[test]
+    fn snooze_worker_wakes_without_clients_and_stops_on_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = idle_fleet().await;
+            let worker_fleet = fleet.clone();
+            let worker = tokio::spawn(async move { worker_fleet.run_snoozes().await });
+            let now: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .try_into()
+                .unwrap();
+            let version = fleet.collection_revision().await.unwrap();
+            fleet
+                .set_inbox(
+                    "later".into(),
+                    1.into(),
+                    version,
+                    InboxAction::Snooze(now + 60_000),
+                )
+                .await
+                .unwrap();
+            let version = fleet.collection_revision().await.unwrap();
+            let deadline = now + 100;
+            fleet
+                .set_inbox(
+                    "earlier".into(),
+                    1.into(),
+                    version,
+                    InboxAction::Snooze(deadline),
+                )
+                .await
+                .unwrap();
+            // No collection subscribers are connected while the timer runs.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let changed = fleet.state.store.snooze_changed();
+                    if fleet.state.store.next_snooze().await.unwrap().is_none() {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .unwrap();
+            let page = fleet.agents(AgentsQuery::default()).await.unwrap();
+            assert_eq!(page.agents[0].inbox, fleet_kit::InboxState::Pending);
+            assert_eq!(page.agents[0].since, deadline);
+            // Shutdown must also interrupt a wait on a future deadline.
+            fleet
+                .set_inbox(
+                    "later-again".into(),
+                    1.into(),
+                    page.agents[0].version,
+                    InboxAction::Snooze(now + 60_000),
+                )
+                .await
+                .unwrap();
+            fleet.shutdown();
+            tokio::time::timeout(Duration::from_secs(1), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            fleet.state.idle_handler.wait_for_mutations().await;
+        });
+    }
+
+    #[test]
+    fn collection_rejects_ambiguous_resume_and_invalid_scans() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = fleet().await;
+            for path in [
+                "/agents?inbox=unknown",
+                "/agents?limit=0",
+                "/agents?inbox=settled&inbox=pending",
+                "/agents?from=bad",
+                "/agents?from=busy:1:2:3",
+                "/agents?since=999",
+                "/agents/subscription",
+            ] {
+                assert_eq!(
+                    crate::api::handle(fleet.clone(), request(path))
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::BAD_REQUEST,
+                    "{path}"
+                );
+            }
+            for (path, cursor) in [
+                ("/agents/subscription?inbox=settled", "1"),
+                ("/agents/subscription", "999"),
+                ("/agents/subscription", "bad"),
+            ] {
+                let mut req = request(path);
+                req.headers_mut()
+                    .insert("last-event-id", cursor.parse().unwrap());
+                assert_eq!(
+                    crate::api::handle(fleet.clone(), req)
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            let mut req = request("/agents/subscription");
+            req.headers_mut()
+                .append("last-event-id", "1".parse().unwrap());
+            req.headers_mut()
+                .append("last-event-id", "1".parse().unwrap());
+            assert_eq!(
+                crate::api::handle(fleet.clone(), req)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+            for body in [
+                br#"{"state":"busy"}"#.as_slice(),
+                br#"{"state":"settled","until":1}"#.as_slice(),
+            ] {
+                let req = Request::builder()
+                    .method("PUT")
+                    .uri("/agents/1/inbox")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "invalid")
+                    .header("if-match", "\"1\"")
+                    .body(Full::new(Bytes::copy_from_slice(body)))
+                    .unwrap();
+                assert_eq!(
+                    crate::api::handle(fleet.clone(), req)
+                        .await
+                        .unwrap()
+                        .status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+        });
     }
 
     fn model_response(text: &str) -> ModelResponse {

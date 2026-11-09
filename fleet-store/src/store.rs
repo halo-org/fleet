@@ -57,10 +57,11 @@ impl Store {
         {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             match records.get::<u32>(&[])? {
-                Some(1) => {}
-                None => records.put(&[], &1_u32)?,
+                Some(2) => {}
+                None => records.put(&[], &2_u32)?,
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
+            crate::agents::expire(&mut records, crate::agents::now_millis())?;
         }
         transaction.commit()?;
         let notifications = Notifications::default();
@@ -79,12 +80,16 @@ impl Store {
         &self.notifications
     }
 
-    async fn request(&self, idempotency_key: String, request: Request) -> Result<(), StoreError> {
+    pub(crate) async fn request(
+        &self,
+        idempotency_key: String,
+        request: Request,
+    ) -> Result<(), StoreError> {
         self.worker()
             .call(move |worker| {
                 let transaction = worker.database.begin_write()?;
                 let request_key = records::key(records::REQUEST, 0, idempotency_key.as_bytes());
-                let (agent_id, interrupt, wake) = {
+                let (agent_id, interrupt, wake, summary_changed) = {
                     let mut records = Records(transaction.open_table(records::RECORDS)?);
                     if let Some(previous) = records.get::<Request>(&request_key)? {
                         return if previous == request {
@@ -93,66 +98,45 @@ impl Store {
                             Err(StoreError::IdempotencyConflict)
                         };
                     }
-                    let (mut agent, message, interrupt, create) = match &request {
-                        Request::CreateAgent(agent, message) => {
-                            if records
-                                .get::<AgentRecord>(&records::key(records::AGENT, agent.id, &[]))?
-                                .is_some()
-                            {
-                                return Err(StoreError::Conflict("agent already exists"));
-                            }
-                            let agent = AgentRecord {
-                                agent: agent.clone(),
-                                latest_event: None,
-                                parked_at: None,
-                                interrupt_intent: false,
-                                revision: 1,
-                                activity_revision: 1,
-                                turn_active: false,
-                                next_position: 0,
-                                pending_messages: 0,
-                                pending_tool_calls: 0,
-                                synchronous_tool_calls: 0,
-                            };
-                            (agent, message.as_ref(), false, true)
-                        }
-                        Request::SendMessage(id, message) => {
-                            (records.agent(*id)?, Some(message), false, false)
-                        }
-                        Request::InterruptAgent(id, message) => {
-                            (records.agent(*id)?, message.as_ref(), true, false)
-                        }
-                    };
-                    let id = agent.agent.id;
-                    if !create {
-                        agent.revision = agent
-                            .revision
-                            .checked_add(1)
-                            .expect("revisions do not overflow");
-                    }
-                    if create {
-                        records.change(id, records::AGENT, &[], None, agent.revision)?;
-                        records.change(id, records::ACTIVITY, &[], None, agent.revision)?;
-                    }
-                    if let Some(message) = message {
-                        records.push_message(&mut agent, message)?;
-                    }
-                    if interrupt && !agent.interrupt_intent {
-                        agent.interrupt_intent = true;
-                        records.change(
-                            id,
-                            records::ACTIVITY,
-                            &[],
-                            Some(agent.activity_revision),
-                            agent.revision,
+                    if let Request::SetInbox {
+                        id,
+                        expected,
+                        inbox,
+                        until,
+                    } = &request
+                    {
+                        let changed = crate::agents::set_inbox(
+                            &mut records,
+                            *id,
+                            *expected,
+                            *inbox,
+                            *until,
+                            crate::agents::now_millis(),
                         )?;
-                        agent.activity_revision = agent.revision;
+                        records.put(&request_key, &request)?;
+                        drop(records);
+                        transaction.commit()?;
+                        if changed {
+                            worker.notifications.notify(Topic::Agents);
+                            worker.notifications.notify(Topic::Snoozes);
+                        }
+                        return Ok(());
                     }
-                    records.save_agent(&agent)?;
+                    let (agent, wake) = apply_agent_request(&mut records, &request)?;
+                    let id = agent.agent.id;
+                    let summary_changed = crate::agents::sync_agent(
+                        &mut records,
+                        &agent,
+                        crate::agents::now_millis(),
+                    )?;
                     records.put(&request_key, &request)?;
-                    (id, agent.interrupt_intent, interrupt || message.is_some())
+                    (id, agent.interrupt_intent, wake, summary_changed)
                 };
                 transaction.commit()?;
+                if summary_changed {
+                    worker.notifications.notify(Topic::Agents);
+                    worker.notifications.notify(Topic::Snoozes);
+                }
                 worker.notifications.notify(Topic::Agent(agent_id));
                 if interrupt {
                     if let Some(preview) = worker.previews.get_mut(&agent_id) {
@@ -167,6 +151,68 @@ impl Store {
             })
             .await
     }
+}
+
+fn apply_agent_request(
+    records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
+    request: &Request,
+) -> Result<(AgentRecord, bool), StoreError> {
+    let (mut agent, message, interrupt, create) = match request {
+        Request::CreateAgent(agent, message) => {
+            if records
+                .get::<AgentRecord>(&records::key(records::AGENT, agent.id, &[]))?
+                .is_some()
+            {
+                return Err(StoreError::Conflict("agent already exists"));
+            }
+            let agent = AgentRecord {
+                agent: agent.clone(),
+                latest_event: None,
+                parked_at: None,
+                interrupt_intent: false,
+                revision: 1,
+                activity_revision: 1,
+                turn_active: false,
+                next_position: 0,
+                pending_messages: 0,
+                pending_tool_calls: 0,
+                synchronous_tool_calls: 0,
+            };
+            (agent, message.as_ref(), false, true)
+        }
+        Request::SendMessage(id, message) => (records.agent(*id)?, Some(message), false, false),
+        Request::InterruptAgent(id, message) => {
+            (records.agent(*id)?, message.as_ref(), true, false)
+        }
+        Request::SetInbox { .. } => unreachable!(),
+    };
+    let id = agent.agent.id;
+    if !create {
+        agent.revision = agent
+            .revision
+            .checked_add(1)
+            .expect("revisions do not overflow");
+    }
+    if create {
+        records.change(id, records::AGENT, &[], None, agent.revision)?;
+        records.change(id, records::ACTIVITY, &[], None, agent.revision)?;
+    }
+    if let Some(message) = message {
+        records.push_message(&mut agent, message)?;
+    }
+    if interrupt && !agent.interrupt_intent {
+        agent.interrupt_intent = true;
+        records.change(
+            id,
+            records::ACTIVITY,
+            &[],
+            Some(agent.activity_revision),
+            agent.revision,
+        )?;
+        agent.activity_revision = agent.revision;
+    }
+    records.save_agent(&agent)?;
+    Ok((agent, interrupt || message.is_some()))
 }
 
 impl ClientStore for Store {

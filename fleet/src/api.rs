@@ -1,3 +1,4 @@
+use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest};
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiToolCallRecord,
     CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, Fleet, FleetError,
@@ -5,7 +6,7 @@ use crate::{
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
-use fleet_kit::{QueriesErrorKind, QueryUpdate, Revision};
+use fleet_kit::{QueriesErrorKind, QueryUpdate};
 use futures_util::Stream;
 use http_body_util::{
     BodyExt as _, Full, LengthLimitError, Limited, StreamBody, combinators::UnsyncBoxBody,
@@ -50,6 +51,27 @@ where
 
     match (&parts.method, segments.as_slice()) {
         (&Method::POST, ["", "agents"]) => create_agent(fleet, &parts.headers, body).await,
+        (&Method::GET, ["", "agents"]) => {
+            let query: AgentsReadQuery = parse_query(parts.uri.query())?;
+            let page = fleet.agents(query.into()).await.map_err(ApiError::Fleet)?;
+            Ok(read_response(
+                page.revision,
+                json_response(StatusCode::OK, &ApiAgentsPage::from(page)),
+            ))
+        }
+        (&Method::GET, ["", "agents", "subscription"]) => {
+            if parts.uri.query().is_some_and(|query| !query.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "Subscription does not accept query parameters".into(),
+                ));
+            }
+            agents_subscription(fleet, &parts.headers).await
+        }
+        (_, ["", "agents", "subscription"]) => Err(ApiError::MethodNotAllowed("GET")),
+        (&Method::PUT, ["", "agents", agent_id, "inbox"]) => {
+            set_inbox(fleet, parse_id(agent_id)?, &parts.headers, body).await
+        }
+        (_, ["", "agents", _, "inbox"]) => Err(ApiError::MethodNotAllowed("PUT")),
         (&Method::POST, ["", "agents", agent_id, "messages"]) => {
             send_message(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
@@ -87,10 +109,10 @@ where
         (&Method::GET, ["", "agents", agent_id, "events"]) => {
             events(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
-        (_, ["", "agents"] | ["", "agents", _, "interrupts"]) => {
-            Err(ApiError::MethodNotAllowed("POST"))
+        (_, ["", "agents"] | ["", "agents", _, "messages"]) => {
+            Err(ApiError::MethodNotAllowed("GET, POST"))
         }
-        (_, ["", "agents", _, "messages"]) => Err(ApiError::MethodNotAllowed("GET, POST")),
+        (_, ["", "agents", _, "interrupts"]) => Err(ApiError::MethodNotAllowed("POST")),
         (
             _,
             ["", "agents", _]
@@ -107,6 +129,64 @@ where
 }
 
 // === Handlers ===
+
+async fn agents_subscription(
+    fleet: &Fleet,
+    headers: &HeaderMap,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let mut values = headers.get_all("last-event-id").iter();
+    let value = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::BadRequest("Last-Event-ID from a collection read is required".into())
+        })?;
+    if values.next().is_some() {
+        return Err(ApiError::BadRequest("Last-Event-ID must occur once".into()));
+    }
+    let after = fleet_kit::CollectionRevision(parse_id::<u128>(value)?);
+    if after > fleet.collection_revision().await.map_err(ApiError::Fleet)? {
+        return Err(ApiError::Fleet(FleetError::Query(
+            fleet_store::StoreError::InvalidRevision,
+        )));
+    }
+    Ok(subscription_response(crate::subscription::agents(
+        fleet.clone(),
+        after,
+    )))
+}
+
+async fn set_inbox<B>(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    let key = idempotency_key(headers)?;
+    let mut values = headers.get_all(header::IF_MATCH).iter();
+    let expected = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix('"'))
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| {
+            ApiError::BadRequest("If-Match must contain the quoted summary version".into())
+        })?;
+    if values.next().is_some() {
+        return Err(ApiError::BadRequest("If-Match must occur once".into()));
+    }
+    let expected = fleet_kit::CollectionRevision(parse_id::<u128>(expected)?);
+    let request: SetInboxRequest = read_json(headers, body).await?;
+    fleet
+        .set_inbox(key, agent_id, expected, request.into())
+        .await
+        .map_err(ApiError::Fleet)?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
 
 async fn create_agent<B>(
     fleet: &Fleet,
@@ -397,7 +477,7 @@ where
 // === Responses ===
 
 fn read_response(
-    revision: Revision,
+    revision: impl fmt::Display,
     mut response: Response<ResponseBody>,
 ) -> Response<ResponseBody> {
     response.headers_mut().insert(
@@ -482,6 +562,11 @@ impl ApiError {
                 "shutting_down",
                 "Server is shutting down",
             ),
+            Self::Fleet(FleetError::Store(fleet_store::StoreError::PreconditionFailed)) => (
+                StatusCode::PRECONDITION_FAILED,
+                "precondition_failed",
+                "Agent summary changed",
+            ),
             Self::Fleet(FleetError::Store(error)) => match error.kind() {
                 ClientStoreErrorKind::Conflict => (
                     StatusCode::CONFLICT,
@@ -514,7 +599,7 @@ impl ApiError {
                 QueriesErrorKind::InvalidRevision => (
                     StatusCode::BAD_REQUEST,
                     "invalid_revision",
-                    "Revision is ahead of the agent",
+                    "Revision is ahead of the stored state",
                 ),
                 QueriesErrorKind::RevisionExpired => (
                     StatusCode::GONE,

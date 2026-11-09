@@ -21,6 +21,26 @@ struct PreviewStream {
     selected_block: Option<u32>,
 }
 
+/// Streams collection changes from a read or previously applied SSE revision.
+pub fn agents(
+    fleet: Fleet,
+    after: fleet_kit::CollectionRevision,
+) -> impl Stream<Item = Result<Frame<Bytes>, FleetError>> + Send {
+    let updates = stream::try_unfold((fleet.clone(), after), async move |(fleet, after)| {
+        let updates = fleet.agents_updates(after).await?;
+        let revision = updates.revision;
+        let mut buffer = String::new();
+        writeln!(buffer, "id: {revision}").expect("can write to string");
+        json_event(
+            &mut buffer,
+            "update",
+            &crate::api_types::ApiAgentsUpdates::from(updates),
+        );
+        Ok(Some((Frame::data(Bytes::from(buffer)), (fleet, revision))))
+    });
+    keep_alive(fleet, updates)
+}
+
 /// Streams complete resource revision groups.
 pub fn stream(
     fleet: Fleet,

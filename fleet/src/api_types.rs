@@ -71,6 +71,211 @@ pub struct EventsQuery {
 
 // === Agents ===
 
+/// A stateless collection scan. The SSE endpoint accepts none of these options.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsReadQuery {
+    #[serde(default)]
+    inbox: ApiInboxFilter,
+    #[serde(default, deserialize_with = "deserialize_agent_position")]
+    from: Option<fleet_kit::AgentPosition>,
+    #[serde(default, deserialize_with = "deserialize_agent_position")]
+    until: Option<fleet_kit::AgentPosition>,
+    #[serde(default)]
+    direction: ApiEventDirection,
+    #[serde(
+        default = "default_event_limit",
+        deserialize_with = "deserialize_limit"
+    )]
+    limit: NonZeroUsize,
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    since: Option<u128>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ApiInboxFilter {
+    #[default]
+    All,
+    Unsettled,
+    Pending,
+    Busy,
+    Snoozed,
+    Settled,
+}
+
+impl FromStr for AgentsReadQuery {
+    type Err = serde::de::value::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::deserialize(MapDeserializer::new(form_urlencoded::parse(
+            value.as_bytes(),
+        )))
+    }
+}
+
+impl From<AgentsReadQuery> for fleet_kit::AgentsQuery {
+    fn from(value: AgentsReadQuery) -> Self {
+        use fleet_kit::{InboxFilter, InboxState};
+        Self {
+            inbox: match value.inbox {
+                ApiInboxFilter::All => InboxFilter::All,
+                ApiInboxFilter::Unsettled => InboxFilter::Unsettled,
+                ApiInboxFilter::Pending => InboxFilter::State(InboxState::Pending),
+                ApiInboxFilter::Busy => InboxFilter::State(InboxState::Busy),
+                ApiInboxFilter::Snoozed => InboxFilter::State(InboxState::Snoozed),
+                ApiInboxFilter::Settled => InboxFilter::State(InboxState::Settled),
+            },
+            from: value.from,
+            until: value.until,
+            direction: value.direction.into(),
+            limit: value.limit,
+            since: value.since.map(fleet_kit::CollectionRevision),
+        }
+    }
+}
+
+const fn inbox_name(value: fleet_kit::InboxState) -> &'static str {
+    use fleet_kit::InboxState;
+    match value {
+        InboxState::Pending => "pending",
+        InboxState::Busy => "busy",
+        InboxState::Snoozed => "snoozed",
+        InboxState::Settled => "settled",
+    }
+}
+
+fn agent_position(value: fleet_kit::AgentPosition) -> String {
+    format!("{}:{}:{}", inbox_name(value.inbox), value.order, value.id)
+}
+
+fn deserialize_agent_position<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<fleet_kit::AgentPosition>, D::Error> {
+    use fleet_kit::InboxState;
+    let value = String::deserialize(deserializer)?;
+    let invalid = || serde::de::Error::custom("invalid agent position");
+    let mut parts = value.split(':');
+    let inbox = match parts.next() {
+        Some("pending") => InboxState::Pending,
+        Some("busy") => InboxState::Busy,
+        Some("snoozed") => InboxState::Snoozed,
+        Some("settled") => InboxState::Settled,
+        _ => return Err(invalid()),
+    };
+    let order = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse::<u128>()
+        .map_err(|_| invalid())?;
+    let id = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse::<u128>()
+        .map_err(|_| invalid())?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(Some(fleet_kit::AgentPosition {
+        inbox,
+        order,
+        id: id.into(),
+    }))
+}
+
+/// An idle agent's desired inbox state.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::empty_enum_variants_with_brackets,
+    reason = "Serde only rejects unknown fields for struct variants"
+)]
+pub enum SetInboxRequest {
+    /// Restore to pending.
+    Pending {},
+    /// Settle the agent.
+    Settled {},
+    /// Snooze until Unix milliseconds.
+    Snoozed {
+        /// Deadline in Unix milliseconds.
+        until: u64,
+    },
+}
+
+impl From<SetInboxRequest> for fleet_kit::InboxAction {
+    fn from(value: SetInboxRequest) -> Self {
+        match value {
+            SetInboxRequest::Pending {} => Self::Pending,
+            SetInboxRequest::Settled {} => Self::Settle,
+            SetInboxRequest::Snoozed { until } => Self::Snooze(until),
+        }
+    }
+}
+
+/// The collection representation; excludes conversation and preview content.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentSummary {
+    #[serde(serialize_with = "serialize_id")]
+    id: u128,
+    role: String,
+    #[serde(serialize_with = "serialize_id")]
+    version: u128,
+    inbox: &'static str,
+    since: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<u64>,
+    interrupt_pending: bool,
+    position: String,
+}
+
+impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
+    fn from(value: fleet_kit::AgentSummary) -> Self {
+        Self {
+            id: value.id.into(),
+            role: value.role.to_string(),
+            version: value.version.0,
+            inbox: inbox_name(value.inbox),
+            since: value.since,
+            until: value.until,
+            interrupt_pending: value.interrupt_pending,
+            position: agent_position(value.position),
+        }
+    }
+}
+
+/// One collection page. A non-null next position means more rows were present.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentsPage {
+    agents: Vec<ApiAgentSummary>,
+    next: Option<String>,
+}
+
+impl From<fleet_kit::AgentsPage> for ApiAgentsPage {
+    fn from(value: fleet_kit::AgentsPage) -> Self {
+        Self {
+            agents: value.agents.into_iter().map(Into::into).collect(),
+            next: value.next.map(agent_position),
+        }
+    }
+}
+
+/// A complete collection revision group; its revision is the SSE ID.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentsUpdates {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<ApiAgentSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<String>,
+}
+
+impl From<fleet_kit::AgentsUpdates> for ApiAgentsUpdates {
+    fn from(value: fleet_kit::AgentsUpdates) -> Self {
+        Self {
+            agents: value.agents.into_iter().map(Into::into).collect(),
+            removed: value.removed.into_iter().map(|id| id.to_string()).collect(),
+        }
+    }
+}
+
 /// The resources changed by an agent update.
 #[derive(Debug, Serialize)]
 pub struct ApiAgentUpdates {

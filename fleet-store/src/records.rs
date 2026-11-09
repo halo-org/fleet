@@ -69,6 +69,12 @@ pub enum Request {
     CreateAgent(data::Agent, Option<data::Message>),
     SendMessage(u128, data::Message),
     InterruptAgent(u128, Option<data::Message>),
+    SetInbox {
+        id: u128,
+        expected: u128,
+        inbox: u8,
+        until: Option<u64>,
+    },
 }
 
 impl<T: ReadableTable<&'static [u8], &'static [u8]>> Records<T> {

@@ -1,7 +1,9 @@
 //! Storage for [`fleet_core`].
 //!
-//! The `queries` feature enables the `fleet-kit` query interface.
+//! The `queries` feature enables the `fleet-kit` individual-agent and collection
+//! interfaces. Every writer maintains the indexes, regardless of this feature.
 
+mod agents;
 mod data;
 mod notifications;
 mod preview;

@@ -9,6 +9,8 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Topic {
+    Agents,
+    Snoozes,
     Wakes,
     Agent(u128),
     Preview(u128),

@@ -81,7 +81,7 @@ impl Worker {
         ) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let transaction = self.database.begin_write()?;
-        let (result, latest_event, interrupted) = {
+        let (result, latest_event, interrupted, summary_changed) = {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             let mut agent = records.agent(agent_id)?;
             let activity = (agent.turn_active, agent.interrupt_intent);
@@ -101,9 +101,20 @@ impl Worker {
                 agent.activity_revision = agent.revision;
             }
             records.save_agent(&agent)?;
-            (result, agent.latest_event, agent.interrupt_intent)
+            let summary_changed =
+                crate::agents::sync_agent(&mut records, &agent, crate::agents::now_millis())?;
+            (
+                result,
+                agent.latest_event,
+                agent.interrupt_intent,
+                summary_changed,
+            )
         };
         transaction.commit()?;
+        if summary_changed {
+            self.notifications.notify(Topic::Agents);
+            self.notifications.notify(Topic::Snoozes);
+        }
         if let Some(preview) = self.previews.get_mut(&agent_id)
             && (Some(preview.input_cursor) != latest_event || interrupted)
         {
