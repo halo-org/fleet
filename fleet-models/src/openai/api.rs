@@ -165,7 +165,6 @@ pub enum Event {
 #[derive(Deserialize)]
 pub struct Response {
     pub id: Option<String>,
-    pub output: Option<Vec<Value>>,
     pub usage: Option<Usage>,
     pub error: Option<ApiError>,
     pub incomplete_details: Option<IncompleteDetails>,

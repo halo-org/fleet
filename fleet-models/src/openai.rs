@@ -891,6 +891,76 @@ mod tests {
     }
 
     #[test]
+    fn generate_accepts_completion_without_repeated_output() {
+        let output = message("Done.", None);
+        let http = TestHttp::new([sse(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": output,
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": output,
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 8,
+                        "output_tokens": 3,
+                    },
+                },
+            }),
+        ])]);
+        let models = models(http);
+        let context = context();
+
+        let chunks = futures_executor::block_on(
+            models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let ModelResponseChunk::ResponseEnd(response) = chunks.into_iter().last().unwrap() else {
+            panic!("expected response end");
+        };
+        assert_eq!(response.output, vec![ModelOutput::Text("Done.".into())]);
+        assert_eq!(response.usage.input, 8);
+        assert_eq!(response.usage.output, 3);
+    }
+
+    #[test]
+    fn generate_rejects_completion_with_unfinished_output() {
+        let output = message("Done.", None);
+        let http = TestHttp::new([sse(&[
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": output,
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [output],
+                    "usage": {
+                        "input_tokens": 8,
+                        "output_tokens": 3,
+                    },
+                },
+            }),
+        ])]);
+        let models = models(http);
+        let context = context();
+
+        let error = futures_executor::block_on(
+            models.generate(&context, None, &[]).try_collect::<Vec<_>>(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ModelsErrorKind::Other);
+    }
+
+    #[test]
     fn generate_bounds_internal_continuations() {
         let http = TestHttp::new(
             (0..=8).map(|_| response(&[message("Still working.", Some("commentary"))], false)),

@@ -260,11 +260,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn finish(&mut self, response: api::Response, incomplete: bool) -> Result<Step, OpenAiError> {
-        if response.error.is_some()
-            || self.output.len() != self.started.len()
-            || response.output.as_ref().map(Vec::len)
-                != Some(self.started.len().saturating_sub(self.offset as usize))
-        {
+        if response.error.is_some() || self.output.len() != self.started.len() {
             return Err(protocol("model response did not finish all output blocks"));
         }
         if incomplete
