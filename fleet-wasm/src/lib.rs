@@ -1,4 +1,4 @@
-//! WebAssembly providers for [`fleet_core`].
+//! WebAssembly providers for [`fleet_core`] and [`fleet_kit`].
 //!
 //! Components implement the contracts in `wit/`. Compiled components can be
 //! reused across providers. Each call uses fresh guest state and pooled resources.
@@ -45,6 +45,7 @@ mod wasm_prompts;
 mod wasm_registry;
 mod wasm_state;
 mod wasm_tools;
+mod wasm_workspaces;
 
 pub use self::{
     wasm::{Wasm, WasmComponent},
@@ -56,5 +57,5 @@ pub use self::{
 
 pub(crate) use self::{
     wasm_models::WasmModels, wasm_prompts::WasmPrompts, wasm_state::WasmState,
-    wasm_tools::WasmTools,
+    wasm_tools::WasmTools, wasm_workspaces::WasmWorkspaces,
 };

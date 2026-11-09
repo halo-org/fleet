@@ -8,6 +8,7 @@ mod agents;
 mod authentication;
 mod ports;
 mod types;
+mod workspaces;
 
 pub use self::{
     agents::{
@@ -23,5 +24,9 @@ pub use self::{
         AgentActivity, AgentUpdates, EventDirection, EventQuery, EventRecord, MessageRecord,
         Preview, PreviewContent, QueryResponse, QueryUpdate, Revision, ToolCallRecord,
         TurnEndEvent, TurnStatus,
+    },
+    workspaces::{
+        Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceName,
+        WorkspaceOutput, WorkspaceWrite, Workspaces, WorkspacesErrorKind,
     },
 };

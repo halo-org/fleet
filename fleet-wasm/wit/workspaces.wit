@@ -1,0 +1,155 @@
+/// Provides workspace environments.
+///
+/// Environment identity survives provider restarts. Sharing a context shares the environment.
+/// Different IDs do not guarantee isolation, for example when they name the same local directory.
+/// Paths use / separators and are relative to the workspace directory.
+interface workspaces {
+    use types.{json-object, configured};
+
+    /// The metadata of a workspace.
+    record workspace {
+        /// The name that uniquely identifies this workspace.
+        name: string,
+        /// Additional data not interpreted by kit.
+        extensions: json-object,
+    }
+
+    /// The ID of a workspace environment.
+    record workspace-id {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// A workspace environment and its configuration.
+    record workspace-context {
+        /// The workspace name and config.
+        workspace: configured,
+        /// The ID of the environment.
+        id: workspace-id,
+    }
+
+    /// A file to create or replace in a workspace.
+    record workspace-write {
+        /// The path relative to the workspace directory.
+        path: string,
+        /// The new contents.
+        content: list<u8>,
+        /// The expected contents, or none to replace any contents.
+        expected: option<list<u8>>,
+        /// Whether to create missing parent directories.
+        create-parents: bool,
+    }
+
+    /// A program to run in a workspace.
+    record workspace-command {
+        /// The ID of this execution, unique within the workspace.
+        id: string,
+        /// The program to execute.
+        program: string,
+        /// The arguments passed to the program.
+        args: list<string>,
+        /// Environment variables to set for this execution.
+        env: list<tuple<string, string>>,
+        /// The working directory relative to the workspace, or none for its root.
+        cwd: option<string>,
+        /// The bytes sent to standard input before closing it.
+        stdin: list<u8>,
+        /// The maximum execution time in milliseconds.
+        timeout-ms: u64,
+        /// The maximum bytes to retain from each output stream.
+        output-limit: u64,
+    }
+
+    /// How a workspace command ended.
+    variant workspace-exit {
+        /// The program exited with this code.
+        code(s32),
+        /// The program was terminated without an exit code.
+        terminated,
+        /// The program exceeded its time limit and was terminated.
+        timed-out,
+    }
+
+    /// The result of running a workspace command.
+    record workspace-output {
+        /// How the program ended.
+        exit: workspace-exit,
+        /// The captured standard output.
+        stdout: list<u8>,
+        /// The captured standard error.
+        stderr: list<u8>,
+        /// Whether standard output exceeded the limit.
+        stdout-truncated: bool,
+        /// Whether standard error exceeded the limit.
+        stderr-truncated: bool,
+    }
+
+    /// The kind of error returned by a workspace provider.
+    enum workspaces-error-kind {
+        /// The workspace or environment does not exist.
+        not-found,
+        /// The workspace configuration is invalid.
+        invalid-configuration,
+        /// The file does not exist.
+        file-not-found,
+        /// The file exceeds the read limit.
+        file-too-large,
+        /// The file does not match its expected contents.
+        file-changed,
+        /// Retrying the command risks repeating effects of an earlier attempt.
+        unsafe-to-retry,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by a workspace provider.
+    record workspaces-error {
+        /// The kind of error.
+        kind: workspaces-error-kind,
+        /// A description of the error.
+        message: string,
+    }
+
+    /// Returns the workspace with the given name.
+    get: async func(name: string) -> result<option<workspace>, workspaces-error>;
+
+    /// Creates or reopens a workspace environment.
+    ///
+    /// Concurrent and repeated calls with the same context open the same environment.
+    /// Cancelling a call may leave provisioning in progress. Retrying must resume it.
+    /// Dropping the provider does not remove environments.
+    /// An existing ID with incompatible configuration returns invalid-configuration.
+    open: async func(context: workspace-context) -> result<_, workspaces-error>;
+
+    /// Reads a file from an open workspace.
+    ///
+    /// Files exceeding the limit return file-too-large.
+    read: async func(context: workspace-context, path: string, limit: u64)
+        -> result<list<u8>, workspaces-error>;
+
+    /// Creates or replaces a file in an open workspace.
+    ///
+    /// Readers see either the old or new contents. Expected contents are checked before replacement.
+    /// A mismatch or missing file returns file-changed. This is not an atomic comparison against
+    /// programs outside the provider.
+    write: async func(context: workspace-context, file: workspace-write)
+        -> result<_, workspaces-error>;
+
+    /// Runs a command to completion in an open workspace.
+    ///
+    /// is-retry indicates that this execution may have been attempted before. An earlier attempt
+    /// may still be running or may have completed. Reuse the command ID when retrying.
+    /// Cancelling the call does not guarantee that the program stops.
+    /// Timeouts and nonzero exit codes are returned as command outcomes.
+    /// A retry that could repeat effects returns unsafe-to-retry.
+    exec: async func(context: workspace-context, is-retry: bool, command: workspace-command)
+        -> result<workspace-output, workspaces-error>;
+}
+
+/// A component that provides workspaces.
+world workspace-provider {
+    import configuration;
+    export workspaces;
+}

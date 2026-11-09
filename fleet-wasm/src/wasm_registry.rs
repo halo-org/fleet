@@ -1,5 +1,6 @@
 use crate::{
     WasmCapabilities, WasmCredentials, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools,
+    WasmWorkspaces,
     bindings::authentication::{
         AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
     },
@@ -9,6 +10,10 @@ use fleet_core::{
     AgentId, ContentBlock, JsonObject, Model, ModelCompactionResponse, ModelContext,
     ModelContinuation, ModelInput, ModelName, ModelResponseChunk, Models, Prompt, PromptContext,
     PromptName, PromptResponse, Prompts, Tool, ToolCall, ToolContext, ToolName, ToolOutput, Tools,
+};
+use fleet_kit::{
+    Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceName, WorkspaceOutput, WorkspaceWrite,
+    Workspaces,
 };
 use futures_util::{Stream, future::Either, stream};
 use std::{
@@ -29,11 +34,12 @@ pub struct WasmRegistry {
 
 /// A configured WebAssembly provider.
 ///
-/// A provider can export models, tools, prompts or any combination of them.
+/// A provider can export models, tools, prompts, workspaces or any combination of them.
 pub struct WasmProvider {
     models: Option<WasmModels>,
     tools: Option<WasmTools>,
     prompts: Option<WasmPrompts>,
+    workspaces: Option<WasmWorkspaces>,
     authentication: Option<AuthenticationProviderPre<WasmState>>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
@@ -131,12 +137,23 @@ impl WasmProvider {
                 )
             })
             .transpose()?;
+        let workspaces = component
+            .get_export_index(None, "fleet:providers/workspaces@0.0.0")
+            .map(|_| {
+                WasmWorkspaces::new(
+                    instance.clone(),
+                    config.clone(),
+                    filesystem.clone(),
+                    credentials.clone(),
+                )
+            })
+            .transpose()?;
         let authentication = component
             .get_export_index(None, "fleet:providers/authentication@0.0.0")
             .map(|_| AuthenticationProviderPre::new(instance).map_err(WasmError::runtime))
             .transpose()?;
 
-        if models.is_none() && tools.is_none() && prompts.is_none() {
+        if models.is_none() && tools.is_none() && prompts.is_none() && workspaces.is_none() {
             return Err(WasmError::no_provider_interfaces());
         }
 
@@ -144,6 +161,7 @@ impl WasmProvider {
             models,
             tools,
             prompts,
+            workspaces,
             authentication,
             config,
             filesystem,
@@ -373,10 +391,84 @@ impl Prompts for WasmRegistry {
     }
 }
 
+impl Workspaces for WasmRegistry {
+    type Error = WasmError;
+
+    async fn get(&self, name: &WorkspaceName) -> Result<Option<Workspace>, Self::Error> {
+        if let Some((namespace, name, provider)) = self.provider(name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            let mut workspace = workspaces.get(name).await?;
+            if let Some(workspace) = &mut workspace {
+                workspace.name = format!("{namespace}:{}", workspace.name).into();
+            }
+            Ok(workspace)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn open(&self, context: &WorkspaceContext) -> Result<(), Self::Error> {
+        if let Some((_, name, provider)) = self.provider(context.workspace.name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            workspaces.open(name, context).await
+        } else {
+            Err(WasmError::workspace_not_found(&context.workspace.name))
+        }
+    }
+
+    async fn read(
+        &self,
+        context: &WorkspaceContext,
+        path: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, Self::Error> {
+        if let Some((_, name, provider)) = self.provider(context.workspace.name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            workspaces.read(name, context, path, limit).await
+        } else {
+            Err(WasmError::workspace_not_found(&context.workspace.name))
+        }
+    }
+
+    async fn write(
+        &self,
+        context: &WorkspaceContext,
+        file: &WorkspaceWrite,
+    ) -> Result<(), Self::Error> {
+        if let Some((_, name, provider)) = self.provider(context.workspace.name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            workspaces.write(name, context, file).await
+        } else {
+            Err(WasmError::workspace_not_found(&context.workspace.name))
+        }
+    }
+
+    async fn exec(
+        &self,
+        context: &WorkspaceContext,
+        is_retry: bool,
+        command: &WorkspaceCommand,
+    ) -> Result<WorkspaceOutput, Self::Error> {
+        if let Some((_, name, provider)) = self.provider(context.workspace.name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            workspaces.exec(name, context, is_retry, command).await
+        } else {
+            Err(WasmError::workspace_not_found(&context.workspace.name))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::ptr;
+    use fleet_core::{Configured, Error as _};
+    use fleet_kit::WorkspacesErrorKind;
     use futures_util::FutureExt as _;
 
     fn provider() -> WasmProvider {
@@ -384,6 +476,7 @@ mod tests {
             models: None,
             tools: None,
             prompts: None,
+            workspaces: None,
             authentication: None,
             config: "{}".into(),
             filesystem: WasiFilesystemCtx::default(),
@@ -454,6 +547,34 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(prompt, None);
+
+            let workspace = Workspaces::get(&registry, &name.into())
+                .now_or_never()
+                .unwrap()
+                .unwrap();
+            assert_eq!(workspace, None);
+        }
+    }
+
+    #[test]
+    fn open_reports_missing_workspaces() {
+        let mut registry = WasmRegistry::new();
+        registry.insert("example", provider()).unwrap();
+
+        for name in ["example:item", "missing:item", "item"] {
+            let context = WorkspaceContext {
+                workspace: Configured {
+                    name: name.into(),
+                    config: JsonObject::new(),
+                },
+                id: 1.into(),
+            };
+
+            let error = registry.open(&context).now_or_never().unwrap().unwrap_err();
+            let kind: WorkspacesErrorKind = error.kind();
+
+            assert_eq!(kind, WorkspacesErrorKind::NotFound);
+            assert_eq!(error.to_string(), format!("workspace {name} was not found"));
         }
     }
 }

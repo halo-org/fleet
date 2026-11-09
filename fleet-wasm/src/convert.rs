@@ -1,9 +1,16 @@
-use crate::{WasmError, bindings::types};
+use crate::{
+    WasmError,
+    bindings::{types, workspaces::exports::fleet::providers::workspaces},
+};
 use fleet_core::{
     AgentId, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
     ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelReasoning,
     ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt, PromptContext, PromptOutput,
     PromptResponse, Tool, ToolCall, ToolContext, ToolOutput, ToolResult,
+};
+use fleet_kit::{
+    Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceOutput,
+    WorkspaceWrite,
 };
 
 fn json(object: &JsonObject) -> String {
@@ -418,5 +425,135 @@ impl From<types::ContentBlock> for ContentBlock {
         match value {
             types::ContentBlock::Text(text) => Self::Text(text),
         }
+    }
+}
+
+impl TryFrom<workspaces::Workspace> for Workspace {
+    type Error = WasmError;
+
+    fn try_from(value: workspaces::Workspace) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value.name.into(),
+            extensions: serde_json::from_str(&value.extensions)?,
+        })
+    }
+}
+
+impl From<WorkspaceId> for workspaces::WorkspaceId {
+    fn from(id: WorkspaceId) -> Self {
+        let id = u128::from(id);
+        Self {
+            high: u64::try_from(id >> 64).expect("high bits fit in u64"),
+            low: u64::try_from(id & u128::from(u64::MAX)).expect("low bits fit in u64"),
+        }
+    }
+}
+
+impl workspaces::WorkspaceContext {
+    pub(crate) fn new(name: &str, value: &WorkspaceContext) -> Self {
+        Self {
+            workspace: types::Configured {
+                name: name.into(),
+                config: json(&value.workspace.config),
+            },
+            id: value.id.into(),
+        }
+    }
+}
+
+impl From<&WorkspaceWrite> for workspaces::WorkspaceWrite {
+    fn from(value: &WorkspaceWrite) -> Self {
+        Self {
+            path: value.path.clone(),
+            content: value.content.clone(),
+            expected: value.expected.clone(),
+            create_parents: value.create_parents,
+        }
+    }
+}
+
+impl From<&WorkspaceCommand> for workspaces::WorkspaceCommand {
+    fn from(value: &WorkspaceCommand) -> Self {
+        Self {
+            id: value.id.clone(),
+            program: value.program.clone(),
+            args: value.args.clone(),
+            env: value
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            cwd: value.cwd.clone(),
+            stdin: value.stdin.clone(),
+            timeout_ms: value.timeout_ms,
+            output_limit: value.output_limit,
+        }
+    }
+}
+
+impl From<workspaces::WorkspaceOutput> for WorkspaceOutput {
+    fn from(value: workspaces::WorkspaceOutput) -> Self {
+        Self {
+            exit: match value.exit {
+                workspaces::WorkspaceExit::Code(code) => WorkspaceExit::Code(code),
+                workspaces::WorkspaceExit::Terminated => WorkspaceExit::Terminated,
+                workspaces::WorkspaceExit::TimedOut => WorkspaceExit::TimedOut,
+            },
+            stdout: value.stdout,
+            stderr: value.stderr,
+            stdout_truncated: value.stdout_truncated,
+            stderr_truncated: value.stderr_truncated,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core::Configured;
+    use serde_json::json;
+
+    #[test]
+    fn workspace_preserves_extensions() {
+        let extensions = json!({
+            "title": "Local directory",
+            "config_schema": {
+                "type": "object",
+                "properties": {
+                    "cwd": {
+                        "type": "string",
+                        "x-picker": "directory",
+                    },
+                },
+            },
+        });
+        let workspace = workspaces::Workspace {
+            name: "local".into(),
+            extensions: extensions.to_string(),
+        };
+
+        let workspace = Workspace::try_from(workspace).unwrap();
+
+        assert_eq!(workspace.name.as_ref(), "local");
+        assert_eq!(workspace.extensions, *extensions.as_object().unwrap());
+    }
+
+    #[test]
+    fn workspace_context_preserves_identity_and_config() {
+        let context = WorkspaceContext {
+            workspace: Configured {
+                name: "example:local".into(),
+                config: JsonObject::from_iter([("cwd".into(), json!("/project"))]),
+            },
+            id: u128::MAX.into(),
+        };
+
+        let context = workspaces::WorkspaceContext::new("local", &context);
+        let config: JsonObject = serde_json::from_str(&context.workspace.config).unwrap();
+
+        assert_eq!(context.workspace.name, "local");
+        assert_eq!(context.id.high, u64::MAX);
+        assert_eq!(context.id.low, u64::MAX);
+        assert_eq!(config["cwd"], "/project");
     }
 }

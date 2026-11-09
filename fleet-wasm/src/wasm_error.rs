@@ -1,8 +1,10 @@
 use crate::bindings::{
     models::exports::fleet::providers::models, tools::exports::fleet::providers::tools,
+    workspaces::exports::fleet::providers::workspaces,
 };
 use core::fmt;
 use fleet_core::{ModelName, ModelsErrorKind, PromptName, ToolName, ToolsErrorKind};
+use fleet_kit::{WorkspaceName, WorkspacesErrorKind};
 
 /// An error returned by the WebAssembly host or a provider.
 #[derive(Debug)]
@@ -18,6 +20,7 @@ enum Kind {
     ModelNotFound(ModelName),
     ToolNotFound(ToolName),
     PromptNotFound(PromptName),
+    WorkspaceNotFound(WorkspaceName),
     Provider(String),
     Model {
         kind: ModelsErrorKind,
@@ -25,6 +28,10 @@ enum Kind {
     },
     Tool {
         kind: ToolsErrorKind,
+        message: String,
+    },
+    Workspace {
+        kind: WorkspacesErrorKind,
         message: String,
     },
     IncompleteResponse,
@@ -59,6 +66,10 @@ impl WasmError {
         Self(Kind::PromptNotFound(name.clone()))
     }
 
+    pub(crate) fn workspace_not_found(name: &WorkspaceName) -> Self {
+        Self(Kind::WorkspaceNotFound(name.clone()))
+    }
+
     pub(crate) const fn provider(message: String) -> Self {
         Self(Kind::Provider(message))
     }
@@ -90,6 +101,25 @@ impl WasmError {
             message: error.message,
         })
     }
+
+    pub(crate) fn from_workspace(error: workspaces::WorkspacesError) -> Self {
+        Self(Kind::Workspace {
+            kind: match error.kind {
+                workspaces::WorkspacesErrorKind::NotFound => WorkspacesErrorKind::NotFound,
+                workspaces::WorkspacesErrorKind::InvalidConfiguration => {
+                    WorkspacesErrorKind::InvalidConfiguration
+                }
+                workspaces::WorkspacesErrorKind::FileNotFound => WorkspacesErrorKind::FileNotFound,
+                workspaces::WorkspacesErrorKind::FileTooLarge => WorkspacesErrorKind::FileTooLarge,
+                workspaces::WorkspacesErrorKind::FileChanged => WorkspacesErrorKind::FileChanged,
+                workspaces::WorkspacesErrorKind::UnsafeToRetry => {
+                    WorkspacesErrorKind::UnsafeToRetry
+                }
+                workspaces::WorkspacesErrorKind::Other => WorkspacesErrorKind::Other,
+            },
+            message: error.message,
+        })
+    }
 }
 
 impl fmt::Display for WasmError {
@@ -104,14 +134,16 @@ impl fmt::Display for WasmError {
                 write!(f, "provider namespace {namespace} is already registered")
             }
             Kind::NoProviderInterfaces => {
-                f.write_str("component does not export models, tools or prompts")
+                f.write_str("component does not export models, tools, prompts or workspaces")
             }
             Kind::ModelNotFound(name) => write!(f, "model {name} was not found"),
             Kind::ToolNotFound(name) => write!(f, "tool {name} was not found"),
             Kind::PromptNotFound(name) => write!(f, "prompt {name} was not found"),
+            Kind::WorkspaceNotFound(name) => write!(f, "workspace {name} was not found"),
             Kind::Provider(message)
             | Kind::Model { message, kind: _ }
-            | Kind::Tool { message, kind: _ } => f.write_str(message),
+            | Kind::Tool { message, kind: _ }
+            | Kind::Workspace { message, kind: _ } => f.write_str(message),
             Kind::IncompleteResponse => f.write_str("model response is incomplete"),
         }
     }
@@ -128,12 +160,17 @@ impl core::error::Error for WasmError {
             | Kind::ModelNotFound(_)
             | Kind::ToolNotFound(_)
             | Kind::PromptNotFound(_)
+            | Kind::WorkspaceNotFound(_)
             | Kind::Provider(_)
             | Kind::Model {
                 kind: _,
                 message: _,
             }
             | Kind::Tool {
+                kind: _,
+                message: _,
+            }
+            | Kind::Workspace {
                 kind: _,
                 message: _,
             }
@@ -155,7 +192,21 @@ impl fleet_core::Error<ToolsErrorKind> for WasmError {
     fn kind(&self) -> ToolsErrorKind {
         match &self.0 {
             Kind::Tool { kind, message: _ } => *kind,
+            Kind::Workspace {
+                kind: WorkspacesErrorKind::UnsafeToRetry,
+                message: _,
+            } => ToolsErrorKind::UnsafeToRetry,
             _ => ToolsErrorKind::Other,
+        }
+    }
+}
+
+impl fleet_core::Error<WorkspacesErrorKind> for WasmError {
+    fn kind(&self) -> WorkspacesErrorKind {
+        match &self.0 {
+            Kind::WorkspaceNotFound(_) => WorkspacesErrorKind::NotFound,
+            Kind::Workspace { kind, message: _ } => *kind,
+            _ => WorkspacesErrorKind::Other,
         }
     }
 }
@@ -163,5 +214,25 @@ impl fleet_core::Error<ToolsErrorKind> for WasmError {
 impl From<serde_json::Error> for WasmError {
     fn from(error: serde_json::Error) -> Self {
         Self(Kind::Json(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core::Error as _;
+
+    #[test]
+    fn workspace_errors_preserve_retry_safety() {
+        let error = WasmError::from_workspace(workspaces::WorkspacesError {
+            kind: workspaces::WorkspacesErrorKind::UnsafeToRetry,
+            message: "The command may still be running".into(),
+        });
+        let kind: WorkspacesErrorKind = error.kind();
+        let tool_kind: ToolsErrorKind = error.kind();
+
+        assert_eq!(kind, WorkspacesErrorKind::UnsafeToRetry);
+        assert_eq!(tool_kind, ToolsErrorKind::UnsafeToRetry);
+        assert_eq!(error.to_string(), "The command may still be running");
     }
 }

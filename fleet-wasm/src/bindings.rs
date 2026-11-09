@@ -45,3 +45,14 @@ pub mod prompts {
         },
     });
 }
+
+pub mod workspaces {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "workspace-provider",
+        with: {
+            "fleet:providers/configuration": super::configuration,
+            "fleet:providers/types": super::types,
+        },
+    });
+}
