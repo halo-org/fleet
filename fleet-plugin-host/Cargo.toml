@@ -1,0 +1,20 @@
+[package]
+name = "fleet-plugin-host"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+futures-util = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+wit-bindgen = { workspace = true, features = ["async", "bitflags", "macros", "realloc", "std"] }
