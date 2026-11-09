@@ -1,11 +1,14 @@
 use crate::{Authentication, Config};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
-use fleet_wasm::{Wasm, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmRegistry};
+use fleet_wasm::{
+    Wasm, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmProvider, WasmRegistry,
+    WasmWorkspaceHost,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
@@ -58,6 +61,8 @@ pub struct PluginCapabilities {
     process: bool,
     #[serde(default)]
     credentials: bool,
+    #[serde(default)]
+    workspaces: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +101,7 @@ pub async fn load(
     cache: &Path,
     authentication: &Authentication,
 ) -> Result<WasmRegistry, Box<dyn Error + Send + Sync>> {
+    let order = provider_order(config)?;
     let wasm = Wasm::new()?;
     let lockfile = Lockfile::load(directory)?;
     let mut components = BTreeMap::new();
@@ -127,8 +133,9 @@ pub async fn load(
         components.insert(name, component);
     }
 
-    let mut providers = WasmRegistry::new();
-    for (name, provider) in &config.providers {
+    let mut loaded = BTreeMap::<&str, WasmProvider>::new();
+    for name in order {
+        let provider = config.providers.get(name).expect("provider exists");
         let plugin = config
             .plugins
             .get(&provider.plugin)
@@ -136,10 +143,14 @@ pub async fn load(
         let component = components.get(&provider.plugin).ok_or_else(|| {
             io::Error::other(format!("plugin was not loaded: {}", provider.plugin))
         })?;
-        let capabilities = match plugin {
-            PluginConfig::Local { capabilities, .. }
-            | PluginConfig::Remote { capabilities, .. } => capabilities,
-        };
+        let capabilities = plugin.capabilities();
+        let mut workspaces = WasmRegistry::new();
+        for dependency in &capabilities.workspaces {
+            let provider = loaded
+                .get(dependency.as_str())
+                .expect("dependency is loaded");
+            workspaces.insert(dependency, provider.clone())?;
+        }
         let capabilities = WasmCapabilities {
             http: capabilities.http,
             filesystem: capabilities
@@ -155,6 +166,8 @@ pub async fn load(
             credentials: capabilities
                 .credentials
                 .then(|| WasmCredentials::new(authentication.scope(name))),
+            workspaces: (!capabilities.workspaces.is_empty())
+                .then(|| WasmWorkspaceHost::new(workspaces)),
         };
         let provider = wasm
             .provider(component, &provider.config, capabilities)
@@ -163,10 +176,58 @@ pub async fn load(
                 source,
             })?;
         authentication.register(name, provider.connections(authentication.host_id()).await?)?;
-        providers.insert(name, provider)?;
+        loaded.insert(name, provider);
     }
 
+    let mut providers = WasmRegistry::new();
+    for (name, provider) in loaded {
+        providers.insert(name, provider)?;
+    }
     Ok(providers)
+}
+
+impl PluginConfig {
+    const fn capabilities(&self) -> &PluginCapabilities {
+        match self {
+            Self::Local { capabilities, .. } | Self::Remote { capabilities, .. } => capabilities,
+        }
+    }
+}
+
+fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
+    let mut dependencies = BTreeMap::new();
+    for (name, provider) in &config.providers {
+        let plugin = config
+            .plugins
+            .get(&provider.plugin)
+            .ok_or_else(|| io::Error::other(format!("unknown plugin: {}", provider.plugin)))?;
+        for dependency in &plugin.capabilities().workspaces {
+            if !config.providers.contains_key(dependency) {
+                return Err(io::Error::other(format!(
+                    "unknown workspace provider: {dependency}",
+                )));
+            }
+        }
+        dependencies.insert(name.as_str(), &plugin.capabilities().workspaces);
+    }
+    let mut pending: BTreeSet<_> = dependencies.keys().copied().collect();
+    let mut order = Vec::new();
+    while !pending.is_empty() {
+        let name = pending
+            .iter()
+            .copied()
+            .find(|name| {
+                dependencies
+                    .get(name)
+                    .expect("provider exists")
+                    .iter()
+                    .all(|dependency| !pending.contains(dependency.as_str()))
+            })
+            .ok_or_else(|| io::Error::other("workspace provider dependencies contain a cycle"))?;
+        pending.remove(name);
+        order.push(name);
+    }
+    Ok(order)
 }
 
 // === Locking ===
@@ -299,6 +360,62 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provider_order_loads_workspaces_first() {
+        let config: Config = serde_json::from_value(json!({
+            "plugins": {
+                "tools": {
+                    "path": "tools.wasm",
+                    "capabilities": {
+                        "workspaces": ["workspace"],
+                    },
+                },
+                "host": {
+                    "path": "host.wasm",
+                },
+            },
+            "providers": {
+                "tools": {
+                    "plugin": "tools",
+                },
+                "workspace": {
+                    "plugin": "host",
+                },
+            },
+        }))
+        .unwrap();
+
+        let order = provider_order(&config).unwrap();
+
+        assert_eq!(order, ["workspace", "tools"]);
+    }
+
+    #[test]
+    fn provider_order_rejects_missing_and_cyclic_dependencies() {
+        for dependency in ["missing", "tools"] {
+            let config: Config = serde_json::from_value(json!({
+                "plugins": {
+                    "tools": {
+                        "path": "tools.wasm",
+                        "capabilities": {
+                            "workspaces": [dependency],
+                        },
+                    },
+                },
+                "providers": {
+                    "tools": {
+                        "plugin": "tools",
+                    },
+                },
+            }))
+            .unwrap();
+
+            let error = provider_order(&config).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+        }
+    }
 
     #[test]
     fn plugin_config_requires_one_source() {

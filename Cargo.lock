@@ -550,6 +550,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-tools"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-simulator"
 version = "0.0.0"
 dependencies = [

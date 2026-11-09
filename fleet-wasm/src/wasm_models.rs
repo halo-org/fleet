@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
     bindings::{
         models::{ModelProviderPre, exports::fleet::providers::models},
         types,
@@ -24,11 +24,13 @@ use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 /// A WebAssembly model provider.
 ///
 /// A response stream keeps its instance until the response ends or the stream is dropped.
+#[derive(Clone)]
 pub struct WasmModels {
     instance: ModelProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
+    workspace_host: Option<WasmWorkspaceHost>,
 }
 
 struct ResponseConsumer {
@@ -42,12 +44,14 @@ impl WasmModels {
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
+        workspace_host: Option<WasmWorkspaceHost>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: ModelProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
             credentials,
+            workspace_host,
         })
     }
 
@@ -58,6 +62,7 @@ impl WasmModels {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -91,6 +96,7 @@ impl WasmModels {
         let config = self.config.clone();
         let filesystem = self.filesystem.clone();
         let credentials = self.credentials.clone();
+        let workspace_host = self.workspace_host.clone();
         let context = types::ModelContext::new(name, context);
         let continuation = continuation.map(types::ModelContinuation::from);
         let input = input.iter().map(types::ModelInput::from).collect();
@@ -98,7 +104,7 @@ impl WasmModels {
         let run = async move {
             let mut store = Store::new(
                 instance.engine(),
-                WasmState::new(config, filesystem, credentials),
+                WasmState::new(config, filesystem, credentials, workspace_host),
             );
             let instance = instance
                 .instantiate_async(&mut store)
@@ -164,6 +170,7 @@ impl WasmModels {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self

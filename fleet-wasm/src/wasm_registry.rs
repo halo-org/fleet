@@ -1,6 +1,6 @@
 use crate::{
     WasmCapabilities, WasmCredentials, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools,
-    WasmWorkspaces,
+    WasmWorkspaceHost, WasmWorkspaces,
     bindings::authentication::{
         AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
     },
@@ -35,6 +35,7 @@ pub struct WasmRegistry {
 /// A configured WebAssembly provider.
 ///
 /// A provider can export models, tools, prompts, workspaces or any combination of them.
+#[derive(Clone)]
 pub struct WasmProvider {
     models: Option<WasmModels>,
     tools: Option<WasmTools>,
@@ -44,6 +45,7 @@ pub struct WasmProvider {
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
+    workspace_host: Option<WasmWorkspaceHost>,
 }
 
 impl WasmRegistry {
@@ -102,6 +104,7 @@ impl WasmProvider {
             .map_err(WasmError::runtime)?;
         let config: Arc<str> = serde_json::to_string(config)?.into();
         let credentials = capabilities.credentials.clone();
+        let workspace_host = capabilities.workspaces.clone();
         let filesystem = capabilities.open_filesystem()?;
 
         let models = component
@@ -112,6 +115,7 @@ impl WasmProvider {
                     config.clone(),
                     filesystem.clone(),
                     credentials.clone(),
+                    workspace_host.clone(),
                 )
             })
             .transpose()?;
@@ -123,6 +127,7 @@ impl WasmProvider {
                     config.clone(),
                     filesystem.clone(),
                     credentials.clone(),
+                    workspace_host.clone(),
                 )
             })
             .transpose()?;
@@ -134,6 +139,7 @@ impl WasmProvider {
                     config.clone(),
                     filesystem.clone(),
                     credentials.clone(),
+                    workspace_host.clone(),
                 )
             })
             .transpose()?;
@@ -145,6 +151,7 @@ impl WasmProvider {
                     config.clone(),
                     filesystem.clone(),
                     credentials.clone(),
+                    workspace_host.clone(),
                 )
             })
             .transpose()?;
@@ -166,6 +173,7 @@ impl WasmProvider {
             config,
             filesystem,
             credentials,
+            workspace_host,
         })
     }
 
@@ -187,6 +195,7 @@ impl WasmProvider {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = instance
@@ -481,6 +490,7 @@ mod tests {
             config: "{}".into(),
             filesystem: WasiFilesystemCtx::default(),
             credentials: None,
+            workspace_host: None,
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
     bindings::workspaces::{WorkspaceProviderPre, exports::fleet::providers::workspaces},
 };
 use fleet_kit::{Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceOutput, WorkspaceWrite};
@@ -8,11 +8,13 @@ use wasmtime::{Store, component::InstancePre};
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly workspace provider.
+#[derive(Clone)]
 pub struct WasmWorkspaces {
     instance: WorkspaceProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
+    workspace_host: Option<WasmWorkspaceHost>,
 }
 
 impl WasmWorkspaces {
@@ -21,12 +23,14 @@ impl WasmWorkspaces {
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
+        workspace_host: Option<WasmWorkspaceHost>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: WorkspaceProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
             credentials,
+            workspace_host,
         })
     }
 
@@ -37,6 +41,7 @@ impl WasmWorkspaces {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -70,6 +75,7 @@ impl WasmWorkspaces {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -103,6 +109,7 @@ impl WasmWorkspaces {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -140,6 +147,7 @@ impl WasmWorkspaces {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -177,6 +185,7 @@ impl WasmWorkspaces {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["fleet", "fleet-core", "fleet-kit", "fleet-models", "fleet-plugin-host", "fleet-simulator", "fleet-store", "fleet-wasm"]
+members = ["fleet", "fleet-core", "fleet-kit", "fleet-models", "fleet-plugin-host", "fleet-plugin-tools", "fleet-simulator", "fleet-store", "fleet-wasm"]
 
 [workspace.package]
 edition = "2024"

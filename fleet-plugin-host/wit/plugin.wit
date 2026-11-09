@@ -2,7 +2,6 @@ package fleet:plugin-host@0.0.0;
 
 /// A workspace on the host machine.
 world plugin {
-    import fleet:providers/configuration@0.0.0;
     import fleet:providers/process@0.0.0;
     import wasi:filesystem/types@0.3.0;
     import wasi:filesystem/preopens@0.3.0;

@@ -9,6 +9,8 @@
 //! Clocks and randomness are available. The guest does not inherit environment
 //! variables or standard streams, and raw sockets are unavailable.
 //! The process capability runs host programs outside the WASI sandbox.
+//! Workspace imports delegate to a [`fleet_kit::Workspaces`] implementation
+//! through [`WasmWorkspaceHost`].
 //!
 //! ```no_run
 //! use fleet_core::JsonObject;
@@ -47,6 +49,7 @@ mod wasm_prompts;
 mod wasm_registry;
 mod wasm_state;
 mod wasm_tools;
+mod wasm_workspace_host;
 mod wasm_workspaces;
 
 pub use self::{
@@ -55,6 +58,7 @@ pub use self::{
     wasm_credentials::WasmCredentials,
     wasm_error::WasmError,
     wasm_registry::{WasmProvider, WasmRegistry},
+    wasm_workspace_host::WasmWorkspaceHost,
 };
 
 pub(crate) use self::{

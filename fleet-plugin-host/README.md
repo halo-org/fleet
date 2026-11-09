@@ -37,10 +37,7 @@ Copy `host.wasm` into Fleet's config directory under `plugins/`, then add:
   },
   "providers": {
     "host": {
-      "plugin": "host",
-      "config": {
-        "cwd": "/home/user/project"
-      }
+      "plugin": "host"
     }
   }
 }
@@ -52,8 +49,10 @@ Use forward slashes in configuration, including Windows paths such as `C:/projec
 Each provider needs its own persistent directory mounted at `/state`.
 Clocks and randomness are supplied by the host. HTTP and credentials are not needed.
 
-This registers `host:default`. Workspace config can override `cwd` with another
-absolute path covered by a workspace mount. Opening a workspace binds its ID to
+This registers `host:default`. The workspace config must supply `cwd` as an
+absolute path covered by a workspace mount. Set it in the role's
+`extensions.fleet.workspace.config` when using the basic tools plugin.
+There is no provider-wide default directory. Opening a workspace binds its ID to
 that directory. Reopening is safe, but changing the directory for an existing ID
 is rejected. Different IDs may share a directory.
 

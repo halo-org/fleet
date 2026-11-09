@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState,
+    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
     bindings::{tools::ToolProviderPre, types},
 };
 use fleet_core::{JsonObject, Tool, ToolContext, ToolOutput};
@@ -8,11 +8,13 @@ use wasmtime::{Store, component::InstancePre};
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly tool provider.
+#[derive(Clone)]
 pub struct WasmTools {
     instance: ToolProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
+    workspace_host: Option<WasmWorkspaceHost>,
 }
 
 impl WasmTools {
@@ -21,12 +23,14 @@ impl WasmTools {
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
+        workspace_host: Option<WasmWorkspaceHost>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: ToolProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
             credentials,
+            workspace_host,
         })
     }
 
@@ -37,6 +41,7 @@ impl WasmTools {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -72,6 +77,7 @@ impl WasmTools {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self
@@ -112,6 +118,7 @@ impl WasmTools {
                 self.config.clone(),
                 self.filesystem.clone(),
                 self.credentials.clone(),
+                self.workspace_host.clone(),
             ),
         );
         let instance = self

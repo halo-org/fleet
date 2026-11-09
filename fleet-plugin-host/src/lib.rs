@@ -6,6 +6,7 @@ mod filesystem;
 mod process;
 mod workspaces;
 
+#[cfg(target_arch = "wasm32")]
 use self::workspaces::Host;
 
 pub(crate) use self::{
@@ -17,6 +18,7 @@ pub(crate) use self::{
     filesystem::Directory,
 };
 
+#[cfg(target_arch = "wasm32")]
 bindings::export!(Host with_types_in bindings);
 
 fn error(kind: WorkspacesErrorKind, message: impl Into<String>) -> WorkspacesError {

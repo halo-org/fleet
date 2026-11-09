@@ -35,6 +35,14 @@ pub mod process_host {
 
 pub use process_host::fleet::providers::process;
 
+pub mod workspace_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "workspace-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
 pub mod tools {
     wasmtime::component::bindgen!({
         path: "wit",

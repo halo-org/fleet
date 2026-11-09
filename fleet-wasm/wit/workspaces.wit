@@ -153,3 +153,8 @@ world workspace-provider {
     import configuration;
     export workspaces;
 }
+
+/// A component that uses workspace providers.
+world workspace-host {
+    import workspaces;
+}

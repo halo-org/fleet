@@ -12,7 +12,6 @@ impl Guest for Host {
         if name != "default" {
             return Ok(None);
         }
-        Config::load("{}")?;
         Ok(Some(Workspace {
             name,
             extensions: serde_json::json!({
@@ -27,6 +26,7 @@ impl Guest for Host {
                                 "title": "Working directory",
                             },
                         },
+                        "required": ["cwd"],
                         "additionalProperties": false,
                     },
                 },
@@ -120,7 +120,7 @@ fn config(context: &WorkspaceContext) -> Result<Config, WorkspacesError> {
             "workspace was not found",
         ));
     }
-    Config::load(&context.workspace.config)
+    Config::parse(&context.workspace.config)
 }
 
 fn binding_name(context: &WorkspaceContext) -> String {

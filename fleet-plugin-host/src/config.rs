@@ -1,4 +1,4 @@
-use crate::{WorkspacesError, WorkspacesErrorKind, bindings::fleet::providers::configuration};
+use crate::{WorkspacesError, WorkspacesErrorKind};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -7,27 +7,11 @@ pub struct Config {
     pub cwd: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Parameters {
-    cwd: Option<String>,
-}
-
 impl Config {
-    pub fn load(parameters: &str) -> Result<Self, WorkspacesError> {
-        Self::parse(&configuration::get(), parameters)
-    }
-
-    fn parse(config: &str, parameters: &str) -> Result<Self, WorkspacesError> {
-        let mut config: Self = serde_json::from_str(config).map_err(|error| {
+    pub fn parse(parameters: &str) -> Result<Self, WorkspacesError> {
+        let mut config: Self = serde_json::from_str(parameters).map_err(|error| {
             crate::error(WorkspacesErrorKind::InvalidConfiguration, error.to_string())
         })?;
-        let parameters: Parameters = serde_json::from_str(parameters).map_err(|error| {
-            crate::error(WorkspacesErrorKind::InvalidConfiguration, error.to_string())
-        })?;
-        if let Some(cwd) = parameters.cwd {
-            config.cwd = cwd;
-        }
         config.cwd = config.cwd.replace('\\', "/");
         let absolute =
             config.cwd.starts_with('/') || config.cwd.as_bytes().get(1..3) == Some(b":/");
@@ -66,21 +50,25 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parse_applies_directory_override() {
-        let config = json!({
-            "cwd": "/project",
-        })
-        .to_string();
+    fn parse_requires_a_directory() {
+        let error = Config::parse("{}").unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            WorkspacesErrorKind::InvalidConfiguration
+        ));
+    }
+
+    #[test]
+    fn parse_normalizes_directory() {
         let parameters = json!({
             "cwd": "/project/src/",
         })
         .to_string();
 
-        let default = Config::parse(&config, "{}").unwrap();
-        let overridden = Config::parse(&config, &parameters).unwrap();
+        let config = Config::parse(&parameters).unwrap();
 
-        assert_eq!(default.cwd, "/project");
-        assert_eq!(overridden.cwd, "/project/src");
+        assert_eq!(config.cwd, "/project/src");
     }
 
     #[test]
@@ -90,7 +78,7 @@ mod tests {
         })
         .to_string();
 
-        let config = Config::parse(&config, "{}").unwrap();
+        let config = Config::parse(&config).unwrap();
 
         assert_eq!(config.cwd, "C:/");
     }
@@ -103,7 +91,7 @@ mod tests {
             })
             .to_string();
 
-            let error = Config::parse(&config, "{}").unwrap_err();
+            let error = Config::parse(&config).unwrap_err();
 
             assert!(matches!(
                 error.kind,

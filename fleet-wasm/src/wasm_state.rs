@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials,
+    WasmCredentials, WasmWorkspaceHost,
     bindings::{configuration, credentials},
 };
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 pub struct WasmState {
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
+    workspace_host: Option<WasmWorkspaceHost>,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -20,6 +21,7 @@ impl WasmState {
         config: Arc<str>,
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
+        workspace_host: Option<WasmWorkspaceHost>,
     ) -> Self {
         let mut wasi = WasiCtx::default();
         *wasi.filesystem() = filesystem;
@@ -27,10 +29,15 @@ impl WasmState {
         Self {
             config,
             credentials,
+            workspace_host,
             wasi,
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
         }
+    }
+
+    pub fn workspace_host(&self) -> Option<WasmWorkspaceHost> {
+        self.workspace_host.clone()
     }
 
     pub const fn table(&mut self) -> &mut ResourceTable {
