@@ -55,7 +55,9 @@ impl Default for OpenAiConfig {
 ///
 /// Commentary and token limit continuations are handled within each response.
 /// Compaction retains provider state for later requests. If standalone compaction is not
-/// authorized, a streaming request performs compaction with tools disabled.
+/// authorized, a streaming request stops at the first completed checkpoint. This fallback
+/// uses the provider's default compaction instructions. Its token usage is unavailable
+/// and is reported as zero.
 pub struct OpenAiModels<H, C, B = NoBlobs> {
     blobs: B,
     client: Client<H, C>,
@@ -1204,25 +1206,23 @@ mod tests {
     }
 
     #[test]
-    fn compact_falls_back_to_streaming_without_refreshing_credentials() {
+    fn compact_preserves_the_request_when_falling_back_to_streaming() {
         let checkpoint = json!({
             "type": "compaction",
-            "id": "cmp_latest",
-            "encrypted_content": "latest-context",
+            "id": "cmp_first",
+            "encrypted_content": "original-context",
         });
-        let summary = message("Continue with the tests.", Some("final_answer"));
         let http = TestHttp::new([
             rejected_compaction(),
             response(
                 &[
+                    checkpoint.clone(),
+                    message("The task is finished.", Some("final_answer")),
                     json!({
                         "type": "compaction",
-                        "id": "cmp_previous",
-                        "encrypted_content": "previous-context",
+                        "id": "cmp_later",
+                        "encrypted_content": "later-context",
                     }),
-                    message("Earlier summary.", Some("commentary")),
-                    checkpoint.clone(),
-                    summary.clone(),
                 ],
                 false,
             ),
@@ -1267,9 +1267,9 @@ mod tests {
         assert_eq!(
             compacted.usage,
             ModelUsage {
-                input: 8,
-                output: 3,
-                cache_read: 4,
+                input: 0,
+                output: 0,
+                cache_read: 0,
                 cache_write: 0,
             }
         );
@@ -1284,62 +1284,16 @@ mod tests {
         assert_eq!(streaming["instructions"], generate["instructions"]);
         assert_eq!(streaming["tools"], generate["tools"]);
         assert_eq!(streaming["reasoning"], generate["reasoning"]);
-        assert_eq!(streaming["input"][0], compact["input"][0]);
-        assert!(
-            streaming["input"][1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("Keep the test commands.")
-        );
-        assert_eq!(streaming["tool_choice"], "none");
+        assert_eq!(streaming["input"], compact["input"]);
+        assert!(streaming.get("tool_choice").is_none());
         assert_eq!(
             streaming["context_management"][0]["compact_threshold"],
             1024
         );
         assert_eq!(streaming["store"], false);
-        assert_eq!(generate["input"], json!([checkpoint, summary]));
+        assert_eq!(generate["input"], json!([checkpoint]));
         assert!(generate.get("context_management").is_none());
         assert!(generate.get("tool_choice").is_none());
-    }
-
-    #[test]
-    fn compact_uses_a_portable_summary_when_no_checkpoint_is_emitted() {
-        let http = TestHttp::new([
-            json_response(
-                StatusCode::FORBIDDEN,
-                &json!({
-                    "error": {
-                        "code": "subscription_sharing_route_not_supported",
-                    },
-                }),
-            ),
-            response(&[message("The code word is amber.", None)], false),
-            response(&[message("amber", None)], false),
-        ]);
-        let models = models(http.clone());
-        let mut context = context();
-        let input = [ModelInput::User(vec![ContentBlock::Text(
-            "Remember amber.".into(),
-        )])];
-
-        let compacted =
-            futures_executor::block_on(models.compact(&context, None, &input, None)).unwrap();
-        let ModelInput::Compaction(_, state) = &compacted.input[0] else {
-            panic!("expected compaction");
-        };
-        assert_eq!(state.content.as_deref(), Some("The code word is amber."));
-        assert_eq!(state.redacted_content, None);
-        context.model.name = "another-model".into();
-        futures_executor::block_on(
-            models
-                .generate(&context, None, &compacted.input)
-                .try_collect::<Vec<_>>(),
-        )
-        .unwrap();
-
-        let requests = http.requests();
-        let generate: Value = serde_json::from_slice(requests[2].body()).unwrap();
-        assert_eq!(generate["input"][0]["content"], "The code word is amber.");
     }
 
     #[test]
@@ -1384,7 +1338,24 @@ mod tests {
     fn compact_rejects_incomplete_and_unsafe_streamed_output() {
         for response in [
             sse(&[]),
-            response(&[message("Partial summary.", None)], true),
+            sse(&[json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "partial-context",
+                },
+            })]),
+            response(
+                &[
+                    message("The task is finished.", None),
+                    json!({
+                        "type": "compaction",
+                        "encrypted_content": "later-context",
+                    }),
+                ],
+                false,
+            ),
             response(
                 &[json!({
                     "type": "function_call",
@@ -1404,15 +1375,20 @@ mod tests {
             ),
             response(
                 &[json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{
-                        "type": "refusal",
-                        "refusal": "No.",
-                    }],
+                    "type": "compaction",
+                    "encrypted_content": "partial-context",
+                    "status": "incomplete",
                 })],
                 false,
             ),
+            sse(&[json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "later-context",
+                },
+            })]),
             sse(&[json!({
                 "type": "response.completed",
                 "response": {
@@ -1452,13 +1428,20 @@ mod tests {
     }
 
     #[test]
-    fn compact_preserves_streamed_items_without_repeated_output() {
+    fn compact_returns_a_checkpoint_without_waiting_for_response_completion() {
         let checkpoint = json!({
             "type": "compaction",
             "encrypted_content": "opaque-context",
         });
         let models = models(TestHttp::new([
-            rejected_compaction(),
+            json_response(
+                StatusCode::FORBIDDEN,
+                &json!({
+                    "error": {
+                        "code": "subscription_sharing_route_not_supported",
+                    },
+                }),
+            ),
             sse(&[
                 json!({
                     "type": "response.output_item.added",
@@ -1473,12 +1456,10 @@ mod tests {
                     "item": checkpoint,
                 }),
                 json!({
-                    "type": "response.completed",
+                    "type": "response.failed",
                     "response": {
-                        "output": [],
-                        "usage": {
-                            "input_tokens": 100,
-                            "output_tokens": 20,
+                        "error": {
+                            "code": "server_error",
                         },
                     },
                 }),
@@ -1494,7 +1475,7 @@ mod tests {
         };
         let state: Value = serde_json::from_str(state.redacted_content.as_ref().unwrap()).unwrap();
         assert_eq!(state["output"], json!([checkpoint]));
-        assert_eq!(compacted.usage.output, 20);
+        assert_eq!(compacted.usage.output, 0);
     }
 
     #[test]
