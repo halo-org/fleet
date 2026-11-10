@@ -176,9 +176,13 @@ fn consume_messages_prioritizes_steering_and_preserves_queue_order() {
             .await
             .unwrap_err();
         assert_matches!(error, StoreError::Conflict(_));
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert!(state.has_pending_messages);
 
         let consumed = store.consume_messages(agent.id, None, true).await.unwrap();
         assert!(consumed);
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert!(state.has_pending_messages);
         let consumed = store
             .consume_messages(agent.id, Some(1.into()), false)
             .await
@@ -194,6 +198,8 @@ fn consume_messages_prioritizes_steering_and_preserves_queue_order() {
             .await
             .unwrap();
         assert!(consumed);
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert!(!state.has_pending_messages);
         let consumed = store
             .consume_messages(agent.id, Some(3.into()), true)
             .await

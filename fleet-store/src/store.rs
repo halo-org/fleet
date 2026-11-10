@@ -330,6 +330,7 @@ impl RuntimeStore for Store {
                         latest_event: agent.latest_event.map(Into::into),
                         parked_at: agent.parked_at.map(Into::into),
                         interrupt_intent: agent.interrupt_intent,
+                        has_pending_messages: agent.pending_messages != 0,
                     }))
             })
             .await

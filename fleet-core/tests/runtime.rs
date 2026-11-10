@@ -3,7 +3,8 @@
 use core::assert_matches;
 use fleet_core::{
     Agent, ClientStore as _, ClientStoreErrorKind, Configured, ContentBlock, Error as _,
-    EventPayload, JsonObject, Message, MessageMode, ModelOutput, RoleName, TurnEnd,
+    EventPayload, JsonObject, Message, MessageMode, ModelOutput, ModelProvenance, ModelResponse,
+    ModelUsage, RoleName, RuntimeStore as _, TurnEnd,
 };
 use fleet_simulator::{Scheduler, Simulator};
 use std::collections::{BTreeMap, BTreeSet};
@@ -166,6 +167,86 @@ fn run_finishes_steering_turn_before_queued_message() {
                 (steering_b.id, false),
                 (queued.id, true)
             ]
+        );
+        assert_eq!(snapshot.pending_messages, []);
+    }
+}
+
+#[test]
+fn run_defers_compaction_after_an_interrupt_until_a_message_arrives() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let store = simulator.store.partition(partition);
+        let agent = agent(simulator.roles.role_names()[0].clone());
+        let first_message = message(0, MessageMode::Queue);
+        let next_message = message(1, MessageMode::Queue);
+        let response = ModelResponse {
+            output: vec![ModelOutput::Text("Done".into())],
+            usage: ModelUsage {
+                input: u32::MAX,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            provenance: ModelProvenance {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            continuation_token: None,
+        };
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&first_message))
+                .await
+                .unwrap();
+            store.consume_messages(agent.id, None, true).await.unwrap();
+            store
+                .append_model_response(agent.id, 0.into(), true, &response)
+                .await
+                .unwrap();
+            simulator
+                .store
+                .interrupt_agent("interrupt", agent.id, None)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_eq!(snapshot.events.len(), 4);
+        assert_eq!(
+            snapshot.events[3].payload,
+            EventPayload::TurnEnd(TurnEnd::Interrupted)
+        );
+        assert_eq!(snapshot.parked_at, Some(3.into()));
+        assert!(!snapshot.interrupt_intent);
+
+        scheduler.run(async {
+            simulator
+                .store
+                .send_message("send", agent.id, &next_message)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_matches!(
+            &snapshot.events[4].payload,
+            EventPayload::Compaction(compaction) if compaction.last_event == 3.into()
+        );
+        assert_eq!(
+            snapshot.events[5].payload,
+            EventPayload::Input(next_message.id, next_message.content)
         );
         assert_eq!(snapshot.pending_messages, []);
     }

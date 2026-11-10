@@ -33,6 +33,8 @@ pub struct AgentState {
     pub parked_at: Option<EventCursor>,
     /// Whether the agent should be interrupted.
     pub interrupt_intent: bool,
+    /// Whether the agent has pending messages.
+    pub has_pending_messages: bool,
 }
 
 // === Roles ===

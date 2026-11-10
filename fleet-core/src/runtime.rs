@@ -377,17 +377,18 @@ where
             return ReconcileAction::Wait;
         }
 
+        let is_parked = agent.parked_at == agent.latest_event;
+
+        if is_parked && !agent.has_pending_messages {
+            return ReconcileAction::Wait;
+        }
+
         let Some(latest_event) = agent.latest_event else {
             return self.reconcile_parked(agent_id, None).await;
         };
 
-        self.reconcile_conversation(
-            agent_id,
-            state,
-            latest_event,
-            agent.parked_at == Some(latest_event),
-        )
-        .await
+        self.reconcile_conversation(agent_id, state, latest_event, is_parked)
+            .await
     }
 
     async fn reconcile_tool_calls(

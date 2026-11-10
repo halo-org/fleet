@@ -1275,6 +1275,7 @@ impl AgentRecord {
             latest_event: self.latest_event(),
             parked_at: self.parked_at,
             interrupt_intent: self.interrupt_intent,
+            has_pending_messages: !self.pending_messages.is_empty(),
         }
     }
 
