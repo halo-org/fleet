@@ -1,0 +1,7 @@
+package fleet:test-worker@0.0.0;
+
+world plugin {
+    import fleet:providers/workers@0.0.0;
+    export fleet:providers/prompts@0.0.0;
+    export fleet:providers/worker@0.0.0;
+}

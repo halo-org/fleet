@@ -34,7 +34,8 @@ interface process {
 
     /// A child process owned by the guest.
     ///
-    /// Dropping this resource requests termination of the child, not its descendants.
+    /// Dropping this resource requests termination. For spawn this affects only the
+    /// child. For spawn-group it also affects processes remaining in its group.
     resource child {
         /// Writes standard input and closes it when the stream ends.
         ///
@@ -48,19 +49,29 @@ interface process {
         stderr: func() -> result<output, string>;
 
         /// Waits for the child to exit. Repeated calls return the same result.
+        /// For spawn-group, requests termination of remaining group members before returning.
         ///
         /// Closes standard input if write-stdin has not been called.
         /// Read output concurrently to prevent full pipes from blocking the child.
         wait: async func() -> result<exit-status, string>;
 
-        /// Requests forced termination of the child, not its descendants.
+        /// Requests forced termination of the child and its owned group, if any.
         ///
-        /// Wait for completion separately. An already exited child is unchanged.
+        /// Wait for completion separately. Repeated calls are safe.
         kill: func() -> result<_, string>;
     }
 
     /// Starts a program with piped standard input, output and error.
     spawn: func(command: command) -> result<child, string>;
+
+    /// Starts a program in an owned process group with piped standard streams.
+    ///
+    /// Kill, resource drop and wait after child exit request termination of remaining group members.
+    /// Cleanup does not depend on the guest running, including during forced worker shutdown.
+    /// The leader is not reaped until the group is signaled, preventing group ID reuse during cleanup.
+    /// Descendants must stay in the group. This is not containment for daemonizing programs
+    /// or a security boundary. Supported on Linux and macOS; other platforms return an error.
+    spawn-group: func(command: command) -> result<child, string>;
 }
 
 /// A host that runs programs.

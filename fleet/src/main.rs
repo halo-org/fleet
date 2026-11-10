@@ -111,13 +111,16 @@ async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_configuration(config, roles.clone());
     let agents = fleet.run(&roles, &providers, &providers);
 
-    run(
+    let result = run(
         fleet.clone(),
         agents,
         address,
         Some(Duration::from_secs(10)),
     )
-    .await?;
+    .await;
+    providers.shutdown().await;
+    drop(providers);
+    result?;
     Ok(())
 }
 

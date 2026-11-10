@@ -10,6 +10,8 @@ use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
 pub struct WasmCapabilities {
     /// Blobs available to model and tool calls.
     pub blobs: Option<WasmBlobs>,
+    /// Whether private workers may outlive individual provider calls.
+    pub workers: bool,
     /// Whether outgoing HTTP requests are allowed.
     pub http: bool,
     /// Directories available to the provider.

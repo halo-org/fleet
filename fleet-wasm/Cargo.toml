@@ -17,11 +17,16 @@ fleet-kit.workspace = true
 futures-channel = { workspace = true, features = ["std", "sink"] }
 futures-util = { workspace = true, features = ["std", "sink"] }
 serde_json = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["io-util", "process"] }
-wasmtime = { workspace = true, features = ["component-model", "component-model-async", "cranelift", "pooling-allocator", "runtime", "std"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+wasmtime = { workspace = true, features = ["async", "component-model", "component-model-async", "cranelift", "pooling-allocator", "runtime", "std"] }
 wasmtime-wasi = { workspace = true, features = ["p3"] }
 wasmtime-wasi-http = { workspace = true, features = ["default-send-request", "p3"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { workspace = true, features = ["process", "std"] }
+tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
 fleet-store = { workspace = true, features = ["blobs"] }
 tokio = { workspace = true, features = ["rt", "time"] }
+wit-component = { version = "0.262.0", default-features = false }

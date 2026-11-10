@@ -1,0 +1,89 @@
+/// Private workers owned by this configured provider.
+///
+/// Workers run another instance of the same component. They are not separate providers.
+/// They receive provider capabilities, but no blobs or access to start more workers.
+interface workers {
+    /// Received bytes and the result of reading them.
+    record output {
+        data: stream<u8>,
+        %result: future<result<_, string>>,
+    }
+
+    /// One bounded, bidirectional connection to a worker.
+    ///
+    /// Dropping either endpoint closes the connection and wakes closed, including when
+    /// its instance is dropped. Ending a byte stream only closes that direction.
+    /// Closing a connection does not stop the worker or prove an operation was rolled back.
+    resource connection {
+        /// Sends bytes until the stream ends. May be called once.
+        ///
+        /// Completion means the bytes entered the transport, not that the peer processed them.
+        write: func(data: stream<u8>) -> result<future<result<_, string>>, string>;
+
+        /// Takes the incoming byte stream. May be called once.
+        read: func() -> result<output, string>;
+
+        /// Waits for either endpoint to be dropped or the worker to stop.
+        ///
+        /// Reports worker failure if the connection is still open when the host observes it.
+        /// Independent of byte stream completion. Success does not acknowledge an operation.
+        closed: async func() -> result<_, string>;
+    }
+
+    /// Connections admitted to one worker incarnation.
+    ///
+    /// Dropping the listener stops admission and requests worker shutdown.
+    resource listener {
+        /// Accepts the next connection, or none when retiring or shutting down.
+        accept: async func() -> option<connection>;
+
+        /// Stops admission if no connections remain open.
+        ///
+        /// Returns false while a connection is open, otherwise true. The worker must
+        /// first finish any work that outlived its connections. Retirement is atomic
+        /// with connect. Return from run after cleanup.
+        try-retire: func() -> bool;
+
+        /// Waits for retirement or provider shutdown. Finish cleanup and return from run.
+        closed: async func();
+    }
+
+    /// Connects to a provider-private key, starting its worker if needed.
+    ///
+    /// Concurrent calls share startup. Initialization must match the existing worker.
+    /// A retiring worker finishes before a replacement starts. A successful connection
+    /// does not guarantee initialization succeeded; startup failures close it with an error.
+    ///
+    /// Workers are not durable. The same key may reach a new incarnation after a failure
+    /// or retirement. Applications must validate their state and must not replay uncertain
+    /// operations blindly. There is no framing, acknowledgement or retry protocol.
+    ///
+    /// Keys contain 1 to 256 bytes. Initialization is at most 64 KiB. A provider can have
+    /// at most 64 workers and 64 connections. Each direction buffers at most 64 KiB.
+    connect: async func(key: string, initialization: list<u8>) -> result<connection, string>;
+}
+
+/// The private worker entrypoint of a provider component.
+interface worker {
+    use workers.{listener};
+
+    /// Runs until retired, stopped or failed.
+    ///
+    /// Keep processing I/O and connections between provider calls. Idle retirement is
+    /// the worker's policy. Listener closure requests shutdown; the host allows five
+    /// seconds for cleanup before dropping the instance. Returning closes all connections.
+    /// Workers have a 64 MiB limit per linear memory. No state survives host shutdown.
+    run: async func(initialization: list<u8>, incoming: listener) -> result<_, string>;
+}
+
+/// A component using private workers.
+world worker-host {
+    import workers;
+}
+
+/// A component that can run private workers.
+world worker-provider {
+    import configuration;
+    import workers;
+    export worker;
+}

@@ -1,0 +1,20 @@
+[package]
+name = "fleet-wasm-test-worker"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+futures-util = { workspace = true, features = ["std"] }
+wit-bindgen = { workspace = true, features = ["async", "async-spawn", "macros", "realloc", "std"] }

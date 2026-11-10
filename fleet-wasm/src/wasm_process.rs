@@ -1,6 +1,9 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::wasm_process_group::ProcessGroup;
 use crate::{WasmState, bindings::process};
 use bytes::BytesMut;
 use core::{
+    cfg_select,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -11,7 +14,7 @@ use futures_util::{
 };
 use std::{
     io,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -29,12 +32,61 @@ use wasmtime::{
 // === Processes ===
 
 pub struct WasmProcess {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<Process>>,
     exit: Shared<BoxFuture<'static, Result<process::ExitStatus, String>>>,
+}
+
+enum Process {
+    Child(Child),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Group(ProcessGroup),
+}
+
+impl Process {
+    const fn child(&mut self) -> &mut Child {
+        match self {
+            Self::Child(child) => child,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Group(group) => group.child(),
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Child(child) => child.start_kill(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Group(group) => group.kill(),
+        }
+    }
+
+    fn poll_wait(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<ExitStatus>> {
+        match self {
+            Self::Child(child) => core::pin::pin!(child.wait()).poll(cx),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Group(group) => group.poll_wait(cx),
+        }
+    }
 }
 
 impl WasmProcess {
     fn spawn(command: process::Command) -> io::Result<Self> {
+        Ok(Self::new(Process::Child(Self::command(command).spawn()?)))
+    }
+
+    fn spawn_group(command: process::Command) -> io::Result<Self> {
+        cfg_select! {
+            any(target_os = "linux", target_os = "macos") => {
+                let group = ProcessGroup::spawn(Self::command(command))?;
+                Ok(Self::new(Process::Group(group)))
+            }
+            _ => {
+                drop(command);
+                Err(io::Error::new(io::ErrorKind::Unsupported, "process groups are not supported on this platform"))
+            }
+        }
+    }
+
+    fn command(command: process::Command) -> Command {
         let mut builder = Command::new(command.program);
         builder
             .args(command.args)
@@ -55,16 +107,17 @@ impl WasmProcess {
             };
         }
 
-        let child = Arc::new(Mutex::new(builder.spawn()?));
+        builder
+    }
+
+    fn new(child: Process) -> Self {
+        let child = Arc::new(Mutex::new(child));
         let waiting_child = child.clone();
         let exit = poll_fn(move |cx| {
-            core::pin::pin!(
-                waiting_child
-                    .lock()
-                    .expect("process lock is not poisoned")
-                    .wait()
-            )
-            .poll(cx)
+            waiting_child
+                .lock()
+                .expect("process lock is not poisoned")
+                .poll_wait(cx)
         })
         .map(|result| {
             result
@@ -78,14 +131,14 @@ impl WasmProcess {
         .boxed()
         .shared();
 
-        Ok(Self { child, exit })
+        Self { child, exit }
     }
 
     fn kill(&self) -> io::Result<()> {
         self.child
             .lock()
             .expect("process lock is not poisoned")
-            .start_kill()
+            .kill()
     }
 }
 
@@ -111,6 +164,16 @@ impl process::HostWithStore<WasmState> for HasSelf<WasmState> {
             Err(error) => Ok(Err(error.to_string())),
         }
     }
+
+    fn spawn_group(
+        mut store: Access<WasmState, Self>,
+        command: process::Command,
+    ) -> wasmtime::Result<Result<Resource<WasmProcess>, String>> {
+        match WasmProcess::spawn_group(command) {
+            Ok(process) => Ok(Ok(store.get().table().push(process)?)),
+            Err(error) => Ok(Err(error.to_string())),
+        }
+    }
 }
 
 impl process::HostChildWithStore<WasmState> for HasSelf<WasmState> {
@@ -126,6 +189,7 @@ impl process::HostChildWithStore<WasmState> for HasSelf<WasmState> {
             .child
             .lock()
             .expect("process lock is not poisoned")
+            .child()
             .stdin
             .take();
         let Some(stdin) = stdin else {
@@ -157,6 +221,7 @@ impl process::HostChildWithStore<WasmState> for HasSelf<WasmState> {
             .child
             .lock()
             .expect("process lock is not poisoned")
+            .child()
             .stdout
             .take();
         let Some(stdout) = stdout else {
@@ -176,6 +241,7 @@ impl process::HostChildWithStore<WasmState> for HasSelf<WasmState> {
             .child
             .lock()
             .expect("process lock is not poisoned")
+            .child()
             .stderr
             .take();
         let Some(stderr) = stderr else {
@@ -353,7 +419,8 @@ mod tests {
         run(async {
             let process = WasmProcess::spawn(command("cat; printf error >&2; exit 7")).unwrap();
             let (mut stdin, mut stdout, mut stderr) = {
-                let mut child = process.child.lock().unwrap();
+                let mut process = process.child.lock().unwrap();
+                let child = process.child();
                 (
                     child.stdin.take().unwrap(),
                     child.stdout.take().unwrap(),
@@ -389,10 +456,51 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn dropping_a_process_group_terminates_descendants() {
+        run(async {
+            let process =
+                WasmProcess::spawn_group(command("sleep 60 & printf ready; wait")).unwrap();
+            let mut stdout = process.child.lock().unwrap().child().stdout.take().unwrap();
+            let exit = process.exit.clone();
+            let mut ready = [0; 5];
+            stdout.read_exact(&mut ready).await.unwrap();
+
+            drop(process);
+            let exit = exit.await.unwrap();
+            let mut remaining = Vec::new();
+            stdout.read_to_end(&mut remaining).await.unwrap();
+
+            assert!(matches!(exit, process::ExitStatus::Terminated));
+            assert_eq!(remaining, b"");
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn waiting_for_a_process_group_cleans_up_after_its_leader_exits() {
+        run(async {
+            let process =
+                WasmProcess::spawn_group(command("sleep 60 & printf ready; exit 7")).unwrap();
+            let mut stdout = process.child.lock().unwrap().child().stdout.take().unwrap();
+            let mut output = Vec::new();
+
+            let (exit, read) = join(process.exit.clone(), stdout.read_to_end(&mut output)).await;
+            let exit = exit.unwrap();
+            read.unwrap();
+            process.kill().unwrap();
+            drop(process);
+
+            assert!(matches!(exit, process::ExitStatus::Code(7)));
+            assert_eq!(output, b"ready");
+        });
+    }
+
+    #[test]
     fn drop_terminates_child() {
         run(async {
             let process = WasmProcess::spawn(command("read value")).unwrap();
-            let stdin = process.child.lock().unwrap().stdin.take().unwrap();
+            let stdin = process.child.lock().unwrap().child().stdin.take().unwrap();
             let mut exit = core::pin::pin!(process.exit.clone());
 
             assert!(exit.as_mut().now_or_never().is_none());

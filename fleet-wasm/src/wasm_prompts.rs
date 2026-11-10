@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
+    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
     bindings::{prompts::PromptProviderPre, types},
 };
 use fleet_core::{JsonObject, Prompt, PromptContext, PromptResponse};
@@ -15,6 +15,7 @@ pub struct WasmPrompts {
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
 }
 
 impl WasmPrompts {
@@ -24,6 +25,7 @@ impl WasmPrompts {
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
         workspace_host: Option<WasmWorkspaceHost>,
+        workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: PromptProviderPre::new(instance).map_err(WasmError::runtime)?,
@@ -31,19 +33,23 @@ impl WasmPrompts {
             filesystem,
             credentials,
             workspace_host,
+            workers,
         })
     }
 
+    fn store(&self) -> Store<WasmState> {
+        WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .into_store(self.instance.engine())
+    }
+
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Prompt>, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -70,15 +76,7 @@ impl WasmPrompts {
         context: &PromptContext,
         input: &JsonObject,
     ) -> Result<PromptResponse, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)

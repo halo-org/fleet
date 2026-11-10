@@ -21,7 +21,8 @@ fn state(blobs: Option<WasmBlobs>) -> Store<WasmState> {
     config.wasm_component_model_async(true);
     Store::new(
         &Engine::new(&config).unwrap(),
-        WasmState::new("{}".into(), WasiFilesystemCtx::default(), None, None).with_blobs(blobs),
+        WasmState::new("{}".into(), WasiFilesystemCtx::default(), None, None, None)
+            .with_blobs(blobs),
     )
 }
 

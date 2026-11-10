@@ -66,6 +66,8 @@ pub struct PluginCapabilities {
     #[serde(default)]
     process: bool,
     #[serde(default)]
+    workers: bool,
+    #[serde(default)]
     credentials: bool,
     #[serde(default)]
     workspaces: Vec<String>,
@@ -174,6 +176,7 @@ pub async fn load(
                 })
                 .collect(),
             process: capabilities.process,
+            workers: capabilities.workers,
             credentials: capabilities
                 .credentials
                 .then(|| WasmCredentials::new(authentication.scope(name))),
@@ -244,6 +247,10 @@ fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
 // === Locking ===
 
 /// Resolves remote plugins and writes the lockfile.
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the WASM compiler is reused across the plugin loop"
+)]
 pub async fn lock(
     config: &Config,
     directory: &Path,

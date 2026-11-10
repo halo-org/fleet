@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
+    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
     bindings::{tools::ToolProviderPre, types},
 };
 use fleet_core::{JsonObject, Tool, ToolContext, ToolOutput};
@@ -16,6 +16,7 @@ pub struct WasmTools {
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
 }
 
 impl WasmTools {
@@ -25,6 +26,7 @@ impl WasmTools {
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
         workspace_host: Option<WasmWorkspaceHost>,
+        workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             blobs: None,
@@ -33,6 +35,7 @@ impl WasmTools {
             filesystem,
             credentials,
             workspace_host,
+            workers,
         })
     }
 
@@ -40,16 +43,19 @@ impl WasmTools {
         self.blobs = blobs;
     }
 
+    fn store(&self) -> Store<WasmState> {
+        WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .into_store(self.instance.engine())
+    }
+
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Tool>, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -77,15 +83,7 @@ impl WasmTools {
         is_retry: bool,
         input: &JsonObject,
     ) -> Result<ToolOutput, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -123,15 +121,7 @@ impl WasmTools {
         context: &ToolContext,
         input: &JsonObject,
     ) -> Result<ToolOutput, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)

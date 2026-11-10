@@ -1,6 +1,6 @@
 use crate::{
     WasmCapabilities, WasmCredentials, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools,
-    WasmWorkspaceHost, WasmWorkspaces,
+    WasmWorkers, WasmWorkspaceHost, WasmWorkspaces,
     bindings::authentication::{
         AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
     },
@@ -20,8 +20,7 @@ use std::{
     collections::{BTreeMap, btree_map::Entry},
     sync::Arc,
 };
-use wasmtime::Store;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, InstancePre, Linker};
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// Named WebAssembly providers.
@@ -46,6 +45,7 @@ pub struct WasmProvider {
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
 }
 
 impl WasmRegistry {
@@ -82,6 +82,15 @@ impl WasmRegistry {
         }
     }
 
+    /// Stops private workers and waits for their bounded cleanup.
+    ///
+    /// New worker connections are rejected after shutdown begins. Call before dropping
+    /// the registry for graceful shutdown. Dropping all provider owners, including
+    /// in-flight calls, aborts workers instead.
+    pub async fn shutdown(&self) {
+        futures_util::future::join_all(self.providers.values().map(WasmProvider::shutdown)).await;
+    }
+
     fn provider<'a>(&self, name: &'a str) -> Option<(&'a str, &'a str, &WasmProvider)> {
         let (namespace, name) = name.split_once(':')?;
         if name.is_empty() {
@@ -96,6 +105,7 @@ impl WasmProvider {
     pub(crate) fn new(
         component: &Component,
         linker: &Linker<WasmState>,
+        worker: Option<InstancePre<WasmState>>,
         config: &JsonObject,
         capabilities: WasmCapabilities,
     ) -> Result<Self, WasmError> {
@@ -107,6 +117,17 @@ impl WasmProvider {
         let workspace_host = capabilities.workspaces.clone();
         let blob_host = capabilities.blobs.clone();
         let filesystem = capabilities.open_filesystem()?;
+        let workers = worker
+            .map(|instance| {
+                WasmWorkers::new(
+                    instance,
+                    config.clone(),
+                    filesystem.clone(),
+                    credentials.clone(),
+                    workspace_host.clone(),
+                )
+            })
+            .transpose()?;
 
         let mut models = component
             .get_export_index(None, "fleet:providers/models@0.0.0")
@@ -117,6 +138,7 @@ impl WasmProvider {
                     filesystem.clone(),
                     credentials.clone(),
                     workspace_host.clone(),
+                    workers.clone(),
                 )
             })
             .transpose()?;
@@ -129,6 +151,7 @@ impl WasmProvider {
                     filesystem.clone(),
                     credentials.clone(),
                     workspace_host.clone(),
+                    workers.clone(),
                 )
             })
             .transpose()?;
@@ -147,6 +170,7 @@ impl WasmProvider {
                     filesystem.clone(),
                     credentials.clone(),
                     workspace_host.clone(),
+                    workers.clone(),
                 )
             })
             .transpose()?;
@@ -159,6 +183,7 @@ impl WasmProvider {
                     filesystem.clone(),
                     credentials.clone(),
                     workspace_host.clone(),
+                    workers.clone(),
                 )
             })
             .transpose()?;
@@ -181,7 +206,17 @@ impl WasmProvider {
             filesystem,
             credentials,
             workspace_host,
+            workers,
         })
+    }
+
+    /// Stops this provider's private workers and rejects new worker connections.
+    ///
+    /// Clones share the same workers. Ordinary provider calls remain single-use.
+    pub async fn shutdown(&self) {
+        if let Some(workers) = &self.workers {
+            workers.shutdown().await;
+        }
     }
 
     /// Returns the connections used by this provider.
@@ -196,15 +231,14 @@ impl WasmProvider {
         let Some(instance) = &self.authentication else {
             return Ok(Vec::new());
         };
-        let mut store = Store::new(
-            instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .into_store(instance.engine());
         let instance = instance
             .instantiate_async(&mut store)
             .await
@@ -498,6 +532,7 @@ mod tests {
             filesystem: WasiFilesystemCtx::default(),
             credentials: None,
             workspace_host: None,
+            workers: None,
         }
     }
 

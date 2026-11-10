@@ -45,6 +45,33 @@ pub mod process_host {
 
 pub use process_host::fleet::providers::process;
 
+pub mod worker_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "worker-host",
+        imports: { default: store | trappable },
+        with: {
+            "fleet:providers/workers.connection": crate::wasm_worker_connection::WasmWorkerConnection,
+            "fleet:providers/workers.listener": crate::wasm_workers::WasmWorkerListener,
+        },
+    });
+}
+
+pub use worker_host::fleet::providers::workers;
+
+pub mod worker {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "worker-provider",
+        require_store_data_send: true,
+        imports: { default: store | trappable },
+        with: {
+            "fleet:providers/configuration": super::configuration,
+            "fleet:providers/workers": super::workers,
+        },
+    });
+}
+
 pub mod workspace_host {
     wasmtime::component::bindgen!({
         path: "wit",

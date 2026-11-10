@@ -51,6 +51,27 @@ Local component paths and host mount paths are relative to the config directory.
 The same compiled component is shared by providers using the same plugin.
 Restart Fleet after changing plugin or provider configuration.
 
+Approve `"workers": true` in a plugin's capabilities to let it retain private WASM
+workers between calls. The component must import `fleet:providers/workers@0.0.0`
+and export `fleet:providers/worker@0.0.0` alongside its normal provider interfaces.
+Workers belong to a configured provider, not to the compiled plugin or another
+namespace. Other plugins continue to use its normal interfaces.
+
+Workers receive approved static capabilities, but no blob access or ability to
+start nested workers. They have no automatic idle timeout; plugins may retire
+idle workers themselves. Fleet stops worker admission during shutdown and allows
+five seconds for cleanup before dropping their instances. Worker state does not
+survive a restart. See `fleet-wasm/wit/workers.wit` for the connection contract
+and resource limits. Ordinary calls run without fuel instrumentation; worker
+execution uses a separately compiled variant that yields for bounded shutdown.
+
+Plugins with process access can use `process.spawn-group` for SDKs or helpers
+that launch descendants. On Linux and macOS, resource drop and forced worker
+shutdown terminate processes remaining in that group. Waiting for the leader
+also terminates remaining group members before returning. Other platforms return
+an error rather than falling back to child-only cleanup. Descendants must not
+daemonize or leave the group. Existing `process.spawn` remains child-only.
+
 ## Remote plugins
 
 Replace a plugin's `path` with an HTTPS `url`. Run `fleet lock`

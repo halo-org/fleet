@@ -1,9 +1,12 @@
 use crate::{
-    WasmBlobs, WasmCredentials, WasmWorkspaceHost,
+    WasmBlobs, WasmCredentials, WasmWorkers, WasmWorkspaceHost,
     bindings::{configuration, credentials},
 };
 use std::sync::Arc;
-use wasmtime::component::{Accessor, HasSelf, ResourceTable};
+use wasmtime::{
+    Engine, Store, StoreLimits,
+    component::{Accessor, HasSelf, ResourceTable},
+};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView, filesystem::WasiFilesystemCtx};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
@@ -12,6 +15,8 @@ pub struct WasmState {
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
+    limits: StoreLimits,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -23,6 +28,7 @@ impl WasmState {
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
         workspace_host: Option<WasmWorkspaceHost>,
+        workers: Option<WasmWorkers>,
     ) -> Self {
         let mut wasi = WasiCtx::default();
         *wasi.filesystem() = filesystem;
@@ -32,10 +38,24 @@ impl WasmState {
             config,
             credentials,
             workspace_host,
+            workers,
+            limits: StoreLimits::default(),
             wasi,
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
         }
+    }
+
+    pub fn into_store(self, engine: &Engine) -> Store<Self> {
+        Store::new(engine, self)
+    }
+
+    pub fn workers(&self) -> Option<WasmWorkers> {
+        self.workers.clone()
+    }
+
+    pub const fn limits(&mut self) -> &mut StoreLimits {
+        &mut self.limits
     }
 
     pub fn blobs(&self) -> Option<WasmBlobs> {

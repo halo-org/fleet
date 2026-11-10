@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
+    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
     bindings::workspaces::{WorkspaceProviderPre, exports::fleet::providers::workspaces},
 };
 use fleet_kit::{Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceOutput, WorkspaceWrite};
@@ -15,6 +15,7 @@ pub struct WasmWorkspaces {
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
 }
 
 impl WasmWorkspaces {
@@ -24,6 +25,7 @@ impl WasmWorkspaces {
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
         workspace_host: Option<WasmWorkspaceHost>,
+        workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: WorkspaceProviderPre::new(instance).map_err(WasmError::runtime)?,
@@ -31,19 +33,23 @@ impl WasmWorkspaces {
             filesystem,
             credentials,
             workspace_host,
+            workers,
         })
     }
 
+    fn store(&self) -> Store<WasmState> {
+        WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .into_store(self.instance.engine())
+    }
+
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Workspace>, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -69,15 +75,7 @@ impl WasmWorkspaces {
         name: &str,
         context: &WorkspaceContext,
     ) -> Result<(), WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -103,15 +101,7 @@ impl WasmWorkspaces {
         path: &str,
         limit: u64,
     ) -> Result<Vec<u8>, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -141,15 +131,7 @@ impl WasmWorkspaces {
         context: &WorkspaceContext,
         file: &WorkspaceWrite,
     ) -> Result<(), WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -179,15 +161,7 @@ impl WasmWorkspaces {
         is_retry: bool,
         command: &WorkspaceCommand,
     ) -> Result<WorkspaceOutput, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = self.store();
         let instance = self
             .instance
             .instantiate_async(&mut store)

@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
+    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
     bindings::{
         models::{ModelProviderPre, exports::fleet::providers::models},
         types,
@@ -16,7 +16,7 @@ use futures_channel::{mpsc, oneshot};
 use futures_util::{Sink as _, Stream, StreamExt as _, future, stream};
 use std::sync::Arc;
 use wasmtime::{
-    Store, StoreContextMut,
+    StoreContextMut,
     component::{InstancePre, Source, StreamConsumer, StreamResult},
 };
 use wasmtime_wasi::filesystem::WasiFilesystemCtx;
@@ -32,6 +32,7 @@ pub struct WasmModels {
     filesystem: WasiFilesystemCtx,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
+    workers: Option<WasmWorkers>,
 }
 
 struct ResponseConsumer {
@@ -46,6 +47,7 @@ impl WasmModels {
         filesystem: WasiFilesystemCtx,
         credentials: Option<WasmCredentials>,
         workspace_host: Option<WasmWorkspaceHost>,
+        workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             blobs: None,
@@ -54,6 +56,7 @@ impl WasmModels {
             filesystem,
             credentials,
             workspace_host,
+            workers,
         })
     }
 
@@ -62,15 +65,14 @@ impl WasmModels {
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Model>, WasmError> {
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            ),
-        );
+        let mut store = WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .into_store(self.instance.engine());
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -103,16 +105,17 @@ impl WasmModels {
         let filesystem = self.filesystem.clone();
         let credentials = self.credentials.clone();
         let workspace_host = self.workspace_host.clone();
+        let workers = self.workers.clone();
         let context = types::ModelContext::new(name, context);
         let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
         let continuation = continuation.map(types::ModelContinuation::from);
         let input = input.iter().map(types::ModelInput::from).collect();
         let (sender, receiver) = mpsc::channel(0);
         let run = async move {
-            let mut store = Store::new(
-                instance.engine(),
-                WasmState::new(config, filesystem, credentials, workspace_host).with_blobs(blobs),
-            );
+            let mut store =
+                WasmState::new(config, filesystem, credentials, workspace_host, workers)
+                    .with_blobs(blobs)
+                    .into_store(instance.engine());
             let instance = instance
                 .instantiate_async(&mut store)
                 .await
@@ -172,16 +175,15 @@ impl WasmModels {
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, WasmError> {
         let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
-        let mut store = Store::new(
-            self.instance.engine(),
-            WasmState::new(
-                self.config.clone(),
-                self.filesystem.clone(),
-                self.credentials.clone(),
-                self.workspace_host.clone(),
-            )
-            .with_blobs(blobs),
-        );
+        let mut store = WasmState::new(
+            self.config.clone(),
+            self.filesystem.clone(),
+            self.credentials.clone(),
+            self.workspace_host.clone(),
+            self.workers.clone(),
+        )
+        .with_blobs(blobs)
+        .into_store(self.instance.engine());
         let instance = self
             .instance
             .instantiate_async(&mut store)

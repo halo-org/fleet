@@ -647,11 +647,21 @@ dependencies = [
  "fleet-store",
  "futures-channel",
  "futures-util",
+ "rustix",
  "serde_json",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-http",
+ "wit-component 0.262.0",
+]
+
+[[package]]
+name = "fleet-wasm-test-worker"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -2881,6 +2891,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b85a987ab61d365382d25c7d47e26edd48941b3bf6e3fbf76eff918bc71dab06"
 dependencies = [
  "bitflags",
+ "futures",
  "wit-bindgen-rust-macro",
 ]
 
