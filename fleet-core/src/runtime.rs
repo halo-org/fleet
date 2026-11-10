@@ -782,19 +782,16 @@ where
 
         loop {
             let result = if model_request.should_compact() {
-                self.models
-                    .compact(
-                        model_request.context(),
-                        model_request.continuation(),
-                        model_request.input(),
-                        compaction_instructions,
-                    )
-                    .await
-                    .map(ModelResult::Compaction)
-                    .map_err(|source| OperationError::CompactModelInput {
-                        model: agent_role.role.model.name.clone(),
-                        source,
-                    })
+                self.compact_model_input(
+                    agent_role.agent.id,
+                    latest_event,
+                    model_request.context(),
+                    model_request.continuation(),
+                    model_request.input(),
+                    compaction_instructions,
+                )
+                .await
+                .map(ModelResult::Compaction)
             } else {
                 self.generate_model_response(
                     agent_role.agent.id,
@@ -878,6 +875,41 @@ where
             model: context.model.name.clone(),
             latest_event,
         })
+    }
+
+    async fn compact_model_input(
+        &self,
+        agent_id: AgentId,
+        latest_event: EventCursor,
+        context: &ModelContext,
+        continuation: Option<&ModelContinuation>,
+        input: &[ModelInput],
+        instructions: Option<&str>,
+    ) -> Result<ModelCompactionResponse, OperationError<S::Error, R::Error, M::Error, T::Error>>
+    {
+        if let Err(source) = self
+            .store
+            .publish_compaction_started(agent_id, latest_event)
+            .await
+        {
+            self.error_handler
+                .handle_error(Self::error(
+                    Some(agent_id),
+                    OperationError::PublishCompactionStarted {
+                        model: context.model.name.clone(),
+                        source,
+                    },
+                ))
+                .await;
+        }
+
+        self.models
+            .compact(context, continuation, input, instructions)
+            .await
+            .map_err(|source| OperationError::CompactModelInput {
+                model: context.model.name.clone(),
+                source,
+            })
     }
 
     async fn append_model_result(

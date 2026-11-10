@@ -402,6 +402,25 @@ pub trait RuntimeStore {
         chunk: &ModelResponseChunk,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Reports that the runtime has started a compaction attempt.
+    ///
+    /// `input_cursor` identifies the event log position being compacted. The notification is
+    /// transient and does not become part of the event log or trigger runtime wakes. Repeated
+    /// notifications for the same cursor are harmless.
+    ///
+    /// An obsolete input cursor or a pending interrupt suppresses the notification. A later
+    /// committed event or response preview supersedes it. It may remain visible during retries and
+    /// does not establish that a provider request is still running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider fails to publish the notification.
+    fn publish_compaction_started(
+        &self,
+        agent_id: AgentId,
+        input_cursor: EventCursor,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Appends a model response to the agent's event log.
     ///
     /// The response supersedes any live preview for `expected_latest_event`. When `ends_turn` is
@@ -833,6 +852,14 @@ macro_rules! impl_runtime_store_for_pointer {
                 chunk: &ModelResponseChunk,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
                 (**self).publish_model_response_chunk(agent_id, input_cursor, sequence, chunk)
+            }
+
+            fn publish_compaction_started(
+                &self,
+                agent_id: AgentId,
+                input_cursor: EventCursor,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).publish_compaction_started(agent_id, input_cursor)
             }
 
             fn append_model_response(

@@ -157,6 +157,7 @@ struct StoreSimulatorConfig {
     park: WrapConfig,
     consume_messages: WrapConfig,
     publish_model_response_chunk: WrapConfig,
+    publish_compaction_started: WrapConfig,
     append_model_response: WrapConfig,
     append_compaction: WrapConfig,
     prepare_tool_call: WrapConfig,
@@ -519,6 +520,38 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 async {
                     self.store.mutate(|state| {
                         state.publish_model_response_chunk(agent_id, input_cursor, sequence, chunk)
+                    })
+                },
+            )
+            .await
+    }
+
+    async fn publish_compaction_started(
+        &self,
+        agent_id: AgentId,
+        input_cursor: EventCursor,
+    ) -> Result<(), Self::Error> {
+        self.store
+            .scheduler
+            .wrap(
+                &self.store.config.publish_compaction_started,
+                StoreSimulatorError::random,
+                async {
+                    self.store.mutate(|state| {
+                        let agent = state
+                            .agents
+                            .get(&agent_id)
+                            .ok_or_else(|| RuntimeError::other("agent does not exist"))?;
+
+                        if agent
+                            .events
+                            .binary_search_by_key(&input_cursor, |event| event.cursor)
+                            .is_err()
+                        {
+                            return Err(RuntimeError::other("input cursor does not exist"));
+                        }
+
+                        Ok(())
                     })
                 },
             )
@@ -1509,6 +1542,7 @@ impl StoreSimulatorConfig {
             park: WrapConfig::generate(rng),
             consume_messages: WrapConfig::generate(rng),
             publish_model_response_chunk: WrapConfig::generate(rng),
+            publish_compaction_started: WrapConfig::generate(rng),
             append_model_response: WrapConfig::generate(rng),
             append_compaction: WrapConfig::generate(rng),
             prepare_tool_call: WrapConfig::generate(rng),

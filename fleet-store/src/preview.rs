@@ -3,8 +3,14 @@ use std::collections::BTreeMap;
 
 pub struct PreviewState {
     pub input_cursor: u128,
-    pub output: Option<BTreeMap<u32, PreviewContent>>,
-    pub next_sequence: u32,
+    pub preview: Option<Preview>,
+    pub next_sequence: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum Preview {
+    Response(BTreeMap<u32, PreviewContent>),
+    Compaction,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -27,28 +33,42 @@ impl PreviewState {
     pub const fn new(input_cursor: u128) -> Self {
         Self {
             input_cursor,
-            output: Some(BTreeMap::new()),
-            next_sequence: 0,
+            preview: Some(Preview::Response(BTreeMap::new())),
+            next_sequence: Some(0),
         }
     }
 
     pub fn invalidate(&mut self) {
-        self.output = None;
+        self.preview = None;
+        self.next_sequence = None;
+    }
+
+    pub fn start_compaction(&mut self) -> bool {
+        if self.preview == Some(Preview::Compaction) {
+            return false;
+        }
+        self.preview = Some(Preview::Compaction);
+        true
     }
 
     pub fn apply(&mut self, sequence: u32, chunk: &ModelResponseChunk) -> bool {
-        let Some(output) = &mut self.output else {
-            return false;
-        };
-        if sequence != self.next_sequence {
+        if self.next_sequence != Some(sequence) {
+            let changed = self.preview.is_some();
             self.invalidate();
-            return true;
+            return changed;
         }
         let Some(next) = sequence.checked_add(1) else {
             self.invalidate();
             return true;
         };
-        self.next_sequence = next;
+        self.next_sequence = Some(next);
+        let replaced = self.preview == Some(Preview::Compaction);
+        if replaced {
+            self.preview = Some(Preview::Response(BTreeMap::new()));
+        }
+        let Some(Preview::Response(output)) = &mut self.preview else {
+            return false;
+        };
         let (index, content) = match chunk {
             ModelResponseChunk::TextStart(index) => (*index, PreviewContent::Text(String::new())),
             ModelResponseChunk::ReasoningStart(index) => {
@@ -93,7 +113,7 @@ impl PreviewState {
             ModelResponseChunk::ResponseEnd(response) => {
                 let replacement = (0..).zip(response.output.iter().map(Into::into)).collect();
                 if *output == replacement {
-                    return false;
+                    return replaced;
                 }
                 *output = replacement;
                 return true;

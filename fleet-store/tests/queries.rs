@@ -2,14 +2,15 @@
 
 #![cfg(feature = "queries")]
 
+use core::{assert_matches, pin::pin};
 use fleet_core::{
-    Agent, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
-    ModelOutput, ModelProvenance, ModelResponse, ModelUsage, RuntimeStore as _, ToolCall,
-    ToolOutput, ToolResult, TurnEnd,
+    Agent, ClientStore as _, Compaction, Configured, ContentBlock, JsonObject, Message,
+    MessageMode, ModelOutput, ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage,
+    RuntimeStore as _, ToolCall, ToolOutput, ToolResult, TurnEnd,
 };
-use fleet_kit::{MessageRecord, Queries as _, QueryUpdate};
+use fleet_kit::{MessageRecord, Preview, Queries as _, QueryUpdate};
 use fleet_store::Store;
-use futures_util::future;
+use futures_util::{TryStreamExt as _, future};
 
 fn agent() -> Agent {
     Agent {
@@ -108,6 +109,137 @@ fn wait_for_turn_end_ignores_pending_messages_and_async_tools() {
                 message: message_b
             }]
         );
+    });
+}
+
+#[test]
+fn compaction_notifications_are_transient_and_superseded() {
+    let store = Store::memory().unwrap();
+    let agent = agent();
+    let response = response(vec![]);
+    let compaction = Compaction {
+        last_event: 2.into(),
+        input: vec![],
+        pending_tool_calls: vec![],
+        usage: response.usage,
+    };
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &agent, Some(&message(1)))
+            .await
+            .unwrap();
+        store.consume_messages(agent.id, None, true).await.unwrap();
+        store
+            .append_model_response(agent.id, 0.into(), true, &response)
+            .await
+            .unwrap();
+        let state = store.agent_state(agent.id).await.unwrap();
+        let activity = store.activity(agent.id, None).await.unwrap();
+        let mut previews = pin!(store.previews(agent.id));
+        let preview = previews.try_next().await.unwrap().unwrap();
+        assert_eq!(preview, None);
+
+        store
+            .publish_compaction_started(agent.id, 2.into())
+            .await
+            .unwrap();
+        let preview = previews.try_next().await.unwrap().unwrap();
+        assert_eq!(
+            preview,
+            Some(Preview::Compaction {
+                input_cursor: 2.into()
+            })
+        );
+        store
+            .publish_compaction_started(agent.id, 2.into())
+            .await
+            .unwrap();
+        let repeated = pin!(store.previews(agent.id))
+            .try_next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated, preview);
+        let current_state = store.agent_state(agent.id).await.unwrap();
+        let current_activity = store.activity(agent.id, None).await.unwrap();
+        assert_eq!(current_state, state);
+        assert_eq!(current_activity, activity);
+
+        store
+            .append_compaction(agent.id, 2.into(), &compaction)
+            .await
+            .unwrap();
+        store
+            .publish_compaction_started(agent.id, 2.into())
+            .await
+            .unwrap();
+        let preview = previews.try_next().await.unwrap().unwrap();
+        assert_eq!(preview, None);
+
+        store
+            .publish_compaction_started(agent.id, 3.into())
+            .await
+            .unwrap();
+        let preview = previews.try_next().await.unwrap().unwrap();
+        assert_eq!(
+            preview,
+            Some(Preview::Compaction {
+                input_cursor: 3.into()
+            })
+        );
+        store
+            .interrupt_agent("interrupt", agent.id, None)
+            .await
+            .unwrap();
+        store
+            .publish_compaction_started(agent.id, 3.into())
+            .await
+            .unwrap();
+        let preview = previews.try_next().await.unwrap().unwrap();
+        assert_eq!(preview, None);
+    });
+}
+
+#[test]
+fn compaction_notifications_preserve_response_sequence_invalidation() {
+    let store = Store::memory().unwrap();
+    let agent = agent();
+    let chunk = ModelResponseChunk::TextStart(0);
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &agent, Some(&message(1)))
+            .await
+            .unwrap();
+        store.consume_messages(agent.id, None, true).await.unwrap();
+        store
+            .publish_model_response_chunk(agent.id, 0.into(), 0, &chunk)
+            .await
+            .unwrap();
+        let mut previews = pin!(store.previews(agent.id));
+        let preview = previews.try_next().await.unwrap().unwrap().unwrap();
+        assert_matches!(preview, Preview::Response { .. });
+
+        for _ in 0..2 {
+            store
+                .publish_compaction_started(agent.id, 0.into())
+                .await
+                .unwrap();
+            let preview = previews.try_next().await.unwrap().unwrap();
+            assert_eq!(
+                preview,
+                Some(Preview::Compaction {
+                    input_cursor: 0.into()
+                })
+            );
+            store
+                .publish_model_response_chunk(agent.id, 0.into(), 0, &chunk)
+                .await
+                .unwrap();
+            let preview = previews.try_next().await.unwrap().unwrap();
+            assert_eq!(preview, None);
+        }
     });
 }
 

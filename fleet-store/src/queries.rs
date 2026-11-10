@@ -149,12 +149,21 @@ impl Queries for Store {
                             Records(transaction.open_table(records::RECORDS)?)
                                 .agent(agent_id.into())?;
                             Ok(worker.previews.get(&agent_id.into()).and_then(|state| {
-                                state.output.as_ref().map(|output| Preview {
-                                    input_cursor: state.input_cursor.into(),
-                                    output: output
-                                        .iter()
-                                        .map(|(index, content)| (*index, content.clone().into()))
-                                        .collect(),
+                                state.preview.as_ref().map(|preview| match preview {
+                                    crate::preview::Preview::Response(output) => {
+                                        Preview::Response {
+                                            input_cursor: state.input_cursor.into(),
+                                            output: output
+                                                .iter()
+                                                .map(|(index, content)| {
+                                                    (*index, content.clone().into())
+                                                })
+                                                .collect(),
+                                        }
+                                    }
+                                    crate::preview::Preview::Compaction => Preview::Compaction {
+                                        input_cursor: state.input_cursor.into(),
+                                    },
                                 })
                             }))
                         })

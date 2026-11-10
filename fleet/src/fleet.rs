@@ -1511,6 +1511,24 @@ mod tests {
             let text = next_frame(&mut body).await;
             assert_eq!(text, "event: preview\ndata: {\"status\":\"idle\"}\n\n");
 
+            store
+                .publish_compaction_started(1.into(), 0.into())
+                .await
+                .unwrap();
+            let text = next_frame(&mut body).await;
+            assert_eq!(
+                text,
+                "event: preview\ndata: {\"status\":\"compacting\",\"input_cursor\":\"0\"}\n\n",
+            );
+            let response =
+                crate::api::handle(fleet.clone(), request("/agents/1/preview/subscription"))
+                    .await
+                    .unwrap();
+            let snapshot = next_frame(&mut response.into_body()).await;
+            assert_eq!(snapshot, text);
+            let agent = fleet.agent(1.into(), None).await.unwrap();
+            assert_eq!(agent.revision, 2.into());
+
             for (sequence, chunk) in [
                 (0, ModelResponseChunk::TextStart(0)),
                 (1, ModelResponseChunk::TextDelta(0, "Hello".into())),

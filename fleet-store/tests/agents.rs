@@ -422,6 +422,11 @@ fn internal_and_preview_writes_do_not_republish_summaries() {
             .await
             .unwrap();
         store
+            .publish_compaction_started(1.into(), 0.into())
+            .await
+            .unwrap();
+        assert_eq!(store.collection_revision().await.unwrap(), busy);
+        store
             .append_model_response(1.into(), 0.into(), false, &response())
             .await
             .unwrap();

@@ -104,7 +104,7 @@ pub trait Queries {
         since: Option<Revision>,
     ) -> impl Future<Output = Result<QueryResponse<Vec<ToolCallRecord>>, Self::Error>> + Send;
 
-    /// Streams the agent's response preview.
+    /// Streams the agent's transient model activity and response output.
     ///
     /// The stream first yields the current preview, or `None` when there is no preview. Later items
     /// replace the previous preview. Intermediate previews may be omitted.

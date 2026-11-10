@@ -609,6 +609,18 @@ impl RuntimeStore for Store {
             .await
     }
 
+    async fn publish_compaction_started(
+        &self,
+        agent_id: AgentId,
+        input_cursor: EventCursor,
+    ) -> Result<(), StoreError> {
+        self.worker()
+            .call(move |worker| {
+                worker.publish_compaction_started(agent_id.into(), input_cursor.into())
+            })
+            .await
+    }
+
     async fn append_model_response(
         &self,
         agent_id: AgentId,

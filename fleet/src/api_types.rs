@@ -413,7 +413,7 @@ pub enum ApiTurnStatus {
 
 // === Previews ===
 
-/// The current response preview.
+/// Transient model activity or accumulated response output.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ApiPreview {
@@ -425,7 +425,13 @@ pub enum ApiPreview {
         /// The partial output blocks.
         output: Vec<ApiPreviewBlock>,
     },
-    /// No response preview is available.
+    /// A compaction attempt has started and may be waiting to retry.
+    Compacting {
+        /// The last event included in the compaction attempt.
+        #[serde(serialize_with = "serialize_id")]
+        input_cursor: u128,
+    },
+    /// No model activity or response output is available.
     Idle,
 }
 
@@ -1310,16 +1316,23 @@ impl From<AgentActivity> for ApiAgentActivity {
 
 impl From<Preview> for ApiPreview {
     fn from(preview: Preview) -> Self {
-        Self::Streaming {
-            input_cursor: preview.input_cursor.into(),
-            output: preview
-                .output
-                .into_iter()
-                .map(|(index, content)| ApiPreviewBlock {
-                    index,
-                    content: content.into(),
-                })
-                .collect(),
+        match preview {
+            Preview::Response {
+                input_cursor,
+                output,
+            } => Self::Streaming {
+                input_cursor: input_cursor.into(),
+                output: output
+                    .into_iter()
+                    .map(|(index, content)| ApiPreviewBlock {
+                        index,
+                        content: content.into(),
+                    })
+                    .collect(),
+            },
+            Preview::Compaction { input_cursor } => Self::Compacting {
+                input_cursor: input_cursor.into(),
+            },
         }
     }
 }

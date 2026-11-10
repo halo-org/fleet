@@ -118,15 +118,23 @@ pub enum ToolCallRecord {
 
 // === Previews ===
 
-/// An accumulated response preview.
+/// Transient model activity or accumulated response output.
 ///
 /// A later committed event makes this preview obsolete.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Preview {
-    /// The event the response is answering.
-    pub input_cursor: EventCursor,
-    /// The output blocks, keyed by index.
-    pub output: BTreeMap<u32, PreviewContent>,
+pub enum Preview {
+    /// An accumulated response preview.
+    Response {
+        /// The event the response is answering.
+        input_cursor: EventCursor,
+        /// The output blocks, keyed by index.
+        output: BTreeMap<u32, PreviewContent>,
+    },
+    /// A compaction attempt has started and may be waiting to retry.
+    Compaction {
+        /// The last event included in the compaction attempt.
+        input_cursor: EventCursor,
+    },
 }
 
 /// The partial content of a preview block.

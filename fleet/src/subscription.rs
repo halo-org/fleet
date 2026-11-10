@@ -1,4 +1,4 @@
-//! Streams revision groups and response previews on separate subscriptions.
+//! Streams revision groups and transient model activity on separate subscriptions.
 //!
 //! Each state update carries its revision ID. Preview subscriptions have no resume ID. Preview text
 //! appends to the selected block. A preview replacement clears that selection.
@@ -118,26 +118,24 @@ fn encode_updates(updates: AgentUpdates) -> Bytes {
 impl PreviewStream {
     fn encode(&mut self, preview: Option<Preview>) -> Bytes {
         let mut buffer = String::new();
-        let can_append =
-            self.preview
-                .as_ref()
-                .zip(preview.as_ref())
-                .is_some_and(|(previous, current)| {
-                    previous.input_cursor == current.input_cursor
-                        && previous
-                            .output
-                            .keys()
-                            .all(|index| current.output.contains_key(index))
-                        && current.output.iter().all(|(index, content)| {
-                            appended_text(previous.output.get(index), content)
-                                .is_some_and(|text| !text.contains('\r'))
-                        })
-                });
-        if can_append {
-            let previous = self.preview.as_ref().expect("previous preview exists");
-            let current = preview.as_ref().expect("current preview exists");
-            for (index, content) in &current.output {
-                let prior = previous.output.get(index);
+        if let (
+            Some(Preview::Response {
+                input_cursor: previous_cursor,
+                output: previous,
+            }),
+            Some(Preview::Response {
+                input_cursor,
+                output: current,
+            }),
+        ) = (self.preview.as_ref(), preview.as_ref())
+            && previous_cursor == input_cursor
+            && previous.keys().all(|index| current.contains_key(index))
+            && current.iter().all(|(index, content)| {
+                appended_text(previous.get(index), content).is_some_and(|text| !text.contains('\r'))
+            })
+        {
+            for (index, content) in current {
+                let prior = previous.get(index);
                 let text = appended_text(prior, content).expect("content was appended");
                 if prior.is_some() && text.is_empty() {
                     continue;
@@ -239,7 +237,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn preview(text: &str) -> Preview {
-        Preview {
+        Preview::Response {
             input_cursor: 1.into(),
             output: BTreeMap::from([(0, PreviewContent::Text(text.into()))]),
         }
@@ -309,22 +307,26 @@ mod tests {
             preview: Some(preview("Hello")),
             selected_block: Some(0),
         };
-        let mut current = preview("Hello");
-        current
-            .output
-            .insert(1, PreviewContent::Reasoning("Thinking".into()));
+        let mut output = BTreeMap::from([
+            (0, PreviewContent::Text("Hello".into())),
+            (1, PreviewContent::Reasoning("Thinking".into())),
+        ]);
 
-        let bytes = subscription.encode(Some(current.clone()));
+        let bytes = subscription.encode(Some(Preview::Response {
+            input_cursor: 1.into(),
+            output: output.clone(),
+        }));
         let text = str::from_utf8(&bytes).unwrap();
         assert!(
             text.contains("event: preview_block\ndata: {\"index\":1,\"type\":\"reasoning\"}\n\n")
         );
         assert!(text.contains("event: preview_text\ndata: Thinking\n\n"));
 
-        current
-            .output
-            .insert(0, PreviewContent::Text("Hello again".into()));
-        let bytes = subscription.encode(Some(current));
+        output.insert(0, PreviewContent::Text("Hello again".into()));
+        let bytes = subscription.encode(Some(Preview::Response {
+            input_cursor: 1.into(),
+            output,
+        }));
         let text = str::from_utf8(&bytes).unwrap();
         assert!(text.contains("event: preview_block\ndata: {\"index\":0}\n\n"));
         assert!(text.contains("event: preview_text\ndata:  again\n\n"));
@@ -346,6 +348,31 @@ mod tests {
             assert_eq!(text, format!("event: preview\ndata: {json}\n\n"));
             assert_eq!(subscription.selected_block, None);
         }
+    }
+
+    #[test]
+    fn encode_replaces_response_output_with_compaction_and_back() {
+        let mut subscription = PreviewStream {
+            preview: Some(preview("Hello")),
+            selected_block: Some(0),
+        };
+
+        let bytes = subscription.encode(Some(Preview::Compaction {
+            input_cursor: 1.into(),
+        }));
+        let text = str::from_utf8(&bytes).unwrap();
+        assert_eq!(
+            text,
+            "event: preview\ndata: {\"status\":\"compacting\",\"input_cursor\":\"1\"}\n\n",
+        );
+        assert_eq!(subscription.selected_block, None);
+
+        let current = preview("New response");
+        let bytes = subscription.encode(Some(current.clone()));
+        let text = str::from_utf8(&bytes).unwrap();
+        let json = serde_json::to_string(&ApiPreview::from(current)).unwrap();
+        assert_eq!(text, format!("event: preview\ndata: {json}\n\n"));
+        assert_eq!(subscription.selected_block, None);
     }
 
     #[test]

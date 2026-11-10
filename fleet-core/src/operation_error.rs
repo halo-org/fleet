@@ -33,6 +33,10 @@ pub enum OperationError<S, R, M, T> {
         model: ModelName,
         source: S,
     },
+    PublishCompactionStarted {
+        model: ModelName,
+        source: S,
+    },
     LoadRole {
         role: RoleName,
         source: R,
@@ -126,6 +130,12 @@ impl<S, R, M, T> fmt::Display for OperationError<S, R, M, T> {
                     r#"could not publish response chunk from model "{model}""#,
                 )
             }
+            Self::PublishCompactionStarted { model, source: _ } => {
+                write!(
+                    f,
+                    r#"could not publish compaction start for model "{model}""#,
+                )
+            }
             Self::LoadRole { role, source: _ } => write!(f, r#"could not load role "{role}""#),
             Self::LoadModel { model, source: _ } => write!(f, r#"could not load model "{model}""#),
             Self::LoadTool { tool, source: _ } => write!(f, r#"could not load tool "{tool}""#),
@@ -204,7 +214,8 @@ where
             | Self::AppendToolResult { source, .. }
             | Self::AppendModelResponse { source, .. }
             | Self::AppendCompaction { source, .. }
-            | Self::PublishModelResponseChunk { source, .. } => Some(source),
+            | Self::PublishModelResponseChunk { source, .. }
+            | Self::PublishCompactionStarted { source, .. } => Some(source),
             Self::LoadRole { source, .. } => Some(source),
             Self::LoadModel { source, .. }
             | Self::GenerateModelResponse { source, .. }

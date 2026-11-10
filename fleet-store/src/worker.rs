@@ -146,6 +146,32 @@ impl Worker {
         sequence: u32,
         chunk: &ModelResponseChunk,
     ) -> Result<(), StoreError> {
+        if let Some(preview) = self.preview(agent_id, input_cursor)?
+            && preview.apply(sequence, chunk)
+        {
+            self.notifications.notify(Topic::Preview(agent_id));
+        }
+        Ok(())
+    }
+
+    pub fn publish_compaction_started(
+        &mut self,
+        agent_id: u128,
+        input_cursor: u128,
+    ) -> Result<(), StoreError> {
+        if let Some(preview) = self.preview(agent_id, input_cursor)?
+            && preview.start_compaction()
+        {
+            self.notifications.notify(Topic::Preview(agent_id));
+        }
+        Ok(())
+    }
+
+    fn preview(
+        &mut self,
+        agent_id: u128,
+        input_cursor: u128,
+    ) -> Result<Option<&mut crate::preview::PreviewState>, StoreError> {
         let transaction = self.database.begin_read()?;
         let records = Records(transaction.open_table(records::RECORDS)?);
         let agent = records.agent(agent_id)?;
@@ -160,7 +186,7 @@ impl Worker {
             return Err(StoreError::Conflict("input cursor does not exist"));
         }
         if agent.latest_event != Some(input_cursor) || agent.interrupt_intent {
-            return Ok(());
+            return Ok(None);
         }
         let preview = self
             .previews
@@ -169,10 +195,7 @@ impl Worker {
         if input_cursor > preview.input_cursor {
             *preview = crate::preview::PreviewState::new(input_cursor);
         }
-        if input_cursor == preview.input_cursor && preview.apply(sequence, chunk) {
-            self.notifications.notify(Topic::Preview(agent_id));
-        }
-        Ok(())
+        Ok((input_cursor == preview.input_cursor).then_some(preview))
     }
 }
 
