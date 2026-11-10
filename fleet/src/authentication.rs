@@ -1,15 +1,21 @@
 use crate::{
     AuthenticationError, CredentialStore, IdleHandler,
-    oauth::{OAuth, Registration, Tokens},
+    oauth::{Authorization, OAuth, Registration, Tokens},
 };
+use core::{pin::pin, time::Duration};
 use fleet_kit::{AuthenticationKind, Connection, Credential, Credentials, OAuthConfig};
+use futures_util::future::{self, Either};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::Path,
     sync::{Arc, RwLock},
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, oneshot},
+};
+use url::Url;
 
 /// Authentication for configured provider connections.
 #[derive(Clone)]
@@ -62,10 +68,17 @@ enum Secret {
 
 struct PendingAuthorization {
     info: AuthorizationInfo,
-    cancelled: Option<oneshot::Sender<()>>,
+    attempt: Option<Attempt>,
 }
 
-#[derive(Clone, Serialize)]
+struct Attempt {
+    method: String,
+    requested: Option<Url>,
+    authorization: Authorization,
+    _cancelled: oneshot::Sender<()>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AuthorizationInfo {
     pub id: String,
     pub url: String,
@@ -73,7 +86,7 @@ pub struct AuthorizationInfo {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationStatus {
     Pending,
@@ -98,6 +111,8 @@ pub struct MethodInfo {
     pub name: String,
     pub title: String,
     pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 impl Authentication {
@@ -239,6 +254,10 @@ impl Authentication {
                             AuthenticationKind::ApiKey => "api_key",
                             AuthenticationKind::OAuth(_) => "oauth",
                         },
+                        redirect_uri: match &method.kind {
+                            AuthenticationKind::ApiKey => None,
+                            AuthenticationKind::OAuth(config) => Some(config.redirect_uri.clone()),
+                        },
                     })
                     .collect(),
             });
@@ -247,10 +266,15 @@ impl Authentication {
     }
 
     /// Starts a browser authorization.
+    ///
+    /// A client that receives the callback at a `requested` redirect URI delivers it with
+    /// [`callback`](Self::callback). Without one, Fleet also listens at the registered URI.
+    /// A pending attempt with the same method and redirect URI is returned instead.
     pub async fn authorize(
         &self,
         id: &str,
         method: &str,
+        requested: Option<&str>,
     ) -> Result<AuthorizationInfo, AuthenticationError> {
         let guard = self
             .state
@@ -258,138 +282,228 @@ impl Authentication {
             .track_mutation()
             .ok_or(AuthenticationError::Cancelled)?;
         let connection = self.connection(id)?;
-        let config = oauth_config(&connection, method)?.clone();
+        let config = oauth_config(&connection, method)?;
+        let mut redirect_uri = crate::oauth::redirect_uri(&config.redirect_uri, requested)?;
+        let requested = requested.map(|_| redirect_uri.clone());
         let mut session = connection.session.lock().await;
         self.flush(id, &mut session).await?;
-        if let Some(authorization) = &session.authorization
-            && authorization.info.status == AuthorizationStatus::Pending
+        if let Some(pending) = &session.authorization
+            && let Some(attempt) = &pending.attempt
+            && attempt.method == method
+            && attempt.requested == requested
         {
-            return Ok(authorization.info.clone());
+            return Ok(pending.info.clone());
         }
-        let authorization = self
-            .state
-            .oauth
-            .authorize(&config, session.record.registrations.get(method))
-            .await?;
+        let listener = if requested.is_none() {
+            Some(crate::oauth_callback::bind(&mut redirect_uri).await?)
+        } else {
+            None
+        };
+        let authorization = crate::oauth::authorize(
+            config,
+            session.record.registrations.get(method),
+            redirect_uri,
+        )?;
         let info = AuthorizationInfo {
             id: authorization.id.clone(),
             url: authorization.url.clone(),
             status: AuthorizationStatus::Pending,
             error: None,
         };
+        let callback = listener.map(|listener| (listener, authorization.redirect_uri.clone()));
         let (cancelled, cancellation) = oneshot::channel();
         session.authorization = Some(PendingAuthorization {
             info: info.clone(),
-            cancelled: Some(cancelled),
+            attempt: Some(Attempt {
+                method: method.to_owned(),
+                requested,
+                authorization,
+                _cancelled: cancelled,
+            }),
         });
         drop(session);
         let authentication = self.clone();
         let id = id.to_owned();
-        let method = method.to_owned();
+        let authorization_id = info.id.clone();
         tokio::spawn(async move {
             let _guard = guard;
             authentication
-                .complete_authorization(
-                    &id,
-                    &method,
-                    &config,
-                    &authorization,
-                    &connection,
-                    cancellation,
-                )
+                .wait(&id, &authorization_id, callback, cancellation)
                 .await;
         });
         Ok(info)
     }
 
-    async fn complete_authorization(
+    /// Completes an authorization with the callback URL a client received.
+    ///
+    /// Returns the result of an attempt that already finished.
+    pub async fn callback(
         &self,
         id: &str,
-        method: &str,
-        config: &OAuthConfig,
-        authorization: &crate::oauth::Authorization,
-        connection: &ConnectionState,
+        authorization_id: &str,
+        url: &str,
+    ) -> Result<AuthorizationInfo, AuthenticationError> {
+        let connection = self.connection(id)?;
+        let mut session = connection.session.lock().await;
+        let pending = session
+            .authorization
+            .as_ref()
+            .filter(|pending| pending.info.id == authorization_id)
+            .ok_or(AuthenticationError::Cancelled)?;
+        let Some(attempt) = &pending.attempt else {
+            return Ok(pending.info.clone());
+        };
+        let parameters = crate::oauth_callback::received(
+            &attempt.authorization.redirect_uri,
+            url,
+            authorization_id,
+        )?;
+        let info = self
+            .receive(id, &connection, &mut session, Ok(parameters))
+            .await;
+        drop(session);
+        Ok(info)
+    }
+
+    async fn wait(
+        &self,
+        id: &str,
+        authorization_id: &str,
+        callback: Option<(TcpListener, Url)>,
         cancellation: oneshot::Receiver<()>,
     ) {
-        let callback = {
-            let callback =
-                core::pin::pin!(crate::oauth_callback::wait(authorization, cancellation));
-            let shutdown = core::pin::pin!(self.state.idle_handler.wait_for_shutdown());
-            match futures_util::future::select(callback, shutdown).await {
-                futures_util::future::Either::Left((result, _)) => result,
-                futures_util::future::Either::Right(_) => Err(AuthenticationError::Cancelled),
+        let parameters = {
+            let listener = async {
+                match &callback {
+                    Some((listener, redirect_uri)) => {
+                        crate::oauth_callback::wait(listener, redirect_uri, authorization_id).await
+                    }
+                    None => future::pending().await,
+                }
+            };
+            let expiry = tokio::time::timeout(Duration::from_secs(600), listener);
+            let shutdown = self.state.idle_handler.wait_for_shutdown();
+            match future::select(
+                pin!(cancellation),
+                pin!(future::select(pin!(expiry), pin!(shutdown))),
+            )
+            .await
+            {
+                Either::Left(_) => return,
+                Either::Right((Either::Left((Ok(parameters), _)), _)) => parameters,
+                Either::Right(_) => Err(AuthenticationError::Cancelled),
             }
+        };
+        drop(callback);
+        let Ok(connection) = self.connection(id) else {
+            return;
         };
         let mut session = connection.session.lock().await;
         if session
             .authorization
             .as_ref()
-            .is_none_or(|pending| pending.info.id != authorization.id)
+            .is_some_and(|pending| pending.info.id == authorization_id)
         {
-            return;
+            self.receive(id, &connection, &mut session, parameters)
+                .await;
         }
-        let result = async {
-            let parameters = callback?;
-            if parameters.contains_key("error") {
-                return Err(AuthenticationError::Invalid("authorization was declined"));
+    }
+
+    async fn receive(
+        &self,
+        id: &str,
+        connection: &ConnectionState,
+        session: &mut Session,
+        parameters: Result<BTreeMap<String, String>, AuthenticationError>,
+    ) -> AuthorizationInfo {
+        let pending = session
+            .authorization
+            .as_mut()
+            .expect("received authorization is pending");
+        let Some(attempt) = pending.attempt.take() else {
+            return pending.info.clone();
+        };
+        let result = match parameters {
+            Ok(parameters) => {
+                self.complete(id, connection, session, &attempt, &parameters)
+                    .await
             }
-            if parameters
-                .get("iss")
-                .is_some_and(|issuer| config.issuer.as_ref() != Some(issuer))
-            {
+            Err(error) => Err(error),
+        };
+        let pending = session
+            .authorization
+            .as_mut()
+            .expect("received authorization is pending");
+        pending.info.status = if result.is_ok() {
+            AuthorizationStatus::Complete
+        } else {
+            AuthorizationStatus::Failed
+        };
+        pending.info.error = result.err().map(|error| error.to_string());
+        pending.info.clone()
+    }
+
+    async fn complete(
+        &self,
+        id: &str,
+        connection: &ConnectionState,
+        session: &mut Session,
+        attempt: &Attempt,
+        parameters: &BTreeMap<String, String>,
+    ) -> Result<(), AuthenticationError> {
+        let config = oauth_config(connection, &attempt.method)?;
+        if parameters.contains_key("error") {
+            return Err(AuthenticationError::Invalid("authorization was declined"));
+        }
+        match (parameters.get("iss"), &config.issuer) {
+            (Some(issuer), expected) if expected.as_ref() != Some(issuer) => {
                 return Err(AuthenticationError::Invalid(
                     "callback issuer does not match",
                 ));
             }
-            let code = parameters
-                .get("code")
-                .filter(|code| !code.is_empty())
-                .ok_or(AuthenticationError::Invalid(
-                    "authorization code is missing",
-                ))?;
-            let registration = registration(
-                config,
-                session.record.registrations.get(method),
-                &parameters,
-            )?;
-            session
-                .record
-                .registrations
-                .insert(method.to_owned(), registration.clone());
-            session.dirty = true;
-            self.flush(id, &mut session).await?;
-            let mut registration = registration;
-            let tokens = self
-                .state
-                .oauth
-                .exchange(config, &mut registration, authorization, code)
-                .await?;
-            let authorized = authorized(config, &tokens);
-            session
-                .record
-                .registrations
-                .insert(method.to_owned(), registration);
-            session.record.credential = Some(SavedCredential {
-                method: method.into(),
-                secret: Secret::OAuth(tokens),
-            });
-            session.dirty = true;
-            self.flush(id, &mut session).await?;
-            if !authorized {
-                return Err(AuthenticationError::Unauthorized);
+            (None, Some(issuer)) if self.state.oauth.requires_issuer_parameter(issuer).await? => {
+                return Err(AuthenticationError::Invalid("callback issuer is missing"));
             }
-            Ok(())
+            _ => {}
         }
-        .await;
-        if let Some(pending) = &mut session.authorization {
-            pending.cancelled = None;
-            pending.info.status = if result.is_ok() {
-                AuthorizationStatus::Complete
-            } else {
-                AuthorizationStatus::Failed
-            };
-            pending.info.error = result.err().map(|error| error.to_string());
+        let code = parameters
+            .get("code")
+            .filter(|code| !code.is_empty())
+            .ok_or(AuthenticationError::Invalid(
+                "authorization code is missing",
+            ))?;
+        let registration = registration(
+            config,
+            session.record.registrations.get(&attempt.method),
+            parameters,
+        )?;
+        session
+            .record
+            .registrations
+            .insert(attempt.method.clone(), registration.clone());
+        session.dirty = true;
+        self.flush(id, session).await?;
+        let mut registration = registration;
+        let tokens = self
+            .state
+            .oauth
+            .exchange(config, &mut registration, &attempt.authorization, code)
+            .await?;
+        let authorized = authorized(config, &tokens);
+        session
+            .record
+            .registrations
+            .insert(attempt.method.clone(), registration);
+        session.record.credential = Some(SavedCredential {
+            method: attempt.method.clone(),
+            secret: Secret::OAuth(tokens),
+        });
+        session.dirty = true;
+        self.flush(id, session).await?;
+        if !authorized {
+            return Err(AuthenticationError::Unauthorized);
         }
+        Ok(())
     }
 
     /// Reads an authorization attempt.
@@ -748,6 +862,98 @@ mod tests {
 
             assert!(credential.is_none());
             assert_eq!(authentication.host_id(), host_id);
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn callbacks_complete_only_their_current_attempt() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "fleet-auth-{}",
+            crate::oauth::random_value().unwrap()
+        ));
+        let mut definition = connection();
+        definition.methods.push(AuthenticationMethod {
+            name: "oauth".into(),
+            title: "Sign in".into(),
+            kind: AuthenticationKind::OAuth(Box::new(config())),
+        });
+
+        runtime.block_on(async {
+            let authentication = Authentication::open(&directory, IdleHandler::new(None))
+                .await
+                .unwrap();
+            authentication.register("first", vec![definition]).unwrap();
+            let first = authentication
+                .authorize(
+                    "first:account",
+                    "oauth",
+                    Some("http://127.0.0.1:3000/callback"),
+                )
+                .await
+                .unwrap();
+            let repeated = authentication
+                .authorize(
+                    "first:account",
+                    "oauth",
+                    Some("http://127.0.0.1:3000/callback"),
+                )
+                .await
+                .unwrap();
+            let second = authentication
+                .authorize(
+                    "first:account",
+                    "oauth",
+                    Some("http://127.0.0.1:3001/callback"),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(repeated.id, first.id);
+            assert_ne!(second.id, first.id);
+
+            let replaced = format!(
+                "http://127.0.0.1:3000/callback?state={}&error=access_denied",
+                first.id
+            );
+            let error = authentication
+                .callback("first:account", &first.id, &replaced)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error, AuthenticationError::Cancelled));
+
+            let mismatched = format!(
+                "http://127.0.0.1:3000/callback?state={}&error=access_denied",
+                second.id
+            );
+            let error = authentication
+                .callback("first:account", &second.id, &mismatched)
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+
+            let declined = format!(
+                "http://127.0.0.1:3001/callback?state={}&error=access_denied",
+                second.id
+            );
+            let failed = authentication
+                .callback("first:account", &second.id, &declined)
+                .await
+                .unwrap();
+            let repeated = authentication
+                .callback("first:account", &second.id, &declined)
+                .await
+                .unwrap();
+
+            assert_eq!(failed.status, AuthorizationStatus::Failed);
+            assert_eq!(failed.error.as_deref(), Some("authorization was declined"));
+            assert_eq!(repeated.status, AuthorizationStatus::Failed);
         });
         std::fs::remove_dir_all(directory).unwrap();
     }

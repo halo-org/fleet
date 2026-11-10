@@ -44,7 +44,7 @@ pub struct OAuthConfig {
     pub token_url: String,
     /// The public client ID.
     pub client_id: String,
-    /// The registered redirect URI.
+    /// The registered redirect URI. Port 0 means any port is registered.
     pub redirect_uri: String,
     /// The requested scopes.
     pub scopes: Vec<String>,

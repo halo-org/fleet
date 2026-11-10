@@ -41,7 +41,6 @@ pub struct Authorization {
     pub redirect_uri: Url,
     pub verifier: String,
     pub nonce: String,
-    pub listener: tokio::net::TcpListener,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +59,8 @@ struct Discovery {
     jwks_uri: String,
     id_token_signing_alg_values_supported: Vec<Algorithm>,
     revocation_endpoint: Option<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: bool,
 }
 
 #[derive(Deserialize)]
@@ -80,94 +81,6 @@ impl OAuth {
             .build()
             .map_err(transport_error)?;
         Ok(Self { client })
-    }
-
-    pub async fn authorize(
-        &self,
-        config: &OAuthConfig,
-        registration: Option<&Registration>,
-    ) -> Result<Authorization, AuthenticationError> {
-        let mut redirect_uri = Url::parse(&config.redirect_uri)
-            .map_err(|_| AuthenticationError::Invalid("invalid OAuth redirect URI"))?;
-        if redirect_uri.scheme() != "http"
-            || redirect_uri.host_str() != Some("127.0.0.1")
-            || redirect_uri.query().is_some()
-            || redirect_uri.fragment().is_some()
-            || !redirect_uri.username().is_empty()
-            || redirect_uri.password().is_some()
-        {
-            return Err(AuthenticationError::Invalid(
-                "OAuth redirect URI must use HTTP on 127.0.0.1",
-            ));
-        }
-        endpoint(&config.token_url)?;
-        let listener = tokio::net::TcpListener::bind((
-            core::net::Ipv4Addr::LOCALHOST,
-            redirect_uri.port().unwrap_or(80),
-        ))
-        .await
-        .map_err(AuthenticationError::Callback)?;
-        let port = listener
-            .local_addr()
-            .map_err(AuthenticationError::Callback)?
-            .port();
-        redirect_uri
-            .set_port(Some(port))
-            .expect("HTTP URL accepts a port");
-        let id = random_value()?;
-        let verifier = random_value()?;
-        let nonce = random_value()?;
-        let mut url = endpoint(&config.authorization_url)?;
-        if url.query().is_some() {
-            return Err(AuthenticationError::Invalid(
-                "OAuth authorization endpoint must not contain a query",
-            ));
-        }
-        let mut parameters = BTreeMap::from([
-            ("response_type".to_owned(), "code".to_owned()),
-            (
-                "client_id".into(),
-                registration
-                    .map_or(&config.client_id, |registration| &registration.client_id)
-                    .clone(),
-            ),
-            ("redirect_uri".into(), redirect_uri.to_string()),
-            ("scope".into(), config.scopes.join(" ")),
-            ("state".into(), id.clone()),
-            ("nonce".into(), nonce.clone()),
-            ("code_challenge_method".into(), "S256".into()),
-            (
-                "code_challenge".into(),
-                URL_SAFE_NO_PAD.encode(Sha256::digest(&verifier)),
-            ),
-        ]);
-        if let Some(resource) = &config.resource {
-            parameters.insert("resource".into(), resource.clone());
-        }
-        let initial = registration
-            .is_none()
-            .then_some(config.registration.as_ref())
-            .flatten();
-        for (name, value) in config.parameters.iter().chain(
-            initial
-                .into_iter()
-                .flat_map(|registration| &registration.parameters),
-        ) {
-            if parameters.insert(name.clone(), value.clone()).is_some() {
-                return Err(AuthenticationError::Invalid(
-                    "OAuth parameters contain a reserved or duplicate name",
-                ));
-            }
-        }
-        url.query_pairs_mut().extend_pairs(parameters);
-        Ok(Authorization {
-            id,
-            url: url.into(),
-            redirect_uri,
-            verifier,
-            nonce,
-            listener,
-        })
     }
 
     pub async fn exchange(
@@ -263,6 +176,16 @@ impl OAuth {
             .await
             .map_err(transport_error)?;
         read_json(response).await
+    }
+
+    pub async fn requires_issuer_parameter(
+        &self,
+        issuer: &str,
+    ) -> Result<bool, AuthenticationError> {
+        Ok(self
+            .discovery(issuer)
+            .await?
+            .authorization_response_iss_parameter_supported)
     }
 
     async fn discovery(&self, issuer: &str) -> Result<Discovery, AuthenticationError> {
@@ -374,6 +297,106 @@ impl OAuth {
         registration.email = identity.email;
         Ok(())
     }
+}
+
+pub fn authorize(
+    config: &OAuthConfig,
+    registration: Option<&Registration>,
+    redirect_uri: Url,
+) -> Result<Authorization, AuthenticationError> {
+    endpoint(&config.token_url)?;
+    let id = random_value()?;
+    let verifier = random_value()?;
+    let nonce = random_value()?;
+    let mut url = endpoint(&config.authorization_url)?;
+    if url.query().is_some() {
+        return Err(AuthenticationError::Invalid(
+            "OAuth authorization endpoint must not contain a query",
+        ));
+    }
+    let mut parameters = BTreeMap::from([
+        ("response_type".to_owned(), "code".to_owned()),
+        (
+            "client_id".into(),
+            registration
+                .map_or(&config.client_id, |registration| &registration.client_id)
+                .clone(),
+        ),
+        ("redirect_uri".into(), redirect_uri.to_string()),
+        ("scope".into(), config.scopes.join(" ")),
+        ("state".into(), id.clone()),
+        ("nonce".into(), nonce.clone()),
+        ("code_challenge_method".into(), "S256".into()),
+        (
+            "code_challenge".into(),
+            URL_SAFE_NO_PAD.encode(Sha256::digest(&verifier)),
+        ),
+    ]);
+    if let Some(resource) = &config.resource {
+        parameters.insert("resource".into(), resource.clone());
+    }
+    let initial = registration
+        .is_none()
+        .then_some(config.registration.as_ref())
+        .flatten();
+    for (name, value) in config.parameters.iter().chain(
+        initial
+            .into_iter()
+            .flat_map(|registration| &registration.parameters),
+    ) {
+        if parameters.insert(name.clone(), value.clone()).is_some() {
+            return Err(AuthenticationError::Invalid(
+                "OAuth parameters contain a reserved or duplicate name",
+            ));
+        }
+    }
+    url.query_pairs_mut().extend_pairs(parameters);
+    Ok(Authorization {
+        id,
+        url: url.into(),
+        redirect_uri,
+        verifier,
+        nonce,
+    })
+}
+
+/// Returns the redirect URI for an authorization.
+///
+/// A requested URI must match the registered URI apart from its port, which can differ only
+/// when the registered port is 0. Without a request, the registered URI is returned.
+pub fn redirect_uri(registered: &str, requested: Option<&str>) -> Result<Url, AuthenticationError> {
+    let registered = loopback(registered)?;
+    let Some(requested) = requested else {
+        return Ok(registered);
+    };
+    let requested = loopback(requested)?;
+    let port = registered.port_or_known_default();
+    if requested.path() != registered.path()
+        || requested.port_or_known_default() == Some(0)
+        || (port != Some(0) && requested.port_or_known_default() != port)
+    {
+        return Err(AuthenticationError::Invalid(
+            "redirect URI does not match the registered URI",
+        ));
+    }
+    Ok(requested)
+}
+
+fn loopback(value: &str) -> Result<Url, AuthenticationError> {
+    let url = Url::parse(value)
+        .map_err(|_| AuthenticationError::Invalid("invalid OAuth redirect URI"))?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(AuthenticationError::Invalid(
+            "OAuth redirect URI must use HTTP on 127.0.0.1",
+        ));
+    }
+    Ok(url)
 }
 
 fn tokens(
@@ -512,5 +535,27 @@ mod tests {
 
         assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
         assert_eq!(tokens.scopes, ["openid"]);
+    }
+
+    #[test]
+    fn redirect_uris_match_the_registered_path_and_port() {
+        let any = "http://127.0.0.1:0/callback";
+        let fixed = "http://127.0.0.1:1455/callback";
+        let client = "http://127.0.0.1:3000/callback";
+
+        assert_eq!(redirect_uri(any, None).unwrap().as_str(), any);
+        assert_eq!(redirect_uri(any, Some(client)).unwrap().as_str(), client);
+        assert_eq!(redirect_uri(fixed, Some(fixed)).unwrap().as_str(), fixed);
+
+        for (registered, requested) in [
+            (any, "http://127.0.0.1:0/callback"),
+            (any, "http://127.0.0.1:3000/other"),
+            (any, "http://localhost:3000/callback"),
+            (any, "http://127.0.0.1:3000/callback?next=/"),
+            (fixed, client),
+        ] {
+            let error = redirect_uri(registered, Some(requested)).unwrap_err();
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+        }
     }
 }

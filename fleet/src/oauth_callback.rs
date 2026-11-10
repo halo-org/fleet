@@ -1,4 +1,4 @@
-use crate::{AuthenticationError, oauth::Authorization};
+use crate::AuthenticationError;
 use core::{convert::Infallible, pin::pin, time::Duration};
 use futures_util::future::{self, Either};
 use http_body_util::Full;
@@ -12,27 +12,44 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::oneshot;
+use tokio::{net::TcpListener, sync::oneshot};
+use url::Url;
+
+pub async fn bind(redirect_uri: &mut Url) -> Result<TcpListener, AuthenticationError> {
+    let listener = TcpListener::bind((
+        core::net::Ipv4Addr::LOCALHOST,
+        redirect_uri.port_or_known_default().unwrap_or(80),
+    ))
+    .await
+    .map_err(AuthenticationError::Callback)?;
+    let port = listener
+        .local_addr()
+        .map_err(AuthenticationError::Callback)?
+        .port();
+    redirect_uri
+        .set_port(Some(port))
+        .expect("HTTP URL accepts a port");
+    Ok(listener)
+}
 
 pub async fn wait(
-    authorization: &Authorization,
-    cancelled: oneshot::Receiver<()>,
+    listener: &TcpListener,
+    redirect_uri: &Url,
+    state: &str,
 ) -> Result<BTreeMap<String, String>, AuthenticationError> {
     let (sender, receiver) = oneshot::channel();
     let sender = Arc::new(Mutex::new(Some(sender)));
     let accept = async {
         loop {
-            let (stream, _) = authorization
-                .listener
+            let (stream, _) = listener
                 .accept()
                 .await
                 .map_err(AuthenticationError::Callback)?;
             let sender = sender.clone();
-            let state = authorization.id.clone();
-            let path = authorization.redirect_uri.path().to_owned();
-            let authority = authorization.redirect_uri
-                [url::Position::BeforeHost..url::Position::AfterPort]
-                .to_owned();
+            let state = state.to_owned();
+            let path = redirect_uri.path().to_owned();
+            let authority =
+                redirect_uri[url::Position::BeforeHost..url::Position::AfterPort].to_owned();
             tokio::spawn(async move {
                 let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                     let result = parse(&request, &path, &authority, &state);
@@ -74,17 +91,25 @@ pub async fn wait(
             });
         }
     };
-    let callback = async {
-        match future::select(pin!(receiver), pin!(accept)).await {
-            Either::Left((result, _)) => result.map_err(|_| AuthenticationError::Cancelled),
-            Either::Right((result, _)) => result,
-        }
-    };
-    let callback = tokio::time::timeout(Duration::from_secs(600), callback);
-    match future::select(pin!(cancelled), pin!(callback)).await {
-        Either::Left(_) => Err(AuthenticationError::Cancelled),
-        Either::Right((result, _)) => result.map_err(|_| AuthenticationError::Cancelled)?,
+    match future::select(pin!(receiver), pin!(accept)).await {
+        Either::Left((result, _)) => result.map_err(|_| AuthenticationError::Cancelled),
+        Either::Right((result, _)) => result,
     }
+}
+
+/// Reads a callback address that a client received.
+pub fn received(
+    redirect_uri: &Url,
+    url: &str,
+    state: &str,
+) -> Result<BTreeMap<String, String>, AuthenticationError> {
+    let url = Url::parse(url).map_err(|_| AuthenticationError::Invalid("invalid callback URL"))?;
+    if url[..url::Position::AfterPath] != redirect_uri[..url::Position::AfterPath] {
+        return Err(AuthenticationError::Invalid(
+            "callback URL does not match the redirect URI",
+        ));
+    }
+    parameters(url.query(), state)
 }
 
 fn parse<B>(
@@ -103,10 +128,15 @@ fn parse<B>(
     {
         return Err(AuthenticationError::Invalid("invalid callback request"));
     }
+    parameters(request.uri().query(), state)
+}
+
+fn parameters(
+    query: Option<&str>,
+    state: &str,
+) -> Result<BTreeMap<String, String>, AuthenticationError> {
     let mut parameters = BTreeMap::new();
-    for (name, value) in
-        form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
-    {
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
         if parameters
             .insert(name.into_owned(), value.into_owned())
             .is_some()
@@ -151,6 +181,29 @@ mod tests {
         let parameters = parse(&request, "/callback", "127.0.0.1:1455", "expected").unwrap();
 
         assert_eq!(parameters.get("client_id").unwrap(), "issued");
+        assert_eq!(parameters.get("code").unwrap(), "test");
+    }
+
+    #[test]
+    fn received_urls_must_match_the_redirect_uri() {
+        let redirect_uri = Url::parse("http://127.0.0.1:3000/callback").unwrap();
+        for url in [
+            "http://127.0.0.1:3001/callback?state=expected&code=test",
+            "http://localhost:3000/callback?state=expected&code=test",
+            "http://127.0.0.1:3000/other?state=expected&code=test",
+            "http://127.0.0.1:3000/callback?state=wrong&code=test",
+        ] {
+            let error = received(&redirect_uri, url, "expected").unwrap_err();
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+        }
+
+        let parameters = received(
+            &redirect_uri,
+            "http://127.0.0.1:3000/callback?state=expected&code=test#ignored",
+            "expected",
+        )
+        .unwrap();
+
         assert_eq!(parameters.get("code").unwrap(), "test");
     }
 }

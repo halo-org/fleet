@@ -1,5 +1,5 @@
 use crate::{
-    Fleet, FleetError,
+    AuthenticationError, Fleet, FleetError,
     api::{ApiError, ResponseBody},
 };
 use core::error::Error;
@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 struct AuthorizeRequest {
     method: String,
+    #[serde(default)]
+    redirect_uri: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallbackRequest {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -46,24 +54,19 @@ where
         .map(|id| percent_encoding::percent_decode_str(id).decode_utf8())
         .transpose()
         .map_err(|_| ApiError::BadRequest("Invalid connection ID".into()))?;
-    let id = id.as_deref().unwrap_or_default();
+    let id = id.map(String::from).unwrap_or_default();
     let response = match (&parts.method, segments) {
         (&Method::GET, ["", "connections"]) => {
             crate::api::json_response(StatusCode::OK, &authentication.connections().await)
         }
         (&Method::POST, ["", "connections", _, "authorizations"]) => {
             let request: AuthorizeRequest = crate::api::read_json(&parts.headers, body).await?;
-            let guard = fleet
-                .idle_handler()
-                .track_mutation()
-                .ok_or(ApiError::Fleet(FleetError::ShuttingDown))?;
-            let id = id.to_owned();
-            let info = crate::authentication::finish(async move {
-                let _guard = guard;
-                authentication.authorize(&id, &request.method).await
+            let info = mutation(fleet, async move {
+                authentication
+                    .authorize(&id, &request.method, request.redirect_uri.as_deref())
+                    .await
             })
-            .await
-            .map_err(ApiError::Authentication)?;
+            .await?;
             let mut response = crate::api::json_response(StatusCode::CREATED, &info);
             response.headers_mut().insert(
                 header::LOCATION,
@@ -75,40 +78,45 @@ where
         }
         (&Method::GET, ["", "connections", _, "authorizations", authorization]) => {
             let info = authentication
-                .authorization(id, authorization)
+                .authorization(&id, authorization)
                 .await
                 .map_err(ApiError::Authentication)?;
             crate::api::json_response(StatusCode::OK, &info)
         }
+        (
+            &Method::POST,
+            [
+                "",
+                "connections",
+                _,
+                "authorizations",
+                authorization,
+                "callback",
+            ],
+        ) => {
+            let request: CallbackRequest = crate::api::read_json(&parts.headers, body).await?;
+            let authorization = (*authorization).to_owned();
+            let info = mutation(fleet, async move {
+                authentication
+                    .callback(&id, &authorization, &request.url)
+                    .await
+            })
+            .await?;
+            crate::api::json_response(StatusCode::OK, &info)
+        }
         (&Method::PUT, ["", "connections", _, "credential"]) => {
             let request: CredentialRequest = crate::api::read_json(&parts.headers, body).await?;
-            let guard = fleet
-                .idle_handler()
-                .track_mutation()
-                .ok_or(ApiError::Fleet(FleetError::ShuttingDown))?;
-            let id = id.to_owned();
-            crate::authentication::finish(async move {
-                let _guard = guard;
+            mutation(fleet, async move {
                 authentication
                     .set_key(&id, &request.method, request.key)
                     .await
             })
-            .await
-            .map_err(ApiError::Authentication)?;
+            .await?;
             crate::api::empty_response(StatusCode::NO_CONTENT)
         }
         (&Method::DELETE, ["", "connections", _, "credential"]) => {
-            let guard = fleet
-                .idle_handler()
-                .track_mutation()
-                .ok_or(ApiError::Fleet(FleetError::ShuttingDown))?;
-            let id = id.to_owned();
-            let revocation_confirmed = crate::authentication::finish(async move {
-                let _guard = guard;
-                authentication.sign_out(&id).await
-            })
-            .await
-            .map_err(ApiError::Authentication)?;
+            let revocation_confirmed =
+                mutation(fleet, async move { authentication.sign_out(&id).await }).await?;
             crate::api::json_response(
                 StatusCode::OK,
                 &SignOutResponse {
@@ -119,7 +127,11 @@ where
         (_, ["", "connections"] | ["", "connections", _, "authorizations", _]) => {
             return Err(ApiError::MethodNotAllowed("GET"));
         }
-        (_, ["", "connections", _, "authorizations"]) => {
+        (
+            _,
+            ["", "connections", _, "authorizations"]
+            | ["", "connections", _, "authorizations", _, "callback"],
+        ) => {
             return Err(ApiError::MethodNotAllowed("POST"));
         }
         (_, ["", "connections", _, "credential"]) => {
@@ -133,6 +145,22 @@ where
         header::HeaderValue::from_static("no-store"),
     );
     Ok(response)
+}
+
+async fn mutation<T: Send + 'static>(
+    fleet: &Fleet,
+    operation: impl Future<Output = Result<T, AuthenticationError>> + Send + 'static,
+) -> Result<T, ApiError> {
+    let guard = fleet
+        .idle_handler()
+        .track_mutation()
+        .ok_or(ApiError::Fleet(FleetError::ShuttingDown))?;
+    crate::authentication::finish(async move {
+        let _guard = guard;
+        operation.await
+    })
+    .await
+    .map_err(ApiError::Authentication)
 }
 
 fn validate_request(parts: &Parts) -> Result<(), ApiError> {

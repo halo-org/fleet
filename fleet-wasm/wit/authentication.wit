@@ -16,7 +16,7 @@ interface authentication {
         token-url: string,
         /// The public client ID.
         client-id: string,
-        /// The registered redirect URI.
+        /// The registered redirect URI. Port 0 means any port is registered.
         redirect-uri: string,
         /// The requested scopes.
         scopes: list<string>,
