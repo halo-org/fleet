@@ -648,6 +648,7 @@ dependencies = [
  "fleet-store",
  "futures-channel",
  "futures-util",
+ "http",
  "rustix",
  "serde_json",
  "tokio",

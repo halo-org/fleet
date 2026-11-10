@@ -12,7 +12,7 @@ On Windows it is `%APPDATA%\fleet`.
     "models": {
       "path": "./plugins/models.wasm",
       "capabilities": {
-        "http": true,
+        "http": ["https://api.example.com"],
         "credentials": true
       }
     }
@@ -35,8 +35,10 @@ Providers reference a plugin and pass it an arbitrary JSON configuration object.
 The provider name is its namespace and credential scope. A model named `example`
 from the `work` provider is addressed as `work:example`.
 
-Capabilities are approved per plugin and default to no access. HTTP enables
-outgoing requests. Credentials enables access to that provider's saved credentials.
+Capabilities are approved per plugin and default to no access. HTTP lists the
+origins that outgoing requests may use, each a scheme, host and optional port.
+Requests to other origins are denied. Credentials enables access to that
+provider's saved credentials.
 Filesystem access uses a `filesystem` array of mounts:
 
 ```json

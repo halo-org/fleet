@@ -16,6 +16,7 @@ fleet-core.workspace = true
 fleet-kit.workspace = true
 futures-channel = { workspace = true, features = ["std", "sink"] }
 futures-util = { workspace = true, features = ["std", "sink"] }
+http = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["async", "component-model", "component-model-async", "cranelift", "pooling-allocator", "runtime", "std"] }

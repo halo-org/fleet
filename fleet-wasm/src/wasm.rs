@@ -138,7 +138,7 @@ impl Wasm {
             wasmtime_wasi::p3::filesystem::add_to_linker(&mut linker)
                 .map_err(WasmError::runtime)?;
         }
-        if capabilities.http {
+        if !capabilities.http.is_empty() {
             wasmtime_wasi_http::p3::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
         }
         if capabilities.workers {

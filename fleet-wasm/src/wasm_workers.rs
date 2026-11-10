@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkspaceHost,
+    WasmEnvironment, WasmError, WasmState,
     bindings::{worker::WorkerProviderPre, workers},
     wasm_worker_connection::{ConnectionState, WasmWorkerConnection},
 };
@@ -22,7 +22,6 @@ use wasmtime::{
     StoreLimitsBuilder,
     component::{Access, Accessor, HasSelf, InstancePre, Resource},
 };
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 #[cfg(test)]
 mod tests;
@@ -45,10 +44,7 @@ struct Workers {
 #[derive(Clone)]
 struct Factory {
     instance: WorkerProviderPre<WasmState>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
 }
 
 #[derive(Default)]
@@ -96,18 +92,12 @@ enum Connect {
 impl WasmWorkers {
     pub(crate) fn new(
         instance: InstancePre<WasmState>,
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
+        environment: WasmEnvironment,
     ) -> Result<Self, WasmError> {
         Ok(Self(Arc::new(Workers {
             factory: Factory {
                 instance: WorkerProviderPre::new(instance).map_err(WasmError::runtime)?,
-                config,
-                filesystem,
-                credentials,
-                workspace_host,
+                environment,
             },
             registry: Mutex::new(Registry::default()),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
@@ -212,14 +202,8 @@ impl WasmWorkers {
 
 impl Factory {
     async fn run(&self, initialization: Vec<u8>, listener: &Arc<Listener>) -> Result<(), String> {
-        let mut store = WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            None,
-        )
-        .into_store(self.instance.engine());
+        let mut store =
+            WasmState::new(self.environment.clone(), None).into_store(self.instance.engine());
         store
             .set_fuel(u64::MAX)
             .map_err(|error| format!("failed to configure worker fuel: {error:#}"))?;

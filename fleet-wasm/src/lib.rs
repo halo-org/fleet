@@ -12,7 +12,8 @@
 //! WASI 0.3 capabilities are configured per provider. WASI operations require
 //! a Tokio runtime with I/O and time enabled, as do host processes.
 //! Clocks and randomness are available. The guest does not inherit environment
-//! variables or standard streams, and raw sockets are unavailable.
+//! variables or standard streams, and raw sockets are unavailable. Outgoing HTTP
+//! requests are denied unless they target an approved [`WasmOrigin`].
 //! The process capability runs host programs outside the WASI sandbox.
 //! Workspace imports delegate to a [`fleet_kit::Workspaces`] implementation
 //! through [`WasmWorkspaceHost`]. Blob imports delegate through [`WasmBlobs`]. Model calls can
@@ -89,6 +90,7 @@ mod wasm_blobs;
 mod wasm_capabilities;
 mod wasm_credentials;
 mod wasm_error;
+mod wasm_http;
 mod wasm_models;
 mod wasm_process;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -108,11 +110,17 @@ pub use self::{
     wasm_capabilities::{WasmCapabilities, WasmMount},
     wasm_credentials::WasmCredentials,
     wasm_error::WasmError,
+    wasm_http::WasmOrigin,
     wasm_registry::{WasmProvider, WasmRegistry},
     wasm_workspace_host::WasmWorkspaceHost,
 };
 
 pub(crate) use self::{
-    wasm_models::WasmModels, wasm_prompts::WasmPrompts, wasm_state::WasmState,
-    wasm_tools::WasmTools, wasm_workers::WasmWorkers, wasm_workspaces::WasmWorkspaces,
+    wasm_http::WasmOrigins,
+    wasm_models::WasmModels,
+    wasm_prompts::WasmPrompts,
+    wasm_state::{WasmEnvironment, WasmState},
+    wasm_tools::WasmTools,
+    wasm_workers::WasmWorkers,
+    wasm_workspaces::WasmWorkspaces,
 };

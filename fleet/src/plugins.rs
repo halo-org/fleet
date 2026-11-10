@@ -2,8 +2,8 @@ use crate::{Authentication, Config};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
-    Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmProvider,
-    WasmRegistry, WasmWorkspaceHost,
+    Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmOrigin,
+    WasmProvider, WasmRegistry, WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -60,7 +60,7 @@ pub struct PluginCapabilities {
     #[serde(default)]
     blobs: bool,
     #[serde(default)]
-    http: bool,
+    http: Vec<String>,
     #[serde(default)]
     filesystem: Vec<PluginMount>,
     #[serde(default)]
@@ -153,6 +153,15 @@ pub async fn load(
             io::Error::other(format!("plugin was not loaded: {}", provider.plugin))
         })?;
         let capabilities = plugin.capabilities();
+        let http = capabilities
+            .http
+            .iter()
+            .map(|origin| origin.parse::<WasmOrigin>())
+            .collect::<Result<_, _>>()
+            .map_err(|source| LoadError {
+                target: format!("plugin {}", provider.plugin),
+                source,
+            })?;
         let mut workspaces = WasmRegistry::new();
         for dependency in &capabilities.workspaces {
             let provider = loaded
@@ -165,7 +174,7 @@ pub async fn load(
             blobs: capabilities.blobs.then(|| {
                 WasmBlobs::new(blobs.clone()).with_agents(move |id| blob_store.agent_blobs(id))
             }),
-            http: capabilities.http,
+            http,
             filesystem: capabilities
                 .filesystem
                 .iter()

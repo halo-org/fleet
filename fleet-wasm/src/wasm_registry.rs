@@ -1,6 +1,6 @@
 use crate::{
-    WasmCapabilities, WasmCredentials, WasmError, WasmModels, WasmPrompts, WasmState, WasmTools,
-    WasmWorkers, WasmWorkspaceHost, WasmWorkspaces,
+    WasmCapabilities, WasmEnvironment, WasmError, WasmModels, WasmOrigins, WasmPrompts, WasmState,
+    WasmTools, WasmWorkers, WasmWorkspaces,
     bindings::authentication::{
         AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
     },
@@ -16,12 +16,8 @@ use fleet_kit::{
     Workspaces,
 };
 use futures_util::{Stream, future::Either, stream};
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, btree_map::Entry};
 use wasmtime::component::{Component, InstancePre, Linker};
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// Named WebAssembly providers.
 ///
@@ -41,10 +37,7 @@ pub struct WasmProvider {
     prompts: Option<WasmPrompts>,
     workspaces: Option<WasmWorkspaces>,
     authentication: Option<AuthenticationProviderPre<WasmState>>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
 }
 
@@ -112,48 +105,25 @@ impl WasmProvider {
         let instance = linker
             .instantiate_pre(component)
             .map_err(WasmError::runtime)?;
-        let config: Arc<str> = serde_json::to_string(config)?.into();
-        let credentials = capabilities.credentials.clone();
-        let workspace_host = capabilities.workspaces.clone();
-        let blob_host = capabilities.blobs.clone();
-        let filesystem = capabilities.open_filesystem()?;
+        let environment = WasmEnvironment {
+            config: serde_json::to_string(config)?.into(),
+            filesystem: capabilities.open_filesystem()?,
+            origins: WasmOrigins::new(capabilities.http),
+            credentials: capabilities.credentials,
+            workspace_host: capabilities.workspaces,
+        };
+        let blob_host = capabilities.blobs;
         let workers = worker
-            .map(|instance| {
-                WasmWorkers::new(
-                    instance,
-                    config.clone(),
-                    filesystem.clone(),
-                    credentials.clone(),
-                    workspace_host.clone(),
-                )
-            })
+            .map(|instance| WasmWorkers::new(instance, environment.clone()))
             .transpose()?;
 
         let mut models = component
             .get_export_index(None, "fleet:providers/models@0.0.0")
-            .map(|_| {
-                WasmModels::new(
-                    instance.clone(),
-                    config.clone(),
-                    filesystem.clone(),
-                    credentials.clone(),
-                    workspace_host.clone(),
-                    workers.clone(),
-                )
-            })
+            .map(|_| WasmModels::new(instance.clone(), environment.clone(), workers.clone()))
             .transpose()?;
         let mut tools = component
             .get_export_index(None, "fleet:providers/tools@0.0.0")
-            .map(|_| {
-                WasmTools::new(
-                    instance.clone(),
-                    config.clone(),
-                    filesystem.clone(),
-                    credentials.clone(),
-                    workspace_host.clone(),
-                    workers.clone(),
-                )
-            })
+            .map(|_| WasmTools::new(instance.clone(), environment.clone(), workers.clone()))
             .transpose()?;
         if let Some(models) = &mut models {
             models.set_blobs(blob_host.clone());
@@ -163,29 +133,11 @@ impl WasmProvider {
         }
         let prompts = component
             .get_export_index(None, "fleet:providers/prompts@0.0.0")
-            .map(|_| {
-                WasmPrompts::new(
-                    instance.clone(),
-                    config.clone(),
-                    filesystem.clone(),
-                    credentials.clone(),
-                    workspace_host.clone(),
-                    workers.clone(),
-                )
-            })
+            .map(|_| WasmPrompts::new(instance.clone(), environment.clone(), workers.clone()))
             .transpose()?;
         let workspaces = component
             .get_export_index(None, "fleet:providers/workspaces@0.0.0")
-            .map(|_| {
-                WasmWorkspaces::new(
-                    instance.clone(),
-                    config.clone(),
-                    filesystem.clone(),
-                    credentials.clone(),
-                    workspace_host.clone(),
-                    workers.clone(),
-                )
-            })
+            .map(|_| WasmWorkspaces::new(instance.clone(), environment.clone(), workers.clone()))
             .transpose()?;
         let authentication = component
             .get_export_index(None, "fleet:providers/authentication@0.0.0")
@@ -202,10 +154,7 @@ impl WasmProvider {
             prompts,
             workspaces,
             authentication,
-            config,
-            filesystem,
-            credentials,
-            workspace_host,
+            environment,
             workers,
         })
     }
@@ -231,14 +180,8 @@ impl WasmProvider {
         let Some(instance) = &self.authentication else {
             return Ok(Vec::new());
         };
-        let mut store = WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .into_store(instance.engine());
+        let mut store = WasmState::new(self.environment.clone(), self.workers.clone())
+            .into_store(instance.engine());
         let instance = instance
             .instantiate_async(&mut store)
             .await
@@ -528,10 +471,7 @@ mod tests {
             prompts: None,
             workspaces: None,
             authentication: None,
-            config: "{}".into(),
-            filesystem: WasiFilesystemCtx::default(),
-            credentials: None,
-            workspace_host: None,
+            environment: WasmEnvironment::default(),
             workers: None,
         }
     }

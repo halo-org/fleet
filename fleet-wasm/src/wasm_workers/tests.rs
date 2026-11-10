@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Wasm, WasmCapabilities, WasmRegistry};
+use crate::{Wasm, WasmCapabilities, WasmEnvironment, WasmRegistry};
 use core::assert_matches;
 use fleet_core::{Configured, ContentBlock, JsonObject, PromptContext, PromptOutput, Prompts as _};
 use serde_json::json;
@@ -175,8 +175,7 @@ fn dropping_a_call_closes_its_connection_and_retirement_is_atomic() {
     let connections = Arc::new(Semaphore::new(1));
     let client = listener.connect(&connections).unwrap().unwrap();
     let state = client.state().clone();
-    let mut store = WasmState::new("{}".into(), WasiFilesystemCtx::default(), None, None, None)
-        .into_store(&engine);
+    let mut store = WasmState::new(WasmEnvironment::default(), None).into_store(&engine);
     store.data_mut().table().push(client).unwrap();
 
     run(async {

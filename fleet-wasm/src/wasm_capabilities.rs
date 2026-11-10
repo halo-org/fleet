@@ -1,4 +1,4 @@
-use crate::{WasmBlobs, WasmCredentials, WasmError, WasmWorkspaceHost};
+use crate::{WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmWorkspaceHost};
 use core::mem;
 use std::path::PathBuf;
 use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
@@ -12,8 +12,8 @@ pub struct WasmCapabilities {
     pub blobs: Option<WasmBlobs>,
     /// Whether private workers may outlive individual provider calls.
     pub workers: bool,
-    /// Whether outgoing HTTP requests are allowed.
-    pub http: bool,
+    /// Origins that outgoing HTTP requests may use.
+    pub http: Vec<WasmOrigin>,
     /// Directories available to the provider.
     pub filesystem: Vec<WasmMount>,
     /// Whether programs can run with host permissions outside the WASI sandbox.
@@ -36,9 +36,9 @@ pub struct WasmMount {
 }
 
 impl WasmCapabilities {
-    pub(crate) fn open_filesystem(self) -> Result<WasiFilesystemCtx, WasmError> {
+    pub(crate) fn open_filesystem(&self) -> Result<WasiFilesystemCtx, WasmError> {
         let mut builder = WasiCtx::builder();
-        for mount in self.filesystem {
+        for mount in &self.filesystem {
             let permissions = if mount.read_only {
                 FsPerms::ReadOnly
             } else {

@@ -1,51 +1,34 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
+    WasmEnvironment, WasmError, WasmState, WasmWorkers,
     bindings::workspaces::{WorkspaceProviderPre, exports::fleet::providers::workspaces},
 };
 use fleet_kit::{Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceOutput, WorkspaceWrite};
-use std::sync::Arc;
 use wasmtime::{Store, component::InstancePre};
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly workspace provider.
 #[derive(Clone)]
 pub struct WasmWorkspaces {
     instance: WorkspaceProviderPre<WasmState>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
 }
 
 impl WasmWorkspaces {
     pub(crate) fn new(
         instance: InstancePre<WasmState>,
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
+        environment: WasmEnvironment,
         workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: WorkspaceProviderPre::new(instance).map_err(WasmError::runtime)?,
-            config,
-            filesystem,
-            credentials,
-            workspace_host,
+            environment,
             workers,
         })
     }
 
     fn store(&self) -> Store<WasmState> {
-        WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .into_store(self.instance.engine())
+        WasmState::new(self.environment.clone(), self.workers.clone())
+            .into_store(self.instance.engine())
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Workspace>, WasmError> {

@@ -1,51 +1,34 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
+    WasmEnvironment, WasmError, WasmState, WasmWorkers,
     bindings::{prompts::PromptProviderPre, types},
 };
 use fleet_core::{JsonObject, Prompt, PromptContext, PromptResponse};
-use std::sync::Arc;
 use wasmtime::{Store, component::InstancePre};
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly prompt provider.
 #[derive(Clone)]
 pub struct WasmPrompts {
     instance: PromptProviderPre<WasmState>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
 }
 
 impl WasmPrompts {
     pub(crate) fn new(
         instance: InstancePre<WasmState>,
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
+        environment: WasmEnvironment,
         workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             instance: PromptProviderPre::new(instance).map_err(WasmError::runtime)?,
-            config,
-            filesystem,
-            credentials,
-            workspace_host,
+            environment,
             workers,
         })
     }
 
     fn store(&self) -> Store<WasmState> {
-        WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .into_store(self.instance.engine())
+        WasmState::new(self.environment.clone(), self.workers.clone())
+            .into_store(self.instance.engine())
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Prompt>, WasmError> {

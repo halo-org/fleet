@@ -1,11 +1,11 @@
 use super::{BlobId, ContentBlock, WasmBlobs, WasmState, blobs};
+use crate::WasmEnvironment;
 use core::assert_matches;
 use fleet_core::ClientStore as _;
 use fleet_core::{Agent, Configured, JsonObject};
 use fleet_kit::Blobs as _;
 use fleet_store::Store as BlobStore;
 use wasmtime::{Config, Engine, Store, component::HasSelf};
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 const IMAGE: &[u8] = include_bytes!("../../../fleet-store/tests/fixtures/image.png");
 
@@ -21,8 +21,7 @@ fn state(blobs: Option<WasmBlobs>) -> Store<WasmState> {
     config.wasm_component_model_async(true);
     Store::new(
         &Engine::new(&config).unwrap(),
-        WasmState::new("{}".into(), WasiFilesystemCtx::default(), None, None, None)
-            .with_blobs(blobs),
+        WasmState::new(WasmEnvironment::default(), None).with_blobs(blobs),
     )
 }
 

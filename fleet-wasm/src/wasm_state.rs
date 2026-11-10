@@ -1,5 +1,5 @@
 use crate::{
-    WasmBlobs, WasmCredentials, WasmWorkers, WasmWorkspaceHost,
+    WasmBlobs, WasmCredentials, WasmOrigins, WasmWorkers, WasmWorkspaceHost,
     bindings::{configuration, credentials},
 };
 use std::sync::Arc;
@@ -10,6 +10,16 @@ use wasmtime::{
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView, filesystem::WasiFilesystemCtx};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
+/// Static capabilities shared by a provider's instances.
+#[derive(Clone, Default)]
+pub struct WasmEnvironment {
+    pub config: Arc<str>,
+    pub filesystem: WasiFilesystemCtx,
+    pub origins: WasmOrigins,
+    pub credentials: Option<WasmCredentials>,
+    pub workspace_host: Option<WasmWorkspaceHost>,
+}
+
 pub struct WasmState {
     blobs: Option<WasmBlobs>,
     config: Arc<str>,
@@ -19,17 +29,19 @@ pub struct WasmState {
     limits: StoreLimits,
     wasi: WasiCtx,
     http: WasiHttpCtx,
+    origins: WasmOrigins,
     table: ResourceTable,
 }
 
 impl WasmState {
-    pub fn new(
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
-        workers: Option<WasmWorkers>,
-    ) -> Self {
+    pub fn new(environment: WasmEnvironment, workers: Option<WasmWorkers>) -> Self {
+        let WasmEnvironment {
+            config,
+            filesystem,
+            origins,
+            credentials,
+            workspace_host,
+        } = environment;
         let mut wasi = WasiCtx::default();
         *wasi.filesystem() = filesystem;
 
@@ -42,6 +54,7 @@ impl WasmState {
             limits: StoreLimits::default(),
             wasi,
             http: WasiHttpCtx::new(),
+            origins,
             table: ResourceTable::new(),
         }
     }
@@ -137,7 +150,7 @@ impl WasiHttpView for WasmState {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: wasmtime_wasi_http::default_hooks(),
+            hooks: &mut self.origins,
         }
     }
 }

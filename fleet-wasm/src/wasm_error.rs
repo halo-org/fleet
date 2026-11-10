@@ -16,6 +16,7 @@ enum Kind {
     Json(serde_json::Error),
     InvalidNamespace(String),
     DuplicateNamespace(String),
+    InvalidOrigin(String),
     NoProviderInterfaces,
     ModelNotFound(ModelName),
     ToolNotFound(ToolName),
@@ -48,6 +49,10 @@ impl WasmError {
 
     pub(crate) const fn duplicate_namespace(namespace: String) -> Self {
         Self(Kind::DuplicateNamespace(namespace))
+    }
+
+    pub(crate) fn invalid_origin(origin: &str) -> Self {
+        Self(Kind::InvalidOrigin(origin.into()))
     }
 
     pub(crate) const fn no_provider_interfaces() -> Self {
@@ -133,6 +138,7 @@ impl fmt::Display for WasmError {
             Kind::DuplicateNamespace(namespace) => {
                 write!(f, "provider namespace {namespace} is already registered")
             }
+            Kind::InvalidOrigin(origin) => write!(f, "invalid HTTP origin \"{origin}\""),
             Kind::NoProviderInterfaces => {
                 f.write_str("component does not export models, tools, prompts or workspaces")
             }
@@ -156,6 +162,7 @@ impl core::error::Error for WasmError {
             Kind::Json(error) => Some(error),
             Kind::InvalidNamespace(_)
             | Kind::DuplicateNamespace(_)
+            | Kind::InvalidOrigin(_)
             | Kind::NoProviderInterfaces
             | Kind::ModelNotFound(_)
             | Kind::ToolNotFound(_)

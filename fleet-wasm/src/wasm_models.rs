@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
+    WasmEnvironment, WasmError, WasmState, WasmWorkers,
     bindings::{
         models::{ModelProviderPre, exports::fleet::providers::models},
         types,
@@ -14,12 +14,10 @@ use fleet_core::{
 };
 use futures_channel::{mpsc, oneshot};
 use futures_util::{Sink as _, Stream, StreamExt as _, future, stream};
-use std::sync::Arc;
 use wasmtime::{
     StoreContextMut,
     component::{InstancePre, Source, StreamConsumer, StreamResult},
 };
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly model provider.
 ///
@@ -28,10 +26,7 @@ use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 pub struct WasmModels {
     blobs: Option<crate::WasmBlobs>,
     instance: ModelProviderPre<WasmState>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
 }
 
@@ -43,19 +38,13 @@ struct ResponseConsumer {
 impl WasmModels {
     pub(crate) fn new(
         instance: InstancePre<WasmState>,
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
+        environment: WasmEnvironment,
         workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             blobs: None,
             instance: ModelProviderPre::new(instance).map_err(WasmError::runtime)?,
-            config,
-            filesystem,
-            credentials,
-            workspace_host,
+            environment,
             workers,
         })
     }
@@ -65,14 +54,8 @@ impl WasmModels {
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Model>, WasmError> {
-        let mut store = WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .into_store(self.instance.engine());
+        let mut store = WasmState::new(self.environment.clone(), self.workers.clone())
+            .into_store(self.instance.engine());
         let instance = self
             .instance
             .instantiate_async(&mut store)
@@ -101,10 +84,7 @@ impl WasmModels {
         input: &[ModelInput],
     ) -> impl Stream<Item = Result<ModelResponseChunk, WasmError>> + Send + use<> {
         let instance = self.instance.clone();
-        let config = self.config.clone();
-        let filesystem = self.filesystem.clone();
-        let credentials = self.credentials.clone();
-        let workspace_host = self.workspace_host.clone();
+        let environment = self.environment.clone();
         let workers = self.workers.clone();
         let context = types::ModelContext::new(name, context);
         let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
@@ -112,10 +92,9 @@ impl WasmModels {
         let input = input.iter().map(types::ModelInput::from).collect();
         let (sender, receiver) = mpsc::channel(0);
         let run = async move {
-            let mut store =
-                WasmState::new(config, filesystem, credentials, workspace_host, workers)
-                    .with_blobs(blobs)
-                    .into_store(instance.engine());
+            let mut store = WasmState::new(environment, workers)
+                .with_blobs(blobs)
+                .into_store(instance.engine());
             let instance = instance
                 .instantiate_async(&mut store)
                 .await
@@ -175,15 +154,9 @@ impl WasmModels {
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, WasmError> {
         let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
-        let mut store = WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .with_blobs(blobs)
-        .into_store(self.instance.engine());
+        let mut store = WasmState::new(self.environment.clone(), self.workers.clone())
+            .with_blobs(blobs)
+            .into_store(self.instance.engine());
         let instance = self
             .instance
             .instantiate_async(&mut store)

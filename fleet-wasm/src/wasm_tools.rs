@@ -1,40 +1,29 @@
 use crate::{
-    WasmCredentials, WasmError, WasmState, WasmWorkers, WasmWorkspaceHost,
+    WasmEnvironment, WasmError, WasmState, WasmWorkers,
     bindings::{tools::ToolProviderPre, types},
 };
 use fleet_core::{JsonObject, Tool, ToolContext, ToolOutput};
-use std::sync::Arc;
 use wasmtime::{Store, component::InstancePre};
-use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 
 /// A WebAssembly tool provider.
 #[derive(Clone)]
 pub struct WasmTools {
     blobs: Option<crate::WasmBlobs>,
     instance: ToolProviderPre<WasmState>,
-    config: Arc<str>,
-    filesystem: WasiFilesystemCtx,
-    credentials: Option<WasmCredentials>,
-    workspace_host: Option<WasmWorkspaceHost>,
+    environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
 }
 
 impl WasmTools {
     pub(crate) fn new(
         instance: InstancePre<WasmState>,
-        config: Arc<str>,
-        filesystem: WasiFilesystemCtx,
-        credentials: Option<WasmCredentials>,
-        workspace_host: Option<WasmWorkspaceHost>,
+        environment: WasmEnvironment,
         workers: Option<WasmWorkers>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
             blobs: None,
             instance: ToolProviderPre::new(instance).map_err(WasmError::runtime)?,
-            config,
-            filesystem,
-            credentials,
-            workspace_host,
+            environment,
             workers,
         })
     }
@@ -44,14 +33,8 @@ impl WasmTools {
     }
 
     fn store(&self) -> Store<WasmState> {
-        WasmState::new(
-            self.config.clone(),
-            self.filesystem.clone(),
-            self.credentials.clone(),
-            self.workspace_host.clone(),
-            self.workers.clone(),
-        )
-        .into_store(self.instance.engine())
+        WasmState::new(self.environment.clone(), self.workers.clone())
+            .into_store(self.instance.engine())
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Tool>, WasmError> {
