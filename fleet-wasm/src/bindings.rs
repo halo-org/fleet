@@ -7,6 +7,16 @@ pub mod models {
 
 pub use models::fleet::providers::{configuration, types};
 
+pub mod blob_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "blob-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub use blob_host::fleet::providers::blobs;
+
 pub mod authentication {
     wasmtime::component::bindgen!({
         path: "wit",

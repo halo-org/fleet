@@ -10,7 +10,10 @@
 //! variables or standard streams, and raw sockets are unavailable.
 //! The process capability runs host programs outside the WASI sandbox.
 //! Workspace imports delegate to a [`fleet_kit::Workspaces`] implementation
-//! through [`WasmWorkspaceHost`].
+//! through [`WasmWorkspaceHost`]. Blob imports delegate through [`WasmBlobs`]. Model calls can
+//! read only their input's blob references and cannot write. Tool access is supplied by an
+//! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
+//! Metadata lookups receive no blob capability.
 //!
 //! ```no_run
 //! use fleet_core::JsonObject;
@@ -40,6 +43,7 @@
 mod bindings;
 mod convert;
 mod wasm;
+mod wasm_blobs;
 mod wasm_capabilities;
 mod wasm_credentials;
 mod wasm_error;
@@ -54,6 +58,7 @@ mod wasm_workspaces;
 
 pub use self::{
     wasm::{Wasm, WasmComponent},
+    wasm_blobs::WasmBlobs,
     wasm_capabilities::{WasmCapabilities, WasmMount},
     wasm_credentials::WasmCredentials,
     wasm_error::WasmError,

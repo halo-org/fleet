@@ -1,0 +1,44 @@
+/// Access to immutable blobs. IDs do not confer authorization.
+interface blobs {
+    use types.{blob-id};
+
+    record image-dimensions {
+        width: u32,
+        height: u32,
+    }
+
+    record blob-metadata {
+        media-type: string,
+        size: u64,
+        image: option<image-dimensions>,
+    }
+
+    enum blobs-error-kind {
+        not-found,
+        denied,
+        too-large,
+        invalid-data,
+        conflict,
+        other,
+    }
+
+    record blobs-error {
+        kind: blobs-error-kind,
+        message: string,
+    }
+
+    /// Returns metadata without loading the payload.
+    get: async func(id: blob-id) -> result<option<blob-metadata>, blobs-error>;
+
+    /// Reads the complete blob. The host may enforce a smaller limit.
+    read: async func(id: blob-id, limit: u64) -> result<list<u8>, blobs-error>;
+
+    /// Publishes immutable content. Identical retries succeed; conflicting writes fail.
+    /// Model calls receive read-only access. Tool writes are scoped by the host.
+    put: async func(id: blob-id, media-type: string, content: list<u8>)
+        -> result<blob-metadata, blobs-error>;
+}
+
+world blob-host {
+    import blobs;
+}

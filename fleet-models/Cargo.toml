@@ -11,8 +11,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+base64 = { workspace = true, features = ["alloc"] }
 bytes = { workspace = true, features = ["std"] }
 fleet-core.workspace = true
+fleet-kit.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 http = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["http2", "rustls", "stream"], optional = true }
@@ -21,6 +23,7 @@ serde_json = { workspace = true, features = ["std"] }
 sse-stream.workspace = true
 
 [dev-dependencies]
+fleet-store = { workspace = true, features = ["blobs"] }
 futures-executor = { workspace = true, features = ["std"] }
 
 [features]

@@ -137,6 +137,11 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
         if self.get::<MessageRecord>(&message_key)?.is_some() {
             return Err(StoreError::Conflict("message ID already exists"));
         }
+        let ids = crate::blob_records::validate(
+            self,
+            crate::blob_records::content_ids(&message.content),
+        )?;
+        crate::blob_records::grant(self, id, &ids)?;
         let position = agent.next_position;
         agent.next_position = position
             .checked_add(1)
@@ -257,6 +262,20 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
         agent: &mut AgentRecord,
         payload: data::EventPayload,
     ) -> Result<u128, StoreError> {
+        let ids = match &payload {
+            data::EventPayload::Input(_, content) => {
+                crate::blob_records::validate(self, crate::blob_records::content_ids(content))?
+            }
+            data::EventPayload::ToolResult(result) => crate::blob_records::validate(
+                self,
+                crate::blob_records::content_ids(&result.output.content),
+            )?,
+            data::EventPayload::Compaction(compaction) => {
+                crate::blob_records::validate_input(self, &compaction.input)?
+            }
+            data::EventPayload::ModelResponse(_) | data::EventPayload::TurnEnd(_) => Vec::new(),
+        };
+        crate::blob_records::grant(self, agent.agent.id, &ids)?;
         let cursor = agent.latest_event.map_or(0, |cursor| {
             cursor
                 .checked_add(1)

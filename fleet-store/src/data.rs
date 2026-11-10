@@ -18,6 +18,7 @@ pub struct Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentBlock {
     Text(String),
+    Image(u128),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +187,7 @@ impl From<fleet_core::ContentBlock> for ContentBlock {
     fn from(value: fleet_core::ContentBlock) -> Self {
         match value {
             fleet_core::ContentBlock::Text(value_0) => Self::Text(value_0),
+            fleet_core::ContentBlock::Image(id) => Self::Image(id.into()),
         }
     }
 }
@@ -194,6 +196,7 @@ impl From<ContentBlock> for fleet_core::ContentBlock {
     fn from(value: ContentBlock) -> Self {
         match value {
             ContentBlock::Text(value_0) => Self::Text(value_0),
+            ContentBlock::Image(id) => Self::Image(id.into()),
         }
     }
 }

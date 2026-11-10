@@ -49,6 +49,10 @@ where
     let (parts, body) = request.into_parts();
     let segments: Vec<_> = parts.uri.path().split('/').collect();
 
+    if matches!(segments.get(1), Some(&"uploads" | &"blobs")) {
+        return crate::blob_api::route(fleet, &parts, &segments, body).await;
+    }
+
     if segments.get(1) == Some(&"connections") {
         return crate::authentication_api::route(fleet, &parts, &segments, body).await;
     }
@@ -488,7 +492,7 @@ where
         .map_err(|error| ApiError::BadRequest(error.to_string()))
 }
 
-fn parse_id<T: From<u128>>(value: &str) -> Result<T, ApiError> {
+pub fn parse_id<T: From<u128>>(value: &str) -> Result<T, ApiError> {
     value.parse::<u128>().map(T::from).map_err(|_| {
         ApiError::BadRequest(
             "ID must be a decimal string containing a 128-bit unsigned integer".into(),
@@ -603,12 +607,13 @@ pub enum ApiError {
     UnsupportedMediaType,
     BodyTooLarge,
     Fleet(FleetError),
+    Blob(fleet_store::StoreError),
     Authentication(crate::AuthenticationError),
 }
 
 impl ApiError {
-    fn into_response(self) -> Response<ResponseBody> {
-        let (status, code, message) = match &self {
+    fn details(&self) -> (StatusCode, &'static str, &str) {
+        match self {
             Self::Authentication(error) => crate::authentication_api::error_details(error),
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "invalid_request", message.as_str())
@@ -639,6 +644,16 @@ impl ApiError {
                 "precondition_failed",
                 "Agent resource changed",
             ),
+            Self::Blob(error)
+            | Self::Fleet(FleetError::Store(
+                error @ (fleet_store::StoreError::BlobNotFound
+                | fleet_store::StoreError::InvalidBlob
+                | fleet_store::StoreError::BlobTooLarge
+                | fleet_store::StoreError::BlobDenied
+                | fleet_store::StoreError::BlobConflict
+                | fleet_store::StoreError::UploadNotFound
+                | fleet_store::StoreError::UploadConflict),
+            )) => crate::blob_api::error_details(error),
             Self::Fleet(FleetError::Store(error)) => match error.kind() {
                 ClientStoreErrorKind::Conflict => (
                     StatusCode::CONFLICT,
@@ -689,7 +704,11 @@ impl ApiError {
                 "internal_error",
                 "Could not read roles",
             ),
-        };
+        }
+    }
+
+    fn into_response(self) -> Response<ResponseBody> {
+        let (status, code, message) = self.details();
 
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             self.log();
@@ -712,8 +731,10 @@ impl ApiError {
     }
 
     fn log(&self) {
-        if let Self::Fleet(error) = self {
-            eprintln!("HTTP request failed: {}", ErrorChain(error));
+        match self {
+            Self::Fleet(error) => eprintln!("HTTP request failed: {}", ErrorChain(error)),
+            Self::Blob(error) => eprintln!("Blob request failed: {}", ErrorChain(error)),
+            _ => {}
         }
     }
 }

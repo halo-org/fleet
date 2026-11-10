@@ -690,6 +690,12 @@ pub enum ApiContentBlock {
         /// The text.
         text: String,
     },
+    /// An image stored as an immutable blob.
+    Image {
+        /// The blob identity.
+        #[serde(serialize_with = "serialize_id", deserialize_with = "deserialize_id")]
+        blob_id: u128,
+    },
 }
 
 // === Messages ===
@@ -1138,6 +1144,7 @@ impl From<ContentBlock> for ApiContentBlock {
     fn from(content: ContentBlock) -> Self {
         match content {
             ContentBlock::Text(text) => Self::Text { text },
+            ContentBlock::Image(id) => Self::Image { blob_id: id.into() },
         }
     }
 }
@@ -1146,6 +1153,7 @@ impl From<ApiContentBlock> for ContentBlock {
     fn from(content: ApiContentBlock) -> Self {
         match content {
             ApiContentBlock::Text { text } => Self::Text(text),
+            ApiContentBlock::Image { blob_id } => Self::Image(blob_id.into()),
         }
     }
 }

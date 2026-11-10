@@ -34,8 +34,8 @@ struct WakeStream {
 impl Store {
     /// Opens a store, creating it if needed.
     ///
-    /// Format 2 databases are upgraded transactionally to format 3 for metadata
-    /// revisions. Older binaries cannot reopen an upgraded database.
+    /// Format 2 and 3 databases are upgraded transactionally to format 4 for metadata
+    /// revisions and image content. Older binaries cannot reopen an upgraded database.
     ///
     /// # Errors
     ///
@@ -60,7 +60,8 @@ impl Store {
         {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             match records.get::<u32>(&[])? {
-                Some(3) => {}
+                Some(4) => {}
+                Some(3) | None => records.put(&[], &4_u32)?,
                 Some(2) => {
                     // Legacy metadata last changed at creation. Refresh the projection
                     // in case an agent already carried an application title.
@@ -74,13 +75,15 @@ impl Store {
                             crate::agents::now_millis(),
                         )?;
                     }
-                    records.put(&[], &3_u32)?;
+                    records.put(&[], &4_u32)?;
                 }
-                None => records.put(&[], &3_u32)?,
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
             crate::agents::expire(&mut records, crate::agents::now_millis())?;
         }
+        transaction.open_table(crate::blob_records::BYTES)?;
+        transaction.open_table(crate::blob_records::UPLOADS)?;
+        transaction.open_table(crate::blob_records::CHUNKS)?;
         transaction.commit()?;
         let notifications = Notifications::default();
         let worker = Arc::new(WorkerHandle::new(database, notifications.clone())?);

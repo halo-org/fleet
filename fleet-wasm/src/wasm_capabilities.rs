@@ -1,13 +1,15 @@
-use crate::{WasmCredentials, WasmError, WasmWorkspaceHost};
+use crate::{WasmBlobs, WasmCredentials, WasmError, WasmWorkspaceHost};
 use core::mem;
 use std::path::PathBuf;
 use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
 
 /// Access granted to a WebAssembly provider.
 ///
-/// Defaults to no HTTP, filesystem, process, credential or workspace access.
+/// Defaults to no access.
 #[derive(Clone, Debug, Default)]
 pub struct WasmCapabilities {
+    /// Blobs available to model and tool calls.
+    pub blobs: Option<WasmBlobs>,
     /// Whether outgoing HTTP requests are allowed.
     pub http: bool,
     /// Directories available to the provider.

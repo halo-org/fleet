@@ -12,15 +12,7 @@ pub fn encode(
     for input in input {
         match input {
             ModelInput::User(content) => {
-                let content: Vec<_> = content
-                    .iter()
-                    .map(|ContentBlock::Text(text)| {
-                        json!({
-                            "type": "input_text",
-                            "text": text,
-                        })
-                    })
-                    .collect();
+                let content = encode_content(content);
                 items.push(json!({
                     "type": "message",
                     "role": "user",
@@ -31,24 +23,29 @@ pub fn encode(
                 items.extend(encode_output(output, source == provenance)?);
             }
             ModelInput::ToolResult(result) => {
-                let mut content: Vec<_> = result
-                    .output
-                    .content
-                    .iter()
-                    .map(|ContentBlock::Text(text)| text.clone())
-                    .collect();
+                let mut content = encode_content(&result.output.content);
                 if let Some(structured) = &result.output.structured_content {
-                    content.push(serde_json::to_string(structured).map_err(|error| {
+                    let text = serde_json::to_string(structured).map_err(|error| {
                         OpenAiError::source("failed to encode tool output", error)
-                    })?);
+                    })?;
+                    content.push(json!({
+                        "type": "input_text",
+                        "text": text,
+                    }));
                 }
                 if result.output.is_error {
-                    content.insert(0, "Tool returned an error:".into());
+                    content.insert(
+                        0,
+                        json!({
+                            "type": "input_text",
+                            "text": "Tool returned an error:",
+                        }),
+                    );
                 }
                 items.push(json!({
                     "type": "function_call_output",
                     "call_id": result.call_id.as_ref(),
-                    "output": content.join("\n"),
+                    "output": content,
                 }));
             }
             ModelInput::Compaction(source, compaction) => {
@@ -81,6 +78,29 @@ pub fn encode(
     }
 
     Ok(items)
+}
+
+fn encode_content(content: &[ContentBlock]) -> Vec<Value> {
+    let mut encoded = Vec::new();
+    for block in content {
+        match block {
+            ContentBlock::Text(text) => encoded.push(json!({
+                "type": "input_text",
+                "text": text,
+            })),
+            ContentBlock::Image(id) => {
+                encoded.push(json!({
+                    "type": "input_text",
+                    "text": format!("Image reference: {id}"),
+                }));
+                encoded.push(json!({
+                    "type": "input_image",
+                    "image_url": format!("fleet-blob:{id}"),
+                }));
+            }
+        }
+    }
+    encoded
 }
 
 fn encode_output(output: &[ModelOutput], compatible: bool) -> Result<Vec<Value>, OpenAiError> {

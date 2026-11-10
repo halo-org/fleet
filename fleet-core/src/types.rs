@@ -462,7 +462,13 @@ pub struct Configured<N> {
 pub enum ContentBlock {
     /// Text content.
     Text(String),
+    /// Image content stored as an immutable blob.
+    Image(BlobId),
 }
+
+/// The ID of an immutable blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobId(u128);
 
 // === Messages ===
 
@@ -642,5 +648,6 @@ impl_newtype!(ToolName, String);
 impl_newtype!(ToolAlias, String);
 impl_newtype!(ToolCallId, String);
 impl_newtype!(PromptName, String);
+impl_newtype!(BlobId, u128);
 impl_newtype!(MessageId, u128);
 impl_newtype!(EventCursor, u128);

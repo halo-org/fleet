@@ -163,3 +163,58 @@ Untouched parameters are omitted from requests, preserving the role's config.
 Reset removes an override. A supplied `null` is an explicit value, and a schema's
 `default` annotation does not change the role's config. Schemas guide the form.
 They do not add validation to core.
+
+## Images and blobs
+
+Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside
+text. Blob IDs, like agent IDs, are decimal strings. Image bytes are immutable and stored in
+separate raw tables in `fleet.db`; events contain references, not base64 payloads. The database
+is upgraded to format 4 when opened. Older Fleet binaries cannot reopen it.
+
+Image uploads accept PNG, JPEG, GIF, and WebP, up to 10 MiB per image. The server validates the
+actual format and decodes with resource limits (8,192 pixels per edge and 32 million pixels).
+Messages allow up to 20 images and 40 MiB of image data. These are resource limits, not a promise
+that every model can consume that much image context. Images are not resized or recompressed.
+
+### Resumable HTTP uploads
+
+Uploads use the same trusted API boundary as other Fleet operations. There are no signed URLs
+or new user-authentication mechanisms. Keep the API on loopback or behind an authenticated
+proxy; do not expose it directly to untrusted clients. The web proxy also rejects cross-origin
+requests.
+
+1. `POST /uploads` with JSON `{"id":"123","media_type":"image/png","size":12345}`.
+   Allocate a random 128-bit ID and reuse it when retrying. Matching creation retries succeed.
+2. `HEAD /uploads/123` returns `Upload-Offset` and `Upload-Length`.
+3. `PATCH /uploads/123` with `Content-Type: application/offset+octet-stream`, an `Upload-Offset`
+   header, and at most 1 MiB of raw bytes. The offset advances atomically. A mismatched offset
+   returns 409 without modifying the upload. After an uncertain response, HEAD before resending.
+4. `POST /uploads/123/complete` with JSON `{}` validates and publishes the image, returning
+   `{"blob_id":"123"}`. Completion is idempotent. Until this succeeds, the upload is not readable
+   as a blob and cannot be attached to a message.
+5. `GET /blobs/123` retrieves the original bytes; HEAD returns their media type and length.
+
+`DELETE /uploads/123` discards staging data or a completion receipt, never a published blob.
+Sessions survive server restarts and expire after 24 hours. Expired sessions are reclaimed when
+new uploads are created. The store permits 64 unfinished sessions and reserves at most 256 MiB
+for their declared lengths. Published blobs are retained; automatic blob collection is not yet
+implemented. This is a Fleet upload protocol, not a tus-compatible endpoint.
+
+### Plugin access
+
+Approve `"blobs": true` in a plugin's `capabilities` and have its component import
+`fleet:providers/blobs@0.0.0`. The host supplies metadata, bounded reads, and immutable writes.
+Model generation and compaction get read-only access to the configured blob provider, including
+older blobs that are no longer in the current input. Compaction does not revoke access.
+Tools get access to the executing agent's attachments and can create new blobs. A model plugin
+must not assume any particular attachment tool exists. No filesystem paths or tools are injected.
+
+Native model providers use `OpenAiModels::with_blobs(...)`. WASM model plugins can implement the
+`fleet_kit::Blobs` interface using their generated blob-import bindings. Blob failures use the
+existing model error and retry handling. Images also carry a model-visible reference so
+independently configured tools can accept the same identity.
+
+The OpenAI adapter replaces retained image data URLs with blob references before storing
+compaction. Those references remain inside its provider-specific state.
+
+Rebuild existing provider components against the updated WIT files before using this version.

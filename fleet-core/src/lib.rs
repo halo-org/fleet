@@ -35,8 +35,8 @@ pub use self::{
     },
     runtime::run,
     types::{
-        Agent, AgentId, AgentState, Compaction, Configured, ContentBlock, Event, EventCursor,
-        EventPayload, JsonObject, JsonValue, Message, MessageId, MessageMode, Model,
+        Agent, AgentId, AgentState, BlobId, Compaction, Configured, ContentBlock, Event,
+        EventCursor, EventPayload, JsonObject, JsonValue, Message, MessageId, MessageMode, Model,
         ModelCompaction, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput,
         ModelName, ModelOutput, ModelProvenance, ModelProviderToolCall, ModelProviderToolName,
         ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt,

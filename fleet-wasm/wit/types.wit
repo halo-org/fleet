@@ -303,9 +303,17 @@ interface types {
 
     // === Content ===
 
+    /// The ID of an immutable blob. It is not an authorization token.
+    record blob-id {
+        high: u64,
+        low: u64,
+    }
+
     /// A content block.
     variant content-block {
         /// Text content.
         text(string),
+        /// Image content stored as an immutable blob.
+        image(blob-id),
     }
 }

@@ -14,7 +14,7 @@ workspace = true
 base64 = { workspace = true, features = ["alloc"] }
 fleet-core.workspace = true
 fleet-kit.workspace = true
-fleet-store = { workspace = true, features = ["queries"] }
+fleet-store = { workspace = true, features = ["queries", "blobs"] }
 fleet-wasm.workspace = true
 form_urlencoded = { workspace = true, features = ["alloc"] }
 futures-util = { workspace = true, features = ["std"] }

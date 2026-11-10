@@ -1,5 +1,5 @@
 use crate::{
-    WasmCredentials, WasmWorkspaceHost,
+    WasmBlobs, WasmCredentials, WasmWorkspaceHost,
     bindings::{configuration, credentials},
 };
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView, filesystem::WasiFilesystemCt
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 pub struct WasmState {
+    blobs: Option<WasmBlobs>,
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
     workspace_host: Option<WasmWorkspaceHost>,
@@ -27,6 +28,7 @@ impl WasmState {
         *wasi.filesystem() = filesystem;
 
         Self {
+            blobs: None,
             config,
             credentials,
             workspace_host,
@@ -34,6 +36,19 @@ impl WasmState {
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
         }
+    }
+
+    pub fn blobs(&self) -> Option<WasmBlobs> {
+        self.blobs.clone()
+    }
+
+    pub fn set_blobs(&mut self, blobs: Option<WasmBlobs>) {
+        self.blobs = blobs;
+    }
+
+    pub fn with_blobs(mut self, blobs: Option<WasmBlobs>) -> Self {
+        self.blobs = blobs;
+        self
     }
 
     pub fn workspace_host(&self) -> Option<WasmWorkspaceHost> {

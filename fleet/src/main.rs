@@ -5,6 +5,7 @@ mod api_types;
 mod authentication;
 mod authentication_api;
 mod authentication_error;
+mod blob_api;
 mod config;
 mod credential_store;
 mod directories;
@@ -95,13 +96,14 @@ async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let data_dir = directories::create_data_dir()?;
     let store = fleet_store::Store::open(data_dir.join("fleet.db"))?;
-    let fleet = Fleet::new(store, None);
+    let fleet = Fleet::new(store.clone(), None);
     let authentication = Authentication::open(
         &data_dir.join("authentication"),
         fleet.idle_handler().clone(),
     )
     .await?;
-    let providers = crate::plugins::load(&config, &config_dir, &cache_dir, &authentication).await?;
+    let providers =
+        crate::plugins::load(&config, &config_dir, &cache_dir, &authentication, &store).await?;
     let roles = Roles::new(config_dir.join("roles"));
     let address = config.listen;
     let fleet = fleet

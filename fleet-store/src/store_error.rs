@@ -4,6 +4,20 @@ use fleet_core::{ClientStoreErrorKind, RuntimeStoreErrorKind};
 /// An error returned by the store.
 #[derive(Debug)]
 pub enum StoreError {
+    /// A referenced blob does not exist.
+    BlobNotFound,
+    /// The caller cannot access the blob.
+    BlobDenied,
+    /// A blob or upload exceeds a resource limit.
+    BlobTooLarge,
+    /// The blob is invalid or corrupt.
+    InvalidBlob,
+    /// An immutable blob ID was reused with different content.
+    BlobConflict,
+    /// The upload is absent or expired.
+    UploadNotFound,
+    /// The upload offset or state does not match the request.
+    UploadConflict,
     /// The resource changed since the caller read it.
     PreconditionFailed,
     /// The operation conflicts with the stored state.
@@ -31,6 +45,13 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BlobNotFound => f.write_str("blob not found"),
+            Self::BlobDenied => f.write_str("blob access denied"),
+            Self::BlobTooLarge => f.write_str("blob or upload limit exceeded"),
+            Self::InvalidBlob => f.write_str("invalid or corrupt blob"),
+            Self::BlobConflict => f.write_str("blob ID already names different content"),
+            Self::UploadNotFound => f.write_str("upload not found or expired"),
+            Self::UploadConflict => f.write_str("upload offset or state changed"),
             Self::PreconditionFailed => f.write_str("agent resource changed"),
             Self::Conflict(message) => f.write_str(message),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
@@ -81,7 +102,12 @@ impl fleet_core::Error<RuntimeStoreErrorKind> for StoreError {
 impl fleet_core::Error<ClientStoreErrorKind> for StoreError {
     fn kind(&self) -> ClientStoreErrorKind {
         match self {
-            Self::Conflict(_) | Self::PreconditionFailed => ClientStoreErrorKind::Conflict,
+            Self::Conflict(_)
+            | Self::PreconditionFailed
+            | Self::BlobNotFound
+            | Self::InvalidBlob
+            | Self::BlobTooLarge
+            | Self::BlobDenied => ClientStoreErrorKind::Conflict,
             Self::IdempotencyConflict => ClientStoreErrorKind::IdempotencyConflict,
             Self::AgentNotFound => ClientStoreErrorKind::AgentNotFound,
             _ => ClientStoreErrorKind::Other,

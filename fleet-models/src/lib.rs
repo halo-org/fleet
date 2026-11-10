@@ -2,6 +2,9 @@
 //!
 //! Providers accept an HTTP client and credentials. The `reqwest` feature adds
 //! a native HTTP client. No async runtime is required when using a custom client.
+//! Use [`OpenAiModels::with_blobs`] to supply image access through [`fleet_kit::Blobs`].
+//! Image bytes are resolved only while preparing requests, not while loading conversation history.
+//! Compaction preserves image references in provider state.
 //!
 //! ```no_run
 //! # #[cfg(feature = "reqwest")]

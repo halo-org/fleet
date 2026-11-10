@@ -28,6 +28,22 @@ impl From<AgentId> for types::AgentId {
     }
 }
 
+impl From<fleet_core::BlobId> for types::BlobId {
+    fn from(id: fleet_core::BlobId) -> Self {
+        let id = u128::from(id);
+        Self {
+            high: u64::try_from(id >> 64).expect("high bits fit in u64"),
+            low: u64::try_from(id & u128::from(u64::MAX)).expect("low bits fit in u64"),
+        }
+    }
+}
+
+impl From<types::BlobId> for fleet_core::BlobId {
+    fn from(id: types::BlobId) -> Self {
+        ((u128::from(id.high) << 64) | u128::from(id.low)).into()
+    }
+}
+
 impl TryFrom<types::Model> for Model {
     type Error = WasmError;
 
@@ -444,6 +460,7 @@ impl From<&ContentBlock> for types::ContentBlock {
     fn from(value: &ContentBlock) -> Self {
         match value {
             ContentBlock::Text(text) => Self::Text(text.clone()),
+            ContentBlock::Image(id) => Self::Image((*id).into()),
         }
     }
 }
@@ -452,6 +469,7 @@ impl From<types::ContentBlock> for ContentBlock {
     fn from(value: types::ContentBlock) -> Self {
         match value {
             types::ContentBlock::Text(text) => Self::Text(text),
+            types::ContentBlock::Image(id) => Self::Image(id.into()),
         }
     }
 }

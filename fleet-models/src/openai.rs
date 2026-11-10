@@ -1,6 +1,7 @@
 mod api;
 mod client;
 mod decoder;
+mod images;
 mod input;
 
 use self::{
@@ -12,6 +13,7 @@ use fleet_core::{
     Model, ModelCompaction, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput,
     ModelName, ModelProvenance, ModelResponseChunk, Models, ModelsErrorKind,
 };
+use fleet_kit::{Blobs, NoBlobs};
 use futures_util::{Stream, StreamExt as _, future::Either, stream};
 use serde::Deserialize as _;
 
@@ -52,7 +54,8 @@ impl Default for OpenAiConfig {
 ///
 /// Commentary and token limit continuations are handled within each response.
 /// Compaction retains the complete API output as opaque state for later requests.
-pub struct OpenAiModels<H, C> {
+pub struct OpenAiModels<H, C, B = NoBlobs> {
+    blobs: B,
     client: Client<H, C>,
     config: OpenAiConfig,
 }
@@ -65,6 +68,7 @@ struct ResponseStream<'a> {
     input_len: usize,
     continuations: u8,
     done: bool,
+    prepared: bool,
 }
 
 impl<H, C> OpenAiModels<H, C> {
@@ -75,7 +79,23 @@ impl<H, C> OpenAiModels<H, C> {
     /// Returns an error when the base URL is invalid.
     pub fn new(http: H, credentials: C, config: OpenAiConfig) -> Result<Self, OpenAiError> {
         let client = Client::new(http, credentials, &config.base_url)?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            blobs: NoBlobs,
+        })
+    }
+}
+
+impl<H, C, B> OpenAiModels<H, C, B> {
+    /// Supplies access to immutable image blobs.
+    #[must_use]
+    pub fn with_blobs<N>(self, blobs: N) -> OpenAiModels<H, C, N> {
+        OpenAiModels {
+            client: self.client,
+            config: self.config,
+            blobs,
+        }
     }
 
     fn provenance(&self, context: &ModelContext) -> ModelProvenance {
@@ -146,8 +166,10 @@ impl<H, C> OpenAiModels<H, C> {
     }
 }
 
-impl<H, C> Models for OpenAiModels<H, C>
+impl<H, C, B> Models for OpenAiModels<H, C, B>
 where
+    B: Blobs + Sync,
+    B::Error: Send + Sync,
     H: Http + Sync,
     C: Credentials + Sync,
 {
@@ -188,11 +210,19 @@ where
             request,
             continuations: 0,
             done: false,
+            prepared: false,
         };
 
         Either::Left(stream::unfold(state, move |mut state| async move {
             if state.done {
                 return None;
+            }
+            if !state.prepared {
+                if let Err(error) = images::resolve(&mut state.request.input, &self.blobs).await {
+                    state.done = true;
+                    return Some((Err(error), state));
+                }
+                state.prepared = true;
             }
             let result = state.next(&self.client).await;
             state.done = matches!(result, Err(_) | Ok(ModelResponseChunk::ResponseEnd(_)));
@@ -208,7 +238,7 @@ where
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, Self::Error> {
         let provenance = self.provenance(context);
-        let request = api::CompactRequest {
+        let mut request = api::CompactRequest {
             model: context.model.name.to_string(),
             previous_response_id: self.continuation(context, continuation)?,
             input: input::encode(input, &provenance)?,
@@ -222,13 +252,15 @@ where
                 .iter()
                 .any(|input| matches!(input, ModelInput::Compaction(_, _))),
         };
-        let response = self.client.compact(&request, scope).await?;
+        let references = images::resolve(&mut request.input, &self.blobs).await?;
+        let mut response = self.client.compact(&request, scope).await?;
         if response.output.is_empty() {
             return Err(OpenAiError::new(
                 ModelsErrorKind::Other,
                 "compaction returned no context",
             ));
         }
+        images::retain(&mut response.output, &references, continuation.is_some())?;
         let state = api::Compaction {
             version: 1,
             output: response.output,
@@ -1181,6 +1213,131 @@ mod tests {
         assert_eq!(compact["instructions"], "Keep the important facts.");
         assert_eq!(generate["input"], output);
         assert_eq!(generate["instructions"], "Be helpful.");
+    }
+
+    #[test]
+    fn compact_preserves_image_references_for_replay() {
+        use base64::Engine as _;
+        use fleet_kit::Blobs as _;
+
+        let image = include_bytes!("../../fleet-store/tests/fixtures/image.png");
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(image)
+        );
+        let retained = json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_image",
+                "image_url": data_url,
+            }],
+        }]);
+        let http = TestHttp::new([
+            json_response(
+                StatusCode::OK,
+                &json!({
+                    "output": retained,
+                    "usage": {
+                        "input_tokens": 20,
+                        "output_tokens": 5,
+                    },
+                }),
+            ),
+            response(&[message("Red and green.", None)], false),
+        ]);
+        let blobs = fleet_store::Store::memory().unwrap();
+        let models = models(http.clone()).with_blobs(blobs.clone());
+        let context = context();
+        let input = [ModelInput::User(vec![ContentBlock::Image(1.into())])];
+
+        futures_executor::block_on(async {
+            blobs.put(1.into(), "image/png", image).await.unwrap();
+            let compacted = models.compact(&context, None, &input, None).await.unwrap();
+            let ModelInput::Compaction(_, state) = &compacted.input[0] else {
+                panic!("expected compaction");
+            };
+            assert!(!state.redacted_content.as_ref().unwrap().contains("base64"));
+            models
+                .generate(&context, None, &compacted.input)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+        });
+
+        let requests = http.requests();
+        let compact: Value = serde_json::from_slice(requests[0].body()).unwrap();
+        let generate: Value = serde_json::from_slice(requests[1].body()).unwrap();
+        assert_eq!(
+            compact["input"][0]["content"][0]["text"],
+            "Image reference: 1"
+        );
+        assert_eq!(compact["input"][0]["content"][1]["image_url"], data_url);
+        assert_eq!(generate["input"], retained);
+    }
+
+    #[test]
+    fn missing_images_fail_before_sending_a_model_request() {
+        let http = TestHttp::default();
+        let models = models(http.clone()).with_blobs(fleet_store::Store::memory().unwrap());
+        let context = context();
+        let input = [ModelInput::User(vec![ContentBlock::Image(1.into())])];
+
+        let error = futures_executor::block_on(
+            models
+                .generate(&context, None, &input)
+                .try_collect::<Vec<_>>(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ModelsErrorKind::Other);
+        assert!(http.requests().is_empty());
+    }
+
+    #[test]
+    fn tool_images_preserve_structured_output_and_error_status() {
+        use fleet_core::{ToolOutput, ToolResult};
+        use fleet_kit::Blobs as _;
+
+        let http = TestHttp::new([response(&[message("Seen.", None)], false)]);
+        let blobs = fleet_store::Store::memory().unwrap();
+        let models = models(http.clone()).with_blobs(blobs.clone());
+        let context = context();
+        let input = [ModelInput::ToolResult(ToolResult {
+            call_id: "read-image".into(),
+            output: ToolOutput {
+                content: vec![
+                    ContentBlock::Text("Screenshot".into()),
+                    ContentBlock::Image(1.into()),
+                ],
+                structured_content: Some(JsonObject::from_iter([("ok".into(), false.into())])),
+                is_error: true,
+            },
+        })];
+
+        futures_executor::block_on(async {
+            blobs
+                .put(
+                    1.into(),
+                    "image/png",
+                    include_bytes!("../../fleet-store/tests/fixtures/image.png"),
+                )
+                .await
+                .unwrap();
+            models
+                .generate(&context, None, &input)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+        });
+
+        let requests = http.requests();
+        let request: Value = serde_json::from_slice(requests[0].body()).unwrap();
+        let output = &request["input"][0];
+        assert_eq!(output["call_id"], "read-image");
+        assert_eq!(output["output"][0]["text"], "Tool returned an error:");
+        assert_eq!(output["output"][3]["type"], "input_image");
+        assert_eq!(output["output"][4]["text"], "{\"ok\":false}");
     }
 
     struct RefreshingCredentials(AtomicBool);

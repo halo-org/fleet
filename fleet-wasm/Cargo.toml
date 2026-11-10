@@ -23,4 +23,5 @@ wasmtime-wasi = { workspace = true, features = ["p3"] }
 wasmtime-wasi-http = { workspace = true, features = ["default-send-request", "p3"] }
 
 [dev-dependencies]
+fleet-store = { workspace = true, features = ["blobs"] }
 tokio = { workspace = true, features = ["rt", "time"] }

@@ -105,9 +105,10 @@ impl WasmProvider {
         let config: Arc<str> = serde_json::to_string(config)?.into();
         let credentials = capabilities.credentials.clone();
         let workspace_host = capabilities.workspaces.clone();
+        let blob_host = capabilities.blobs.clone();
         let filesystem = capabilities.open_filesystem()?;
 
-        let models = component
+        let mut models = component
             .get_export_index(None, "fleet:providers/models@0.0.0")
             .map(|_| {
                 WasmModels::new(
@@ -119,7 +120,7 @@ impl WasmProvider {
                 )
             })
             .transpose()?;
-        let tools = component
+        let mut tools = component
             .get_export_index(None, "fleet:providers/tools@0.0.0")
             .map(|_| {
                 WasmTools::new(
@@ -131,6 +132,12 @@ impl WasmProvider {
                 )
             })
             .transpose()?;
+        if let Some(models) = &mut models {
+            models.set_blobs(blob_host.clone());
+        }
+        if let Some(tools) = &mut tools {
+            tools.set_blobs(blob_host);
+        }
         let prompts = component
             .get_export_index(None, "fleet:providers/prompts@0.0.0")
             .map(|_| {

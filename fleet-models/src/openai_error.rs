@@ -1,5 +1,5 @@
 use core::fmt;
-use fleet_core::ModelsErrorKind;
+use fleet_core::{BlobId, ModelsErrorKind};
 use http::StatusCode;
 
 /// An error from an [`OpenAiModels`](crate::OpenAiModels) provider.
@@ -13,6 +13,10 @@ pub struct OpenAiError {
 enum Detail {
     Message(&'static str),
     Source(&'static str, Box<dyn core::error::Error + Send + Sync>),
+    Image {
+        id: BlobId,
+        source: Box<dyn core::error::Error + Send + Sync>,
+    },
     Api {
         status: Option<StatusCode>,
         code: Option<String>,
@@ -39,6 +43,20 @@ impl OpenAiError {
         }
     }
 
+    pub(crate) fn blob(
+        kind: ModelsErrorKind,
+        id: BlobId,
+        source: impl core::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            kind,
+            detail: Detail::Image {
+                id,
+                source: Box::new(source),
+            },
+        }
+    }
+
     pub(crate) const fn api(
         status: Option<StatusCode>,
         code: Option<String>,
@@ -61,6 +79,7 @@ impl OpenAiError {
 impl fmt::Display for OpenAiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.detail {
+            Detail::Image { id, source: _ } => write!(f, "could not load image {id}"),
             Detail::Message(message) | Detail::Source(message, _) => f.write_str(message),
             Detail::Api {
                 status,
@@ -90,7 +109,7 @@ impl fmt::Display for OpenAiError {
 impl core::error::Error for OpenAiError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match &self.detail {
-            Detail::Source(_, source) => Some(source.as_ref()),
+            Detail::Source(_, source) | Detail::Image { source, .. } => Some(source.as_ref()),
             Detail::Message(_) | Detail::Api { .. } => None,
         }
     }

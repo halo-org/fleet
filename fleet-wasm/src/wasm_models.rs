@@ -26,6 +26,7 @@ use wasmtime_wasi::filesystem::WasiFilesystemCtx;
 /// A response stream keeps its instance until the response ends or the stream is dropped.
 #[derive(Clone)]
 pub struct WasmModels {
+    blobs: Option<crate::WasmBlobs>,
     instance: ModelProviderPre<WasmState>,
     config: Arc<str>,
     filesystem: WasiFilesystemCtx,
@@ -47,12 +48,17 @@ impl WasmModels {
         workspace_host: Option<WasmWorkspaceHost>,
     ) -> Result<Self, WasmError> {
         Ok(Self {
+            blobs: None,
             instance: ModelProviderPre::new(instance).map_err(WasmError::runtime)?,
             config,
             filesystem,
             credentials,
             workspace_host,
         })
+    }
+
+    pub(crate) fn set_blobs(&mut self, blobs: Option<crate::WasmBlobs>) {
+        self.blobs = blobs;
     }
 
     pub(crate) async fn get(&self, name: &str) -> Result<Option<Model>, WasmError> {
@@ -98,13 +104,14 @@ impl WasmModels {
         let credentials = self.credentials.clone();
         let workspace_host = self.workspace_host.clone();
         let context = types::ModelContext::new(name, context);
+        let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
         let continuation = continuation.map(types::ModelContinuation::from);
         let input = input.iter().map(types::ModelInput::from).collect();
         let (sender, receiver) = mpsc::channel(0);
         let run = async move {
             let mut store = Store::new(
                 instance.engine(),
-                WasmState::new(config, filesystem, credentials, workspace_host),
+                WasmState::new(config, filesystem, credentials, workspace_host).with_blobs(blobs),
             );
             let instance = instance
                 .instantiate_async(&mut store)
@@ -164,6 +171,7 @@ impl WasmModels {
         input: &[ModelInput],
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, WasmError> {
+        let blobs = self.blobs.as_ref().map(crate::WasmBlobs::for_model);
         let mut store = Store::new(
             self.instance.engine(),
             WasmState::new(
@@ -171,7 +179,8 @@ impl WasmModels {
                 self.filesystem.clone(),
                 self.credentials.clone(),
                 self.workspace_host.clone(),
-            ),
+            )
+            .with_blobs(blobs),
         );
         let instance = self
             .instance

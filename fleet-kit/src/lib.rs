@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod agents;
 mod authentication;
+mod blobs;
 mod ports;
 mod types;
 mod workspaces;
@@ -19,6 +20,7 @@ pub use self::{
         AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthConfig,
         OAuthRegistration,
     },
+    blobs::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions, NoBlobs},
     ports::{Queries, QueriesErrorKind},
     types::{
         AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,

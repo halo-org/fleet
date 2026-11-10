@@ -126,7 +126,9 @@ mod tests {
         };
 
         let output = render(&result);
-        let ContentBlock::Text(text) = output.content.first().unwrap();
+        let ContentBlock::Text(text) = output.content.first().unwrap() else {
+            panic!("expected text output");
+        };
 
         assert!(output.is_error);
         assert_eq!(

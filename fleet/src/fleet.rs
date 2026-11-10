@@ -60,6 +60,10 @@ impl Fleet {
         }
     }
 
+    pub(crate) fn blob_store(&self) -> &Store {
+        &self.state.store
+    }
+
     /// Enables provider authentication.
     pub fn with_authentication(mut self, authentication: Authentication) -> Self {
         self.authentication = Some(authentication);
@@ -476,12 +480,13 @@ impl Fleet {
             .map_err(FleetError::Query)
     }
 
-    async fn mutate<F>(
+    pub(crate) async fn mutate<T, F>(
         &self,
         operation: impl FnOnce(Self) -> F + Send + 'static,
-    ) -> Result<(), FleetError>
+    ) -> Result<T, FleetError>
     where
-        F: Future<Output = Result<(), StoreError>> + Send + 'static,
+        T: Send + 'static,
+        F: Future<Output = Result<T, StoreError>> + Send + 'static,
     {
         let guard = self
             .state

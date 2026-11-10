@@ -2,8 +2,8 @@ use crate::{Authentication, Config};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
-    Wasm, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmProvider, WasmRegistry,
-    WasmWorkspaceHost,
+    Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmProvider,
+    WasmRegistry, WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -52,7 +52,13 @@ pub struct ProviderConfig {
 /// Access approved for a plugin.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "capabilities are independently approved permissions"
+)]
 pub struct PluginCapabilities {
+    #[serde(default)]
+    blobs: bool,
     #[serde(default)]
     http: bool,
     #[serde(default)]
@@ -100,6 +106,7 @@ pub async fn load(
     directory: &Path,
     cache: &Path,
     authentication: &Authentication,
+    blobs: &fleet_store::Store,
 ) -> Result<WasmRegistry, Box<dyn Error + Send + Sync>> {
     let order = provider_order(config)?;
     let wasm = Wasm::new()?;
@@ -151,7 +158,11 @@ pub async fn load(
                 .expect("dependency is loaded");
             workspaces.insert(dependency, provider.clone())?;
         }
+        let blob_store = blobs.clone();
         let capabilities = WasmCapabilities {
+            blobs: capabilities.blobs.then(|| {
+                WasmBlobs::new(blobs.clone()).with_agents(move |id| blob_store.agent_blobs(id))
+            }),
             http: capabilities.http,
             filesystem: capabilities
                 .filesystem
