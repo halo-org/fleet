@@ -2,6 +2,7 @@ package fleet:plugin-tools@0.0.0;
 
 /// Basic tools backed by workspace providers.
 world plugin {
+    import fleet:providers/blobs@0.0.0;
     import fleet:providers/configuration@0.0.0;
     import fleet:providers/workspaces@0.0.0;
     export fleet:providers/tools@0.0.0;

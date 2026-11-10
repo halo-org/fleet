@@ -9,7 +9,8 @@ pub(crate) use self::{
     bindings::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
         fleet::providers::{
-            types::{ContentBlock, Tool, ToolContext, ToolOutput},
+            blobs::{self, BlobsError, BlobsErrorKind},
+            types::{AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput},
             workspaces::{self, WorkspaceContext, WorkspacesError, WorkspacesErrorKind},
         },
     },
@@ -22,6 +23,7 @@ struct Tools;
 enum Error {
     Input(String),
     Workspace(WorkspacesError),
+    Blobs(BlobsError),
 }
 
 impl Guest for Tools {
@@ -52,7 +54,7 @@ impl Guest for Tools {
             .map_err(service_error)?;
         let result = match context.tool.name.as_str() {
             "bash" => bash::execute(&context, &config, workspace, is_retry, &input).await,
-            "read" => files::read(&config, workspace, &input).await,
+            "read" => files::read(&context, &config, workspace, &input).await,
             "write" => files::write(workspace, is_retry, &input).await,
             "edit" => files::edit(&config, workspace, is_retry, &input).await,
             _ => return Ok(error_output("The tool is not available.")),
@@ -64,6 +66,10 @@ impl Guest for Tools {
                 WorkspacesErrorKind::UnsafeToRetry => Err(service_error(error)),
                 _ => Ok(error_output(error.message)),
             },
+            Err(Error::Blobs(error)) => Err(ToolsError {
+                kind: ToolsErrorKind::Other,
+                message: format!("failed to store image: {}", error.message),
+            }),
         }
     }
 
@@ -87,6 +93,18 @@ impl From<serde_json::Error> for Error {
 impl From<WorkspacesError> for Error {
     fn from(error: WorkspacesError) -> Self {
         Self::Workspace(error)
+    }
+}
+
+impl From<BlobsError> for Error {
+    fn from(error: BlobsError) -> Self {
+        match error.kind {
+            BlobsErrorKind::TooLarge => {
+                Self::Input("The image is too large. Resize it with Bash before reading it.".into())
+            }
+            BlobsErrorKind::InvalidData => Self::Input("The image is invalid.".into()),
+            _ => Self::Blobs(error),
+        }
     }
 }
 

@@ -1,10 +1,13 @@
 # Basic tools plugin
 
 Provides `bash`, `read`, `write` and `edit` through Fleet's workspace interface.
-The plugin does not need process, filesystem or HTTP access.
+The plugin needs blob access to return images. It does not need process, filesystem
+or HTTP access.
 
 - `bash` runs a command in a new Bash process and returns bounded stdout and stderr.
-- `read` reads a UTF-8 file within the configured size limit.
+- `read` reads a UTF-8 file within the configured size limit. PNG, JPEG, GIF and
+  WebP files up to 10 MiB are detected by their contents and returned as images.
+  Each image is stored as a blob for the agent. Rereading the same file reuses it.
 - `write` creates or replaces a UTF-8 file, creating parent directories as needed.
 - `edit` applies sequential exact replacements. Each match must be unique, including
   overlapping matches. All edits are prepared before writing. The write checks the
@@ -37,6 +40,7 @@ workspace provider already configured, add:
     "tools": {
       "path": "./plugins/tools.wasm",
       "capabilities": {
+        "blobs": true,
         "workspaces": ["host"]
       }
     }
@@ -85,4 +89,5 @@ An absent or null role workspace leaves the tools without a workspace.
 
 Defaults are `bash`, 120000 milliseconds, 65536 bytes per output stream and a
 65536-byte read limit. Bash input may select a shorter timeout and a
-working directory. `read_limit` also limits the file size for editing.
+working directory. `read_limit` also limits the file size for editing. It does not
+apply to images.
