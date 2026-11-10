@@ -603,6 +603,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-sprites"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-plugin-tools"
 version = "0.0.0"
 dependencies = [
