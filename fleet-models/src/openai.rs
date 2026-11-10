@@ -1,5 +1,6 @@
 mod api;
 mod client;
+mod compaction;
 mod decoder;
 mod images;
 mod input;
@@ -10,8 +11,8 @@ use self::{
 };
 use crate::{Credentials, Http, OpenAiError};
 use fleet_core::{
-    Model, ModelCompaction, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput,
-    ModelName, ModelProvenance, ModelResponseChunk, Models, ModelsErrorKind,
+    Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName,
+    ModelProvenance, ModelResponseChunk, Models, ModelsErrorKind,
 };
 use fleet_kit::{Blobs, NoBlobs};
 use futures_util::{Stream, StreamExt as _, future::Either, stream};
@@ -53,7 +54,8 @@ impl Default for OpenAiConfig {
 /// Missing, null or empty `tools` disables provider tools.
 ///
 /// Commentary and token limit continuations are handled within each response.
-/// Compaction retains the complete API output as opaque state for later requests.
+/// Compaction retains provider state for later requests. If standalone compaction is not
+/// authorized, a streaming request performs compaction with tools disabled.
 pub struct OpenAiModels<H, C, B = NoBlobs> {
     blobs: B,
     client: Client<H, C>,
@@ -237,48 +239,22 @@ where
         input: &[ModelInput],
         instructions: Option<&str>,
     ) -> Result<ModelCompactionResponse, Self::Error> {
-        let provenance = self.provenance(context);
-        let mut request = api::CompactRequest {
-            model: context.model.name.to_string(),
-            previous_response_id: self.continuation(context, continuation)?,
-            input: input::encode(input, &provenance)?,
-            instructions: instructions.map(str::to_owned).or_else(|| {
-                (!context.system_prompt.is_empty()).then(|| context.system_prompt.clone())
-            }),
-        };
+        let request = self.request(context, continuation, input)?;
         let scope = ErrorScope {
             continuation: continuation.is_some(),
             compaction: input
                 .iter()
                 .any(|input| matches!(input, ModelInput::Compaction(_, _))),
         };
-        let references = images::resolve(&mut request.input, &self.blobs).await?;
-        let mut response = self.client.compact(&request, scope).await?;
-        if response.output.is_empty() {
-            return Err(OpenAiError::new(
-                ModelsErrorKind::Other,
-                "compaction returned no context",
-            ));
-        }
-        images::retain(&mut response.output, &references, continuation.is_some())?;
-        let state = api::Compaction {
-            version: 1,
-            output: response.output,
-        };
-        let redacted_content = serde_json::to_string(&state)
-            .map_err(|error| OpenAiError::source("failed to encode compaction state", error))?;
-
-        Ok(ModelCompactionResponse {
-            input: vec![ModelInput::Compaction(
-                provenance,
-                ModelCompaction {
-                    content: None,
-                    redacted_content: Some(redacted_content),
-                    attestation: None,
-                },
-            )],
-            usage: response.usage.into(),
-        })
+        compaction::compact(
+            &self.client,
+            &self.blobs,
+            request,
+            self.provenance(context),
+            instructions,
+            scope,
+        )
+        .await
     }
 }
 
@@ -480,6 +456,18 @@ mod tests {
             .header("x-request-id", "request-test")
             .body(stream::iter(vec![Ok(Bytes::from(body.to_string()))]))
             .unwrap()
+    }
+
+    fn rejected_compaction() -> Response<Body> {
+        json_response(
+            StatusCode::UNAUTHORIZED,
+            &json!({
+                "error": {
+                    "code": "hardened_oauth_rule_missing",
+                    "message": "This ChatPass credential is not authorized for the requested operation.",
+                },
+            }),
+        )
     }
 
     #[test]
@@ -1213,6 +1201,326 @@ mod tests {
         assert_eq!(compact["instructions"], "Keep the important facts.");
         assert_eq!(generate["input"], output);
         assert_eq!(generate["instructions"], "Be helpful.");
+    }
+
+    #[test]
+    fn compact_falls_back_to_streaming_without_refreshing_credentials() {
+        let checkpoint = json!({
+            "type": "compaction",
+            "id": "cmp_latest",
+            "encrypted_content": "latest-context",
+        });
+        let summary = message("Continue with the tests.", Some("final_answer"));
+        let http = TestHttp::new([
+            rejected_compaction(),
+            response(
+                &[
+                    json!({
+                        "type": "compaction",
+                        "id": "cmp_previous",
+                        "encrypted_content": "previous-context",
+                    }),
+                    message("Earlier summary.", Some("commentary")),
+                    checkpoint.clone(),
+                    summary.clone(),
+                ],
+                false,
+            ),
+            response(&[message("Running the tests.", None)], false),
+        ]);
+        let credentials = RefreshingCredentials(AtomicBool::new(false));
+        let models = OpenAiModels::new(http.clone(), credentials, OpenAiConfig::default()).unwrap();
+        let mut context = context();
+        context.model.config = json!({
+            "effort": "high",
+            "tools": [{
+                "type": "web_search",
+            }],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        context.tools.push(ModelTool {
+            name: "test-tool".into(),
+            description: Some("A test tool.".into()),
+            input_schema: JsonObject::new(),
+            is_async: false,
+        });
+        let input = [ModelInput::User(vec![ContentBlock::Text(
+            "Run the tests.".into(),
+        )])];
+
+        let compacted = futures_executor::block_on(models.compact(
+            &context,
+            None,
+            &input,
+            Some("Keep the test commands."),
+        ))
+        .unwrap();
+        futures_executor::block_on(
+            models
+                .generate(&context, None, &compacted.input)
+                .try_collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            compacted.usage,
+            ModelUsage {
+                input: 8,
+                output: 3,
+                cache_read: 4,
+                cache_write: 0,
+            }
+        );
+        let requests = http.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].uri().path(), "/v1/responses/compact");
+        assert_eq!(requests[1].uri().path(), "/v1/responses");
+        assert_eq!(requests[1].headers()[header::AUTHORIZATION], "Bearer old");
+        let compact: Value = serde_json::from_slice(requests[0].body()).unwrap();
+        let streaming: Value = serde_json::from_slice(requests[1].body()).unwrap();
+        let generate: Value = serde_json::from_slice(requests[2].body()).unwrap();
+        assert_eq!(streaming["instructions"], generate["instructions"]);
+        assert_eq!(streaming["tools"], generate["tools"]);
+        assert_eq!(streaming["reasoning"], generate["reasoning"]);
+        assert_eq!(streaming["input"][0], compact["input"][0]);
+        assert!(
+            streaming["input"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Keep the test commands.")
+        );
+        assert_eq!(streaming["tool_choice"], "none");
+        assert_eq!(
+            streaming["context_management"][0]["compact_threshold"],
+            1024
+        );
+        assert_eq!(streaming["store"], false);
+        assert_eq!(generate["input"], json!([checkpoint, summary]));
+        assert!(generate.get("context_management").is_none());
+        assert!(generate.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn compact_uses_a_portable_summary_when_no_checkpoint_is_emitted() {
+        let http = TestHttp::new([
+            json_response(
+                StatusCode::FORBIDDEN,
+                &json!({
+                    "error": {
+                        "code": "subscription_sharing_route_not_supported",
+                    },
+                }),
+            ),
+            response(&[message("The code word is amber.", None)], false),
+            response(&[message("amber", None)], false),
+        ]);
+        let models = models(http.clone());
+        let mut context = context();
+        let input = [ModelInput::User(vec![ContentBlock::Text(
+            "Remember amber.".into(),
+        )])];
+
+        let compacted =
+            futures_executor::block_on(models.compact(&context, None, &input, None)).unwrap();
+        let ModelInput::Compaction(_, state) = &compacted.input[0] else {
+            panic!("expected compaction");
+        };
+        assert_eq!(state.content.as_deref(), Some("The code word is amber."));
+        assert_eq!(state.redacted_content, None);
+        context.model.name = "another-model".into();
+        futures_executor::block_on(
+            models
+                .generate(&context, None, &compacted.input)
+                .try_collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        let requests = http.requests();
+        let generate: Value = serde_json::from_slice(requests[2].body()).unwrap();
+        assert_eq!(generate["input"][0]["content"], "The code word is amber.");
+    }
+
+    #[test]
+    fn compact_does_not_fall_back_for_unrelated_errors() {
+        for (status, code, kind) in [
+            (
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+                ModelsErrorKind::Other,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                ModelsErrorKind::Other,
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "context_length_exceeded",
+                ModelsErrorKind::ContextTooLong,
+            ),
+        ] {
+            let http = TestHttp::new([json_response(
+                status,
+                &json!({
+                    "error": {
+                        "code": code,
+                    },
+                }),
+            )]);
+            let models = models(http.clone());
+            let context = context();
+
+            let error =
+                futures_executor::block_on(models.compact(&context, None, &[], None)).unwrap_err();
+
+            assert_eq!(error.kind(), kind);
+            assert_eq!(http.requests().len(), 1);
+        }
+    }
+
+    #[test]
+    fn compact_rejects_incomplete_and_unsafe_streamed_output() {
+        for response in [
+            sse(&[]),
+            response(&[message("Partial summary.", None)], true),
+            response(
+                &[json!({
+                    "type": "function_call",
+                    "call_id": "call_test",
+                    "name": "test-tool",
+                    "arguments": "{}",
+                    "status": "completed",
+                })],
+                false,
+            ),
+            response(
+                &[json!({
+                    "type": "compaction",
+                    "encrypted_content": "",
+                })],
+                false,
+            ),
+            response(
+                &[json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "refusal",
+                        "refusal": "No.",
+                    }],
+                })],
+                false,
+            ),
+            sse(&[json!({
+                "type": "response.completed",
+                "response": {
+                    "output": [],
+                },
+            })]),
+        ] {
+            let models = models(TestHttp::new([rejected_compaction(), response]));
+            let context = context();
+
+            let error =
+                futures_executor::block_on(models.compact(&context, None, &[], None)).unwrap_err();
+
+            assert_eq!(error.kind(), ModelsErrorKind::Other);
+        }
+    }
+
+    #[test]
+    fn compact_preserves_stream_error_kinds() {
+        let models = models(TestHttp::new([
+            rejected_compaction(),
+            sse(&[json!({
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "context_length_exceeded",
+                    },
+                },
+            })]),
+        ]));
+        let context = context();
+
+        let error =
+            futures_executor::block_on(models.compact(&context, None, &[], None)).unwrap_err();
+
+        assert_eq!(error.kind(), ModelsErrorKind::ContextTooLong);
+    }
+
+    #[test]
+    fn compact_preserves_streamed_items_without_repeated_output() {
+        let checkpoint = json!({
+            "type": "compaction",
+            "encrypted_content": "opaque-context",
+        });
+        let models = models(TestHttp::new([
+            rejected_compaction(),
+            sse(&[
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "compaction",
+                    },
+                }),
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": checkpoint,
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                        },
+                    },
+                }),
+            ]),
+        ]));
+        let context = context();
+
+        let compacted =
+            futures_executor::block_on(models.compact(&context, None, &[], None)).unwrap();
+
+        let ModelInput::Compaction(_, state) = &compacted.input[0] else {
+            panic!("expected compaction");
+        };
+        let state: Value = serde_json::from_str(state.redacted_content.as_ref().unwrap()).unwrap();
+        assert_eq!(state["output"], json!([checkpoint]));
+        assert_eq!(compacted.usage.output, 20);
+    }
+
+    #[test]
+    fn compact_requests_full_input_before_falling_back_with_a_continuation() {
+        let http = TestHttp::new([rejected_compaction()]);
+        let models = OpenAiModels::new(
+            http.clone(),
+            HeaderMap::new(),
+            OpenAiConfig {
+                store: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let context = context();
+        let continuation = ModelContinuation {
+            provenance: models.provenance(&context),
+            token: "resp_previous".into(),
+        };
+
+        let error =
+            futures_executor::block_on(models.compact(&context, Some(&continuation), &[], None))
+                .unwrap_err();
+
+        assert_eq!(error.kind(), ModelsErrorKind::InvalidContinuation);
+        assert_eq!(http.requests().len(), 1);
     }
 
     #[test]

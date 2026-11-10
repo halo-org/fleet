@@ -52,7 +52,11 @@ impl<'a> Decoder<'a> {
 
     pub fn decode(&mut self, event: api::Event) -> Result<Step, OpenAiError> {
         let chunk = match event {
-            api::Event::OutputAdded { output_index, item } => self.start(output_index, item)?,
+            api::Event::OutputAdded { output_index, item } => {
+                let item = api::Output::deserialize(item)
+                    .map_err(|error| OpenAiError::source("failed to decode model output", error))?;
+                self.start(output_index, item)?
+            }
             api::Event::TextDelta {
                 output_index,
                 delta,

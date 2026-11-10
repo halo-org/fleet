@@ -70,7 +70,7 @@ where
 {
     pub async fn events(
         &self,
-        request: &api::Request,
+        request: &(impl Serialize + Sync),
         scope: ErrorScope,
     ) -> Result<Events, OpenAiError> {
         let response = self.post(&self.responses, request, true, scope).await?;
@@ -111,7 +111,7 @@ where
 
     pub async fn compact(
         &self,
-        request: &api::CompactRequest,
+        request: &api::CompactRequest<'_>,
         scope: ErrorScope,
     ) -> Result<api::CompactResponse, OpenAiError> {
         let response = self.post(&self.compactions, request, false, scope).await?;
@@ -159,19 +159,6 @@ where
                 .await
                 .map_err(|error| OpenAiError::source("failed to send model request", error))?;
 
-            if response.status() == StatusCode::UNAUTHORIZED
-                && !refreshed
-                && self
-                    .credentials
-                    .refresh(&credentials)
-                    .await
-                    .map_err(|error| {
-                        OpenAiError::source("failed to refresh model credentials", error)
-                    })?
-            {
-                refreshed = true;
-                continue;
-            }
             if response.status().is_success() {
                 return Ok(response);
             }
@@ -188,7 +175,22 @@ where
             if detail.message.is_none() && !body.is_empty() {
                 detail.message = Some(String::from_utf8_lossy(&body).into_owned());
             }
-            return Err(api_error(detail, Some(status), request_id, scope));
+            let error = api_error(detail, Some(status), request_id, scope);
+            if status == StatusCode::UNAUTHORIZED
+                && !refreshed
+                && !error.is_unsupported_route()
+                && self
+                    .credentials
+                    .refresh(&credentials)
+                    .await
+                    .map_err(|error| {
+                        OpenAiError::source("failed to refresh model credentials", error)
+                    })?
+            {
+                refreshed = true;
+                continue;
+            }
+            return Err(error);
         }
     }
 }

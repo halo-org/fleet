@@ -61,13 +61,13 @@ pub enum ProviderTool {
 }
 
 #[derive(Serialize)]
-pub struct CompactRequest {
-    pub model: String,
-    pub input: Vec<Value>,
+pub struct CompactRequest<'a> {
+    pub model: &'a str,
+    pub input: &'a [Value],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
+    pub instructions: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_response_id: Option<String>,
+    pub previous_response_id: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +134,7 @@ pub enum Summary {
 #[serde(tag = "type")]
 pub enum Event {
     #[serde(rename = "response.output_item.added")]
-    OutputAdded { output_index: u32, item: Output },
+    OutputAdded { output_index: u32, item: Value },
     #[serde(
         rename = "response.output_text.delta",
         alias = "response.refusal.delta"
@@ -165,6 +165,7 @@ pub enum Event {
 #[derive(Deserialize)]
 pub struct Response {
     pub id: Option<String>,
+    pub output: Option<Vec<Value>>,
     pub usage: Option<Usage>,
     pub error: Option<ApiError>,
     pub incomplete_details: Option<IncompleteDetails>,

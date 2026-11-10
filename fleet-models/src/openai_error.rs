@@ -74,6 +74,19 @@ impl OpenAiError {
             },
         }
     }
+
+    pub(crate) fn is_unsupported_route(&self) -> bool {
+        matches!(
+            &self.detail,
+            Detail::Api {
+                status: Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+                code: Some(code),
+                ..
+            } if matches!(code.as_str(),
+                "hardened_oauth_rule_missing" | "subscription_sharing_route_not_supported"
+            )
+        )
+    }
 }
 
 impl fmt::Display for OpenAiError {
