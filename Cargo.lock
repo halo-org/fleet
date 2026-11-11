@@ -603,6 +603,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-openai"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "fleet-core",
+ "fleet-kit",
+ "fleet-models",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-plugin-sprites"
 version = "0.0.0"
 dependencies = [

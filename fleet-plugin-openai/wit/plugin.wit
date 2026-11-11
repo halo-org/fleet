@@ -1,0 +1,11 @@
+package fleet:plugin-openai@0.0.0;
+
+/// OpenAI models with ChatGPT sign-in.
+world plugin {
+    import fleet:providers/configuration@0.0.0;
+    import fleet:providers/credentials@0.0.0;
+    import fleet:providers/blobs@0.0.0;
+    import wasi:http/client@0.3.0;
+    export fleet:providers/models@0.0.0;
+    export fleet:providers/authentication@0.0.0;
+}
