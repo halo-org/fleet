@@ -39,7 +39,8 @@ The workspace config accepts these optional fields:
 
 - `sprite` names a sprite shared by every workspace using it. It may contain
   lowercase letters, digits and hyphens.
-- `setup` is a script run with `bash -lc` when the sprite is first opened.
+- `setup` is a script run with `bash -lc` when a workspace opens and it differs
+  from the last script that succeeded on the sprite.
 - `repo` is a git URL. Each workspace ID gets a worktree in
   `/home/sprite/worktrees/<id>` on a new branch `fleet/<id>` from the latest
   default branch, without an upstream. An existing branch of that name is
@@ -53,13 +54,13 @@ The workspace config accepts these optional fields:
 }
 ```
 
-Opening a workspace stores its config in `/home/sprite/.fleet/workspaces/<id>`
-and the sprite's setup in `/home/sprite/.fleet/sprite`. Reopening is safe, but
-changing the config for an existing ID or the setup of an existing sprite is
-rejected. Setup must be safe to rerun. It runs again if an earlier open failed,
-and concurrent first opens may both run it. Repository provisioning holds a lock
-on the sprite and resumes after a failed or cancelled open. Git credentials are
-not managed. Configure them on the sprite.
+Opening a workspace stores its config in `/home/sprite/.fleet/workspaces/<id>`,
+and reopening it with the same config does nothing more. A changed config is
+provisioned again without removing anything. Setup holds a lock on the sprite
+and records the script in `/home/sprite/.fleet/sprite` once it succeeds. It must
+be safe to rerun, because it runs again after a failure or a change. Repository
+provisioning holds another lock and resumes after a failed or cancelled open.
+Git credentials are not managed. Configure them on the sprite.
 
 Relative file paths and command working directories start in the worktree with
 `repo`, and in `/home/sprite` otherwise.
@@ -75,8 +76,12 @@ group. Exits caused by signals are reported as codes above 128.
 
 - Sprites, worktrees and branches are never deleted. They accumulate until
   removed by hand.
-- Changing `sprite` for an existing ID opens a new environment instead of being
-  rejected, because the previous sprite is not consulted.
+- Changing `sprite` for an existing ID opens a new environment, because the
+  previous sprite is not consulted.
+- Changing `repo` for an existing ID keeps its worktree, which still uses the
+  previous clone. Removing `setup` or `repo` does not undo them.
+- A changed setup runs while other workspaces may be using the sprite. Workspaces
+  sharing a sprite with different setups run them in turn as they open.
 - Retried commands return `unsafe-to-retry` because Sprites exec is not idempotent.
 - Spooled output is not capped on the sprite's disk.
 - The API key is visible to the plugin. HTTP is limited to `api.sprites.dev`.

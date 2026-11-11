@@ -5,11 +5,23 @@ use crate::{
     config::HOME,
 };
 
-const SPRITE_MARKER: &str = "/home/sprite/.fleet/sprite";
 const WORKSPACE_MARKERS: &str = "/home/sprite/.fleet/workspaces";
 const MARKER_LIMIT: u64 = 1024 * 1024;
 const PROVISION_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const PROVISION_OUTPUT_LIMIT: u64 = 16 * 1024;
+
+/// Runs a setup script unless it is the last one that succeeded on the sprite.
+const SETUP: &str = r#"set -euo pipefail
+setup=$1
+marker=/home/sprite/.fleet/sprite
+mkdir -p /home/sprite/.fleet
+exec 9>/home/sprite/.fleet/setup.lock
+flock 9
+if printf '%s' "$setup" | cmp -s - "$marker"; then exit 0; fi
+bash -lc "$setup" 9>&-
+printf '%s' "$setup" > "$marker.tmp"
+mv -T -- "$marker.tmp" "$marker"
+"#;
 
 /// Clones a repository if needed and adds a worktree on a new branch from the latest default branch.
 const REPO: &str = r#"set -euo pipefail
@@ -82,17 +94,14 @@ impl Guest for Sprites {
         let id = crate::hex(&context.id);
         let marker = format!("{WORKSPACE_MARKERS}/{id}");
         match sprite.read(&marker, MARKER_LIMIT).await {
-            Ok(marker) => {
-                return if Config::parse(&String::from_utf8_lossy(&marker)).ok() == Some(config) {
-                    Ok(())
-                } else {
-                    Err(crate::error(
-                        WorkspacesErrorKind::InvalidConfiguration,
-                        "workspace ID is already bound to a different configuration",
-                    ))
-                };
+            Ok(marker)
+                if Config::parse(&String::from_utf8_lossy(&marker))
+                    .is_ok_and(|stored| stored == config) =>
+            {
+                return Ok(());
             }
-            Err(WorkspacesError {
+            Ok(_)
+            | Err(WorkspacesError {
                 kind: WorkspacesErrorKind::FileNotFound,
                 message: _,
             }) => {}
@@ -102,28 +111,9 @@ impl Guest for Sprites {
             }) => sprite.create().await?,
             Err(error) => return Err(error),
         }
-        match sprite.read(SPRITE_MARKER, MARKER_LIMIT).await {
-            Ok(setup) => {
-                if serde_json::from_slice::<Option<String>>(&setup).ok()
-                    != Some(config.setup.clone())
-                {
-                    return Err(crate::error(
-                        WorkspacesErrorKind::InvalidConfiguration,
-                        "sprite was already set up with a different script",
-                    ));
-                }
-            }
-            Err(WorkspacesError {
-                kind: WorkspacesErrorKind::FileNotFound,
-                message: _,
-            }) => {
-                if let Some(setup) = &config.setup {
-                    provision(&sprite, "setup", vec!["-lc".into(), setup.clone()]).await?;
-                }
-                let setup = serde_json::to_vec(&config.setup).expect("setup serializes");
-                replace(&sprite, SPRITE_MARKER, setup, true).await?;
-            }
-            Err(error) => return Err(error),
+        if let Some(setup) = &config.setup {
+            let args = vec!["-c".into(), SETUP.into(), "bash".into(), setup.clone()];
+            provision(&sprite, "setup", args).await?;
         }
         if let Some(repo) = &config.repo {
             let args = vec![
