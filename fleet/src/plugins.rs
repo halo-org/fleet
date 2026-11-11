@@ -354,7 +354,6 @@ impl Error for LoadError {
 
 async fn download(url: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let client = reqwest::Client::builder()
-        .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()?;
     if let Some(reference) = url.strip_prefix("oci://") {
