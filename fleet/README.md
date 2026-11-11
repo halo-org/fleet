@@ -99,6 +99,9 @@ not locked.
 Changing the lockfile never grants additional capabilities. A component requiring
 an unapproved interface fails to load.
 
+The plugins in this repository are published for each commit on `main`, for example
+`oci://ghcr.io/halo-org/fleet-plugin-tools:<commit>` with the full commit hash.
+
 ## Roles
 
 `roles/assistant.md` defines a role named `assistant`:

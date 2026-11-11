@@ -33,3 +33,7 @@ jobs:
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ github.token }}
+      - run: nix run -L .#publish-plugins -- "ghcr.io/$GITHUB_REPOSITORY_OWNER" "$GITHUB_SHA"
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ github.token }}
