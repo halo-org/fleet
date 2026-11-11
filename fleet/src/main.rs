@@ -16,6 +16,7 @@ mod fleet;
 mod idle_handler;
 mod oauth;
 mod oauth_callback;
+mod oci;
 mod plugins;
 mod roles;
 mod server;

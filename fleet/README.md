@@ -82,7 +82,11 @@ daemonize or leave the group. Existing `process.spawn` remains child-only.
 
 ## Remote plugins
 
-Replace a plugin's `path` with an HTTPS `url`. Run `fleet lock`
+Replace a plugin's `path` with an HTTPS `url`, or an OCI reference such as
+`oci://ghcr.io/owner/name:tag` for a component published in the
+[Wasm OCI artifact](https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/)
+format, for example with `wkg oci push`. Registries must allow anonymous pulls.
+Run `fleet lock`
 (`cargo run -p fleet -- lock` from this repository) to download remote components,
 validate them, and write their SHA-256 digests to `plugins.lock`.
 Running the command again updates all remote plugins.

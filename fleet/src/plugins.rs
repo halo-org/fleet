@@ -30,7 +30,7 @@ pub enum PluginConfig {
     },
     /// A remote component pinned in the lockfile.
     Remote {
-        /// The component URL.
+        /// The component URL, or an OCI reference prefixed with `oci://`.
         url: String,
         /// The approved capabilities.
         #[serde(default)]
@@ -352,18 +352,22 @@ impl Error for LoadError {
 
 // === Files ===
 
-async fn download(url: &str) -> Result<Vec<u8>, reqwest::Error> {
-    reqwest::Client::builder()
+async fn download(url: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(120))
-        .build()?
+        .build()?;
+    if let Some(reference) = url.strip_prefix("oci://") {
+        return crate::oci::pull(&client, reference).await;
+    }
+    Ok(client
         .get(url)
         .send()
         .await?
         .error_for_status()?
         .bytes()
-        .await
-        .map(|bytes| bytes.to_vec())
+        .await?
+        .to_vec())
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
