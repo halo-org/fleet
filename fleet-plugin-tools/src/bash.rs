@@ -49,7 +49,7 @@ pub async fn execute(
     if let Some(cwd) = &input.cwd {
         crate::files::validate_path(cwd)?;
     }
-    let maximum = config.timeout_ms.unwrap_or(120_000);
+    let maximum = config.timeout_ms.unwrap_or(3_600_000);
     let timeout = input.timeout_ms.unwrap_or(maximum);
     if timeout == 0 || timeout > maximum {
         return Err(Error::Input(format!(

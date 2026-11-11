@@ -87,7 +87,7 @@ Workspace selection and config come only from the role's
 `output_limit` and `read_limit`. Non-null tool settings override provider settings.
 An absent or null role workspace leaves the tools without a workspace.
 
-Defaults are `bash`, 120000 milliseconds, 65536 bytes per output stream and a
+Defaults are `bash`, 3600000 milliseconds, 65536 bytes per output stream and a
 65536-byte read limit. Bash input may select a shorter timeout and a
 working directory. `read_limit` also limits the file size for editing. It does not
 apply to images.
