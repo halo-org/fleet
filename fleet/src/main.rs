@@ -1,5 +1,6 @@
 //! An AI agent harness.
 
+mod admin_auth;
 mod api;
 mod api_types;
 mod authentication;
@@ -22,6 +23,7 @@ mod signals;
 mod subscription;
 
 pub(crate) use self::{
+    admin_auth::AdminToken,
     api_types::{
         ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
         ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRole, ApiToolCallRecord,
@@ -42,9 +44,17 @@ pub(crate) use self::{
 
 use core::{error::Error, net::SocketAddr, pin::pin, time::Duration};
 use futures_util::future;
-use std::{io, process::ExitCode};
+use std::{ffi::OsString, io, process::ExitCode};
+
+const ADMIN_TOKEN_VARIABLE: &str = "FLEET_ADMIN_TOKEN";
 
 fn main() -> ExitCode {
+    let admin_token = std::env::var_os(ADMIN_TOKEN_VARIABLE);
+    // SAFETY: No other threads have started. Removal keeps the token from child processes.
+    unsafe {
+        std::env::remove_var(ADMIN_TOKEN_VARIABLE);
+    }
+
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("can install TLS provider");
@@ -54,7 +64,7 @@ fn main() -> ExitCode {
         .build()
         .expect("can build tokio runtime");
 
-    match tokio_runtime.block_on(start()) {
+    match tokio_runtime.block_on(start(admin_token)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Fleet failed: {}", ErrorChain(error.as_ref()));
@@ -63,7 +73,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn start(admin_token: Option<OsString>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let lock = {
         let mut arguments = std::env::args_os().skip(1);
         let lock = match arguments.next() {
@@ -94,6 +104,9 @@ async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
 
+    let admin_token = admin_token.ok_or_else(|| format!("{ADMIN_TOKEN_VARIABLE} must be set"))?;
+    let admin_token = AdminToken::new(&admin_token)?;
+
     let data_dir = directories::create_data_dir()?;
     let store = fleet_store::Store::open(data_dir.join("fleet.db"))?;
     let fleet = Fleet::new(store.clone(), None);
@@ -112,6 +125,7 @@ async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
     let agents = fleet.run(&roles, &providers, &providers);
 
     let result = run(
+        admin_token,
         fleet.clone(),
         agents,
         address,
@@ -125,6 +139,7 @@ async fn start() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 async fn run(
+    admin_token: AdminToken,
     fleet: Fleet,
     agents: impl Future<Output = ()> + Send,
     address: SocketAddr,
@@ -140,7 +155,14 @@ async fn run(
     };
 
     let server = async {
-        let result = server::run(shutdown, fleet.clone(), address, shutdown_timeout).await;
+        let result = server::run(
+            shutdown,
+            admin_token,
+            fleet.clone(),
+            address,
+            shutdown_timeout,
+        )
+        .await;
         fleet.shutdown();
         result
     };

@@ -602,6 +602,8 @@ pub fn json_response(status: StatusCode, value: &impl Serialize) -> Response<Res
 
 pub enum ApiError {
     BadRequest(String),
+    Unauthorized,
+    CrossOrigin,
     NotFound,
     MethodNotAllowed(&'static str),
     UnsupportedMediaType,
@@ -618,6 +620,12 @@ impl ApiError {
             Self::BadRequest(message) => {
                 (StatusCode::BAD_REQUEST, "invalid_request", message.as_str())
             }
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "sign_in_required",
+                "A valid admin token is required",
+            ),
+            Self::CrossOrigin => (StatusCode::FORBIDDEN, "cross_origin", "Origin not allowed"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Route not found"),
             Self::MethodNotAllowed(_) => (
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -707,7 +715,7 @@ impl ApiError {
         }
     }
 
-    fn into_response(self) -> Response<ResponseBody> {
+    pub fn into_response(self) -> Response<ResponseBody> {
         let (status, code, message) = self.details();
 
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -725,6 +733,12 @@ impl ApiError {
             response
                 .headers_mut()
                 .insert(header::ALLOW, HeaderValue::from_static(method));
+        }
+
+        if matches!(self, Self::Unauthorized) {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
 
         response

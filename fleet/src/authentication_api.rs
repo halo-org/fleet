@@ -169,31 +169,6 @@ fn validate_request(parts: &Parts) -> Result<(), ApiError> {
             "Connection APIs do not accept query parameters".into(),
         ));
     }
-
-    let host = parts
-        .headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|host| url::Url::parse(&format!("http://{host}")).ok());
-    if !host.is_some_and(|url| matches!(url.host_str(), Some("localhost" | "127.0.0.1"))) {
-        return Err(ApiError::BadRequest(
-            "Connection APIs require a loopback host".into(),
-        ));
-    }
-    if let Some(origin) = parts.headers.get(header::ORIGIN) {
-        let origin = origin
-            .to_str()
-            .ok()
-            .and_then(|origin| url::Url::parse(origin).ok());
-        if !origin.is_some_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
-        }) {
-            return Err(ApiError::BadRequest(
-                "Cross-origin authentication is not allowed".into(),
-            ));
-        }
-    }
     Ok(())
 }
 

@@ -5,6 +5,9 @@ On Linux this is `$XDG_CONFIG_HOME/fleet`, or `~/.config/fleet`.
 On macOS it is `~/Library/Application Support/fleet`.
 On Windows it is `%APPDATA%\fleet`.
 
+`FLEET_ADMIN_TOKEN` is required to start the server. It must be at least 32 characters from
+`A-Za-z0-9-._~+/=`. Clients send it as a bearer token or sign in through `POST /session`.
+
 ```json
 {
   "listen": "127.0.0.1:1337",

@@ -1,4 +1,4 @@
-use crate::{ErrorChain, Fleet};
+use crate::{AdminToken, ErrorChain, Fleet};
 use core::{net::SocketAddr, pin::pin, time::Duration};
 use futures_util::future::{self, Either};
 use hyper_util::{
@@ -10,6 +10,7 @@ use std::io;
 /// Runs the HTTP server.
 pub async fn run(
     shutdown: impl Future<Output = ()>,
+    admin_token: AdminToken,
     fleet: Fleet,
     address: SocketAddr,
     shutdown_timeout: Option<Duration>,
@@ -18,7 +19,7 @@ pub async fn run(
 
     let result = {
         let shutdown = pin!(shutdown);
-        let server = pin!(serve(&connections, fleet, address));
+        let server = pin!(serve(&connections, admin_token, fleet, address));
 
         match future::select(shutdown, server).await {
             Either::Left(((), _)) => Ok(()),
@@ -39,6 +40,7 @@ pub async fn run(
 
 async fn serve(
     connections: &GracefulShutdown,
+    admin_token: AdminToken,
     fleet: Fleet,
     address: SocketAddr,
 ) -> io::Result<()> {
@@ -52,11 +54,12 @@ async fn serve(
         let io = TokioIo::new(stream);
         let http = http.clone();
         let watcher = connections.watcher();
+        let admin_token = admin_token.clone();
         let fleet = fleet.clone();
 
         tokio::spawn(async move {
             let service = hyper::service::service_fn(move |request| {
-                crate::api::handle(fleet.clone(), request)
+                crate::admin_auth::handle(admin_token.clone(), fleet.clone(), request)
             });
 
             let connection = http.serve_connection(io, service);
