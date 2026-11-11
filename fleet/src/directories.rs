@@ -3,6 +3,10 @@ use std::{fs::DirBuilder, io, path::PathBuf};
 
 /// Creates and returns the config directory.
 pub fn create_config_dir() -> io::Result<PathBuf> {
+    if let Some(root) = root_dir()? {
+        return create_dir(root.join("config"));
+    }
+
     let path = cfg_select! {
         windows => windows_dir(&windows_sys::Win32::UI::Shell::FOLDERID_RoamingAppData),
         target_os = "macos" => home_dir().map(|path| path.join("Library/Application Support")),
@@ -18,6 +22,10 @@ pub fn create_config_dir() -> io::Result<PathBuf> {
 
 /// Creates and returns the data directory.
 pub fn create_data_dir() -> io::Result<PathBuf> {
+    if let Some(root) = root_dir()? {
+        return create_dir(root.join("data"));
+    }
+
     let path = cfg_select! {
         windows => windows_dir(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData),
         target_os = "macos" => home_dir().map(|path| path.join("Library/Application Support")),
@@ -33,6 +41,10 @@ pub fn create_data_dir() -> io::Result<PathBuf> {
 
 /// Creates and returns the cache directory.
 pub fn create_cache_dir() -> io::Result<PathBuf> {
+    if let Some(root) = root_dir()? {
+        return create_dir(root.join("cache"));
+    }
+
     let path = cfg_select! {
         windows => windows_dir(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
             .map(|path| path.join("fleet/cache")),
@@ -45,6 +57,21 @@ pub fn create_cache_dir() -> io::Result<PathBuf> {
     }?;
 
     create_dir(path)
+}
+
+fn root_dir() -> io::Result<Option<PathBuf>> {
+    let Some(path) = std::env::var_os("FLEET_DIR").map(PathBuf::from) else {
+        return Ok(None);
+    };
+
+    if path.is_absolute() {
+        Ok(Some(path))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "FLEET_DIR must be an absolute path",
+        ))
+    }
 }
 
 fn create_dir(path: PathBuf) -> io::Result<PathBuf> {

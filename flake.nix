@@ -100,7 +100,10 @@
         tag = "latest";
         config = {
           Entrypoint = [ (lib.getExe' fleet "fleet") ];
-          Env = [ "SSL_CERT_FILE=${certificates}" ];
+          Env = [
+            "SSL_CERT_FILE=${certificates}"
+            "FLEET_DIR=/var/lib/fleet"
+          ];
         };
       };
 

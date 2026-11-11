@@ -5,6 +5,9 @@ On Linux this is `$XDG_CONFIG_HOME/fleet`, or `~/.config/fleet`.
 On macOS it is `~/Library/Application Support/fleet`.
 On Windows it is `%APPDATA%\fleet`.
 
+Set `FLEET_DIR` to an absolute path to keep everything in one place instead. Fleet then uses its
+`config`, `data` and `cache` subdirectories, so `config.json` is at `$FLEET_DIR/config/config.json`.
+
 `FLEET_ADMIN_TOKEN` is required to start the server. It must be at least 32 characters from
 `A-Za-z0-9-._~+/=`. Clients send it as a bearer token or sign in through `POST /session`.
 
