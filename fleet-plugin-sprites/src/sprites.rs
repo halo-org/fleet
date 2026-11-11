@@ -1,4 +1,4 @@
-use crate::{WorkspaceId, WorkspacesError, WorkspacesErrorKind, bindings, config::HOME};
+use crate::{WorkspacesError, WorkspacesErrorKind, bindings, config::HOME};
 use bindings::{
     fleet::providers::credentials::{self, Credential},
     wasi::http::{
@@ -19,7 +19,7 @@ const QUERY: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 const SECOND: u64 = 1_000_000_000;
 
-/// A sprite belonging to one workspace ID.
+/// A sprite hosting workspaces.
 pub struct Sprite {
     name: String,
 }
@@ -44,10 +44,8 @@ struct Response {
 }
 
 impl Sprite {
-    pub fn new(id: &WorkspaceId) -> Self {
-        Self {
-            name: format!("fleet-{:016x}{:016x}", id.high, id.low),
-        }
+    pub const fn new(name: String) -> Self {
+        Self { name }
     }
 
     /// Creates the sprite unless it already exists.
@@ -350,16 +348,6 @@ fn other(message: String) -> WorkspacesError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sprite_name_derives_from_workspace_id() {
-        let sprite = Sprite::new(&WorkspaceId {
-            high: 0x0123_4567_89ab_cdef,
-            low: 1,
-        });
-
-        assert_eq!(sprite.name, "fleet-0123456789abcdef0000000000000001");
-    }
 
     #[test]
     fn query_encodes_reserved_characters() {

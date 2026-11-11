@@ -28,3 +28,7 @@ fn error(kind: WorkspacesErrorKind, message: impl Into<String>) -> WorkspacesErr
         message: message.into(),
     }
 }
+
+fn hex(id: &WorkspaceId) -> String {
+    format!("{:016x}{:016x}", id.high, id.low)
+}

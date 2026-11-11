@@ -35,13 +35,34 @@ Copy `sprites.wasm` into Fleet's config directory under `plugins/`, then add:
 This registers `sprites:default` and a `sprites` connection. Sign in with a
 Sprites API key before opening a workspace.
 
-The workspace config may supply `setup`, a script run with `bash -lc` after the
-sprite is created. Opening a workspace stores its config in
-`/home/sprite/.fleet/workspace`. Reopening is safe, but changing the config for
-an existing ID is rejected. Setup must be safe to rerun. It runs again if an
-earlier open failed, and concurrent first opens may both run it.
+The workspace config accepts these optional fields:
 
-Relative file paths and command working directories start in `/home/sprite`.
+- `sprite` names a sprite shared by every workspace using it. It may contain
+  lowercase letters, digits and hyphens.
+- `setup` is a script run with `bash -lc` when the sprite is first opened.
+- `repo` is a git URL. Each workspace ID gets a worktree in
+  `/home/sprite/worktrees/<id>` on a new branch `fleet/<id>` from the latest
+  default branch, without an upstream. An existing branch of that name is
+  reused. The bare clone lives in `/home/sprite/repos/` under the URL with `%`
+  and `/` percent-encoded, and is fetched before each new worktree.
+
+```json
+{
+  "sprite": "dev",
+  "repo": "https://github.com/halo-org/fleet.git"
+}
+```
+
+Opening a workspace stores its config in `/home/sprite/.fleet/workspaces/<id>`
+and the sprite's setup in `/home/sprite/.fleet/sprite`. Reopening is safe, but
+changing the config for an existing ID or the setup of an existing sprite is
+rejected. Setup must be safe to rerun. It runs again if an earlier open failed,
+and concurrent first opens may both run it. Repository provisioning holds a lock
+on the sprite and resumes after a failed or cancelled open. Git credentials are
+not managed. Configure them on the sprite.
+
+Relative file paths and command working directories start in the worktree with
+`repo`, and in `/home/sprite` otherwise.
 File writes go to a temporary sibling that is then renamed over the destination.
 A failed rename may leave the temporary file behind.
 
@@ -52,10 +73,13 @@ group. Exits caused by signals are reported as codes above 128.
 
 ## Limitations
 
-- Sprites are never deleted. They accumulate until removed in Sprites.
+- Sprites, worktrees and branches are never deleted. They accumulate until
+  removed by hand.
+- Changing `sprite` for an existing ID opens a new environment instead of being
+  rejected, because the previous sprite is not consulted.
 - Retried commands return `unsafe-to-retry` because Sprites exec is not idempotent.
 - Spooled output is not capped on the sprite's disk.
 - The API key is visible to the plugin. HTTP is limited to `api.sprites.dev`.
 - Sprites returns 404 for both a missing file and a missing sprite, so a missing
   file costs an extra request.
-- Only API keys are supported. The workspace directory is not configurable.
+- Only API keys are supported.

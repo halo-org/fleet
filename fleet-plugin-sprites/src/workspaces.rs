@@ -2,11 +2,41 @@ use crate::{
     Config, Sprite, Sprites, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
     WorkspaceOutput, WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
     bindings::{self, exports::fleet::providers::workspaces::Guest},
+    config::HOME,
 };
 
-const MARKER: &str = "/home/sprite/.fleet/workspace";
-const SETUP_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-const SETUP_OUTPUT_LIMIT: u64 = 16 * 1024;
+const SPRITE_MARKER: &str = "/home/sprite/.fleet/sprite";
+const WORKSPACE_MARKERS: &str = "/home/sprite/.fleet/workspaces";
+const MARKER_LIMIT: u64 = 1024 * 1024;
+const PROVISION_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+const PROVISION_OUTPUT_LIMIT: u64 = 16 * 1024;
+
+/// Clones a repository if needed and adds a worktree on a new branch from the latest default branch.
+const REPO: &str = r#"set -euo pipefail
+url=$1 repo=$2 tree=$3 branch=$4
+temporary=/home/sprite/.fleet/tmp
+mkdir -p -- "$temporary" "${repo%/*}" "${tree%/*}"
+exec 9>/home/sprite/.fleet/repos.lock
+flock 9
+if [ -e "$tree" ]; then exit 0; fi
+if [ ! -d "$repo" ]; then
+  rm -rf -- "$temporary/repo"
+  git clone --bare --quiet -- "$url" "$temporary/repo"
+  git -C "$temporary/repo" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  mv -T -- "$temporary/repo" "$repo"
+fi
+git -C "$repo" fetch --quiet --prune origin
+git -C "$repo" remote set-head origin --auto >/dev/null
+staged=$temporary/${tree##*/}
+rm -rf -- "$staged"
+git -C "$repo" worktree prune
+if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+  git -C "$repo" worktree add --quiet "$staged" "$branch"
+else
+  git -C "$repo" worktree add --quiet --no-track -b "$branch" "$staged" origin/HEAD
+fi
+git -C "$repo" worktree move "$staged" "$tree"
+"#;
 
 impl Guest for Sprites {
     #[expect(clippy::unused_async_trait_impl, reason = "matches the WIT export")]
@@ -23,10 +53,20 @@ impl Guest for Sprites {
                     "schema": {
                         "type": "object",
                         "properties": {
+                            "sprite": {
+                                "type": "string",
+                                "title": "Sprite",
+                                "description": "Shares a named sprite instead of creating one per workspace.",
+                            },
                             "setup": {
                                 "type": "string",
                                 "title": "Setup script",
                                 "description": "Runs with bash when a sprite is first opened.",
+                            },
+                            "repo": {
+                                "type": "string",
+                                "title": "Repository",
+                                "description": "Git URL to clone. Each workspace gets a worktree on its own branch.",
                             },
                         },
                         "additionalProperties": false,
@@ -39,8 +79,9 @@ impl Guest for Sprites {
 
     async fn open(context: WorkspaceContext) -> Result<(), WorkspacesError> {
         let (config, sprite) = load(&context)?;
-        let limit = 1024 * 1024;
-        match sprite.read(MARKER, limit).await {
+        let id = crate::hex(&context.id);
+        let marker = format!("{WORKSPACE_MARKERS}/{id}");
+        match sprite.read(&marker, MARKER_LIMIT).await {
             Ok(marker) => {
                 return if Config::parse(&String::from_utf8_lossy(&marker)).ok() == Some(config) {
                     Ok(())
@@ -61,39 +102,43 @@ impl Guest for Sprites {
             }) => sprite.create().await?,
             Err(error) => return Err(error),
         }
-        if let Some(setup) = &config.setup {
-            let output = run(
-                &sprite,
-                WorkspaceCommand {
-                    id: "setup".into(),
-                    program: "bash".into(),
-                    args: vec!["-lc".into(), setup.clone()],
-                    env: Vec::new(),
-                    cwd: None,
-                    stdin: Vec::new(),
-                    timeout_ms: SETUP_TIMEOUT_MS,
-                    output_limit: SETUP_OUTPUT_LIMIT,
-                },
-            )
-            .await?;
-            let failure = match output.exit {
-                WorkspaceExit::Code(0) => None,
-                WorkspaceExit::Code(code) => Some(format!("exited with code {code}")),
-                WorkspaceExit::Terminated => Some("was terminated".to_owned()),
-                WorkspaceExit::TimedOut => Some("timed out".to_owned()),
-            };
-            if let Some(failure) = failure {
-                return Err(crate::error(
-                    WorkspacesErrorKind::Other,
-                    format!(
-                        "setup {failure}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim(),
-                    ),
-                ));
+        match sprite.read(SPRITE_MARKER, MARKER_LIMIT).await {
+            Ok(setup) => {
+                if serde_json::from_slice::<Option<String>>(&setup).ok()
+                    != Some(config.setup.clone())
+                {
+                    return Err(crate::error(
+                        WorkspacesErrorKind::InvalidConfiguration,
+                        "sprite was already set up with a different script",
+                    ));
+                }
             }
+            Err(WorkspacesError {
+                kind: WorkspacesErrorKind::FileNotFound,
+                message: _,
+            }) => {
+                if let Some(setup) = &config.setup {
+                    provision(&sprite, "setup", vec!["-lc".into(), setup.clone()]).await?;
+                }
+                let setup = serde_json::to_vec(&config.setup).expect("setup serializes");
+                replace(&sprite, SPRITE_MARKER, setup, true).await?;
+            }
+            Err(error) => return Err(error),
         }
-        let marker = serde_json::to_vec(&config).expect("config serializes");
-        replace(&sprite, MARKER, marker, true).await
+        if let Some(repo) = &config.repo {
+            let args = vec![
+                "-c".into(),
+                REPO.into(),
+                "bash".into(),
+                repo.clone(),
+                crate::config::repository(repo),
+                config.directory(&context.id),
+                format!("fleet/{id}"),
+            ];
+            provision(&sprite, "repo", args).await?;
+        }
+        let bytes = serde_json::to_vec(&config).expect("config serializes");
+        replace(&sprite, &marker, bytes, true).await
     }
 
     async fn read(
@@ -101,13 +146,14 @@ impl Guest for Sprites {
         path: String,
         limit: u64,
     ) -> Result<Vec<u8>, WorkspacesError> {
-        let (_, sprite) = load(&context)?;
-        sprite.read(&crate::config::path(&path)?, limit).await
+        let (config, sprite) = load(&context)?;
+        let path = crate::config::path(&config.directory(&context.id), &path)?;
+        sprite.read(&path, limit).await
     }
 
     async fn write(context: WorkspaceContext, file: WorkspaceWrite) -> Result<(), WorkspacesError> {
-        let (_, sprite) = load(&context)?;
-        let path = crate::config::path(&file.path)?;
+        let (config, sprite) = load(&context)?;
+        let path = crate::config::path(&config.directory(&context.id), &file.path)?;
         if let Some(expected) = file.expected {
             let limit = u64::try_from(expected.len()).expect("byte length fits in u64");
             match sprite.read(&path, limit).await {
@@ -139,8 +185,8 @@ impl Guest for Sprites {
                 "the command may already have run",
             ));
         }
-        let (_, sprite) = load(&context)?;
-        run(&sprite, command).await
+        let (config, sprite) = load(&context)?;
+        run(&sprite, &config.directory(&context.id), command).await
     }
 }
 
@@ -152,7 +198,35 @@ fn load(context: &WorkspaceContext) -> Result<(Config, Sprite), WorkspacesError>
         ));
     }
     let config = Config::parse(&context.workspace.config)?;
-    Ok((config, Sprite::new(&context.id)))
+    let sprite = Sprite::new(config.sprite(&context.id));
+    Ok((config, sprite))
+}
+
+async fn provision(sprite: &Sprite, name: &str, args: Vec<String>) -> Result<(), WorkspacesError> {
+    let command = WorkspaceCommand {
+        id: name.into(),
+        program: "bash".into(),
+        args,
+        env: vec![("GIT_TERMINAL_PROMPT".into(), "0".into())],
+        cwd: None,
+        stdin: Vec::new(),
+        timeout_ms: PROVISION_TIMEOUT_MS,
+        output_limit: PROVISION_OUTPUT_LIMIT,
+    };
+    let output = run(sprite, HOME, command).await?;
+    let failure = match output.exit {
+        WorkspaceExit::Code(0) => return Ok(()),
+        WorkspaceExit::Code(code) => format!("exited with code {code}"),
+        WorkspaceExit::Terminated => "was terminated".to_owned(),
+        WorkspaceExit::TimedOut => "timed out".to_owned(),
+    };
+    Err(crate::error(
+        WorkspacesErrorKind::Other,
+        format!(
+            "{name} {failure}: {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ),
+    ))
 }
 
 async fn replace(
@@ -176,9 +250,10 @@ async fn replace(
 
 async fn run(
     sprite: &Sprite,
+    directory: &str,
     command: WorkspaceCommand,
 ) -> Result<WorkspaceOutput, WorkspacesError> {
-    let cwd = crate::config::path(command.cwd.as_deref().unwrap_or(""))?;
+    let cwd = crate::config::path(directory, command.cwd.as_deref().unwrap_or(""))?;
     let limit = command.output_limit;
     let timeout_ms = command.timeout_ms;
     let response = sprite
