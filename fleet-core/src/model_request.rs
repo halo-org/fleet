@@ -167,7 +167,7 @@ where
 
                     if can_use_compaction {
                         last_compacted_event = Some(compaction.last_event);
-                        input = compaction.input.clone();
+                        input.clone_from(&compaction.input);
                     }
                 }
                 EventPayload::TurnEnd(_) => {}
