@@ -11,10 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
         with:
-          use-flakehub: false
+          extra-conf: |
+            extra-substituters = https://halo-cache.fly.dev/halo
+            extra-trusted-public-keys = halo:nXtBRLJRHoAQ/CoFmYkvJAiFzHJLTmqygmvhGNryigA=
+      - run: |
+          nix profile install --inputs-from . nixpkgs#attic-client
+          attic login halo-cache https://halo-cache.fly.dev "$ATTIC_TOKEN"
+          attic watch-store halo-cache:halo &> /dev/null &
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       - run: nix flake check -L --keep-going
+      - if: ${{ !cancelled() }}
+        run: nix path-info --all | grep -v '\.drv$' | attic push --stdin halo-cache:halo
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -26,9 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
         with:
-          use-flakehub: false
+          extra-conf: |
+            extra-substituters = https://halo-cache.fly.dev/halo
+            extra-trusted-public-keys = halo:nXtBRLJRHoAQ/CoFmYkvJAiFzHJLTmqygmvhGNryigA=
+      - run: |
+          nix profile install --inputs-from . nixpkgs#attic-client
+          attic login halo-cache https://halo-cache.fly.dev "$ATTIC_TOKEN"
+          attic watch-store halo-cache:halo &> /dev/null &
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       - run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
         env:
           REGISTRY_USER: ${{ github.actor }}
@@ -37,3 +53,5 @@ jobs:
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ github.token }}
+      - if: ${{ !cancelled() }}
+        run: nix path-info --all | grep -v '\.drv$' | attic push --stdin halo-cache:halo
