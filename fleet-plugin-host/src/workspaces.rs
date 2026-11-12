@@ -15,20 +15,18 @@ impl Guest for Host {
         Ok(Some(Workspace {
             name,
             extensions: serde_json::json!({
-                "fleet": {
-                    "title": "Host",
-                    "description": "Run commands and access files on the Fleet host.",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "cwd": {
-                                "type": "string",
-                                "title": "Working directory",
-                            },
+                "fleet.title": "Host",
+                "fleet.description": "Run commands and access files on the Fleet host.",
+                "fleet.schema": {
+                    "type": "object",
+                    "properties": {
+                        "cwd": {
+                            "type": "string",
+                            "title": "Working directory",
                         },
-                        "required": ["cwd"],
-                        "additionalProperties": false,
                     },
+                    "required": ["cwd"],
+                    "additionalProperties": false,
                 },
             })
             .to_string(),

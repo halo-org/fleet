@@ -611,7 +611,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(stored.extensions["fleet"]["title"], "Title");
+            assert_eq!(stored.extensions["fleet.title"], "Title");
 
             let (agent, summary) = store
                 .worker()
@@ -694,6 +694,8 @@ mod tests {
 
             let store = Store::open(&path).unwrap();
             let response = Queries::agent(&store, agent.id, None).await.unwrap();
+            agent.extensions =
+                JsonObject::from_iter([("fleet.title".into(), "Legacy title".into())]);
             assert_eq!(response.revision, 2.into());
             assert_eq!(
                 response.value,

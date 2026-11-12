@@ -572,6 +572,8 @@ version = "0.0.0"
 dependencies = [
  "fleet-core",
  "futures-util",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -633,6 +635,7 @@ dependencies = [
 name = "fleet-plugin-tools"
 version = "0.0.0"
 dependencies = [
+ "fleet-kit",
  "serde",
  "serde_json",
  "sha2",

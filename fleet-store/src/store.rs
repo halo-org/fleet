@@ -34,8 +34,9 @@ struct WakeStream {
 impl Store {
     /// Opens a store, creating it if needed.
     ///
-    /// Format 2 and 3 databases are upgraded transactionally to format 4 for metadata
-    /// revisions and image content. Older binaries cannot reopen an upgraded database.
+    /// Format 2, 3 and 4 databases are upgraded transactionally to format 5 for metadata
+    /// revisions, image content and top-level `fleet.title` keys. Older binaries cannot
+    /// reopen an upgraded database.
     ///
     /// # Errors
     ///
@@ -60,22 +61,25 @@ impl Store {
         {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             match records.get::<u32>(&[])? {
-                Some(4) => {}
-                Some(3) | None => records.put(&[], &4_u32)?,
-                Some(2) => {
-                    // Legacy metadata last changed at creation. Refresh the projection
-                    // in case an agent already carried an application title.
-                    let agents = records
-                        .prefix::<AgentRecord>(&[records::AGENT])?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for agent in agents {
-                        crate::agents::sync_agent(
-                            &mut records,
-                            &agent,
-                            crate::agents::now_millis(),
-                        )?;
+                Some(5) => {}
+                None => records.put(&[], &5_u32)?,
+                Some(format @ 2..=4) => {
+                    crate::title_migration::migrate(&mut records)?;
+                    if format == 2 {
+                        // Legacy metadata last changed at creation. Refresh the projection
+                        // in case an agent already carried an application title.
+                        let agents = records
+                            .prefix::<AgentRecord>(&[records::AGENT])?
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for agent in agents {
+                            crate::agents::sync_agent(
+                                &mut records,
+                                &agent,
+                                crate::agents::now_millis(),
+                            )?;
+                        }
                     }
-                    records.put(&[], &4_u32)?;
+                    records.put(&[], &5_u32)?;
                 }
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }

@@ -1,8 +1,20 @@
+use core::iter;
 use fleet_core::{
-    Configured, JsonObject, Role, RoleCompaction, RoleName, RoleParameter, RoleParameterTarget,
+    Configured, JsonObject, JsonValue, Role, RoleCompaction, RoleName, RoleParameter,
+    RoleParameterTarget,
 };
+use fleet_kit::{Extension as _, RoleWorkspace};
 use serde::Deserialize;
 use std::{collections::BTreeMap, io, path::PathBuf};
+
+/// The extension key of a display title.
+pub const TITLE: &str = "fleet.title";
+/// The extension key of a description.
+pub const DESCRIPTION: &str = "fleet.description";
+/// The extension key that hides a role from selection.
+pub const HIDDEN: &str = "fleet.hidden";
+/// The extension key of a parameter's JSON Schema.
+pub const SCHEMA: &str = "fleet.schema";
 
 /// Loads roles from Markdown files.
 #[derive(Clone)]
@@ -13,14 +25,17 @@ pub struct Roles {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    hidden: bool,
     model: Selection,
     #[serde(default)]
     tools: BTreeMap<String, Selection>,
+    workspace: Option<RoleWorkspace>,
     #[serde(default)]
     parameters: BTreeMap<String, Parameter>,
     compaction: Option<Compaction>,
-    #[serde(default)]
-    extensions: JsonObject,
 }
 
 #[derive(Deserialize)]
@@ -34,9 +49,10 @@ struct Selection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameter {
+    title: Option<String>,
+    description: Option<String>,
+    schema: Option<JsonValue>,
     target: Target,
-    #[serde(default)]
-    extensions: JsonObject,
 }
 
 #[derive(Deserialize)]
@@ -44,7 +60,7 @@ struct Parameter {
 enum Target {
     Model { path: Vec<String> },
     Tool { tool: String, path: Vec<String> },
-    Extensions { path: Vec<String> },
+    Workspace { path: Vec<String> },
 }
 
 #[derive(Deserialize)]
@@ -126,14 +142,26 @@ impl<N: From<String>> From<Selection> for Configured<N> {
 
 impl From<Parameter> for RoleParameter {
     fn from(parameter: Parameter) -> Self {
+        let mut extensions = JsonObject::new();
+        insert(&mut extensions, TITLE, parameter.title);
+        insert(&mut extensions, DESCRIPTION, parameter.description);
+        insert(&mut extensions, SCHEMA, parameter.schema);
         Self {
             target: match parameter.target {
                 Target::Model { path } => RoleParameterTarget::Model(path),
                 Target::Tool { tool, path } => RoleParameterTarget::Tool(tool.into(), path),
-                Target::Extensions { path } => RoleParameterTarget::Extensions(path),
+                Target::Workspace { path } => RoleParameterTarget::Extensions(
+                    iter::once(RoleWorkspace::KEY.into()).chain(path).collect(),
+                ),
             },
-            extensions: parameter.extensions,
+            extensions,
         }
+    }
+}
+
+fn insert(extensions: &mut JsonObject, key: &str, value: Option<impl Into<JsonValue>>) {
+    if let Some(value) = value {
+        extensions.insert(key.into(), value.into());
     }
 }
 
@@ -158,6 +186,13 @@ fn parse(name: RoleName, source: &str) -> io::Result<Role> {
         if line.trim_end() == "---" {
             let frontmatter: Frontmatter = yaml_serde::from_str(&frontmatter)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let mut extensions = JsonObject::new();
+            insert(&mut extensions, TITLE, frontmatter.title);
+            insert(&mut extensions, DESCRIPTION, frontmatter.description);
+            insert(&mut extensions, HIDDEN, frontmatter.hidden.then_some(true));
+            if let Some(workspace) = frontmatter.workspace {
+                workspace.insert(&mut extensions)?;
+            }
 
             return Ok(Role {
                 name,
@@ -177,7 +212,7 @@ fn parse(name: RoleName, source: &str) -> io::Result<Role> {
                     threshold: compaction.threshold,
                     instructions: compaction.instructions,
                 }),
-                extensions: frontmatter.extensions,
+                extensions,
             });
         }
         frontmatter.push_str(line);
@@ -199,6 +234,9 @@ mod tests {
     fn role_metadata_exposes_parameters_and_configured_defaults() {
         let source = "\
 ---
+title: Reviewer
+description: Review changes.
+hidden: true
 model:
   name: provider:model
   config:
@@ -209,34 +247,28 @@ tools:
     name: provider:search
     config:
       enabled: false
-extensions:
-  workspace: null
-  fleet:
-    title: Reviewer
-    description: Review changes.
-    hidden: true
+workspace:
+  name: host:default
+  config:
+    cwd: /project
 parameters:
   effort:
+    title: Reasoning
+    schema:
+      type: string
+      enum: [low, high]
     target: {type: model, path: [effort]}
-    extensions:
-      fleet:
-        title: Reasoning
-        schema:
-          type: string
-          enum: [low, high]
   search:
     target: {type: tool, tool: search, path: [enabled]}
-  workspace:
-    target: {type: extensions, path: [workspace]}
+  cwd:
+    target: {type: workspace, path: [config, cwd]}
   missing:
     target: {type: model, path: [missing]}
   token:
+    schema:
+      type: string
+      writeOnly: true
     target: {type: model, path: [token]}
-    extensions:
-      fleet:
-        schema:
-          type: string
-          writeOnly: true
 ---
 Private instructions.
 ";
@@ -260,10 +292,7 @@ Private instructions.
             }),
         );
         assert_eq!(value["parameters"]["search"]["default"], false);
-        assert_eq!(
-            value["parameters"]["workspace"].get("default"),
-            Some(&serde_json::Value::Null),
-        );
+        assert_eq!(value["parameters"]["cwd"]["default"], "/project");
         assert!(value["parameters"]["missing"].get("default").is_none());
         assert!(value["parameters"]["token"].get("default").is_none());
         assert!(value.get("system_prompt").is_none());
@@ -281,11 +310,18 @@ model:
 tools:
   search:
     name: provider:search
+workspace:
+  name: sprites:default
+  id: '7'
 parameters:
   effort:
     target:
       type: model
       path: [effort]
+  repos:
+    target:
+      type: workspace
+      path: [config, repos]
 ---
 
 Be helpful.
@@ -304,6 +340,24 @@ Keep this separator.
             RoleParameterTarget::Model(vec!["effort".into()]),
         );
         assert_eq!(
+            role.parameters[&"repos".into()].target,
+            RoleParameterTarget::Extensions(vec![
+                "fleet.workspace".into(),
+                "config".into(),
+                "repos".into(),
+            ]),
+        );
+        assert_eq!(
+            serde_json::Value::from(role.extensions),
+            json!({
+                "fleet.workspace": {
+                    "name": "sprites:default",
+                    "config": {},
+                    "id": "7",
+                },
+            }),
+        );
+        assert_eq!(
             role.system_prompt,
             "\nBe helpful.\n\n---\nKeep this separator.\n",
         );
@@ -315,6 +369,7 @@ Keep this separator.
             "Be helpful.",
             "---\nmodel:\n  name: provider:model\n",
             "---\nmodel:\n  name: provider:model\ntoolz: {}\n---\n",
+            "---\nmodel:\n  name: provider:model\nextensions: {}\n---\n",
         ] {
             let error = parse("assistant".into(), source).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);

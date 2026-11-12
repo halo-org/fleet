@@ -1,6 +1,9 @@
 use alloc::{boxed::Box, collections::BTreeMap, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 use fleet_core::{Configured, JsonObject};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+use crate::Extension;
 
 // === Workspaces ===
 
@@ -14,7 +17,8 @@ pub struct Workspace {
 }
 
 /// The name of a workspace.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct WorkspaceName(String);
 
 /// The ID of a workspace environment.
@@ -30,6 +34,20 @@ pub struct WorkspaceContext {
     pub workspace: Configured<WorkspaceName>,
     /// The ID of the environment.
     pub id: WorkspaceId,
+}
+
+/// The workspace configured by a role.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleWorkspace {
+    /// The workspace name.
+    pub name: WorkspaceName,
+    /// The workspace config.
+    #[serde(default)]
+    pub config: JsonObject,
+    /// The ID of a shared environment, or `None` for the agent's own environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<WorkspaceId>,
 }
 
 // === Files ===
@@ -307,6 +325,28 @@ impl fmt::Display for WorkspaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
+}
+
+impl Serialize for WorkspaceId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let id = String::deserialize(deserializer)?;
+        id.bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| id.parse().ok())
+            .flatten()
+            .map(Self)
+            .ok_or_else(|| D::Error::custom("workspace ID must be a decimal number"))
+    }
+}
+
+impl Extension for RoleWorkspace {
+    const KEY: &'static str = "fleet.workspace";
 }
 
 impl fmt::Display for WorkspacesErrorKind {

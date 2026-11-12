@@ -69,23 +69,22 @@ tools:
     name: tools:write
   edit:
     name: tools:edit
-extensions:
-  fleet:
-    workspace:
-      name: host:default
-      config:
-        cwd: /home/user/project
+workspace:
+  name: host:default
+  config:
+    cwd: /home/user/project
 ```
 
 The agent ID identifies its workspace environment by default. An optional `id`
-of 32 hexadecimal digits selects an existing environment, allowing agents to
-share it. Reuse both its name and config. Role parameters can target fields under
-`extensions.fleet.workspace.config`.
+as a decimal string selects an existing environment, allowing agents to share
+it. Reuse both its name and config. Role parameters can target fields under the
+workspace with `type: workspace`.
 
-Workspace selection and config come only from the role's
-`extensions.fleet.workspace`. Provider config and per-tool config accept `shell`, `timeout_ms`,
-`output_limit` and `read_limit`. Non-null tool settings override provider settings.
-An absent or null role workspace leaves the tools without a workspace.
+Workspace selection and config come only from the `fleet.workspace` entry in
+the role's extensions, which Fleet role files spell `workspace`. Provider config
+and per-tool config accept `shell`, `timeout_ms`, `output_limit` and
+`read_limit`. Non-null tool settings override provider settings. An absent or
+null role workspace leaves the tools without a workspace.
 
 Defaults are `bash`, 3600000 milliseconds, 65536 bytes per output stream and a
 65536-byte read limit. Bash input may select a shorter timeout and a

@@ -71,13 +71,13 @@ mod tests {
             "other": {
                 "enabled": true,
             },
-            "fleet": {
-                "color": "blue",
-            },
+            "fleet": "foreign data",
         }))
         .unwrap();
         let mut expected = agent.clone();
-        expected.extensions["fleet"]["title"] = "Title".into();
+        expected
+            .extensions
+            .insert("fleet.title".into(), "Title".into());
 
         futures_executor::block_on(async {
             store.create_agent("create", &agent, None).await.unwrap();
@@ -483,29 +483,6 @@ mod tests {
                 fleet_kit::agent_title(&metadata.agent.extensions),
                 Some(title)
             );
-        });
-    }
-
-    #[test]
-    fn set_title_rejects_malformed_extensions() {
-        let store = Store::memory().unwrap();
-        let mut agent = agent();
-        agent
-            .extensions
-            .insert("fleet".into(), json!("foreign data"));
-
-        futures_executor::block_on(async {
-            store.create_agent("create", &agent, None).await.unwrap();
-            let before = Queries::agent(&store, agent.id, None).await.unwrap();
-
-            let error = store
-                .set_title("rename", agent.id, 1.into(), Some("Title"))
-                .await
-                .unwrap_err();
-            assert_matches!(error, StoreError::Conflict(_));
-
-            let after = Queries::agent(&store, agent.id, None).await.unwrap();
-            assert_eq!(after, before);
         });
     }
 }

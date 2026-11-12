@@ -7,6 +7,7 @@ extern crate alloc;
 mod agents;
 mod authentication;
 mod blobs;
+mod extensions;
 mod ports;
 mod types;
 mod workspaces;
@@ -21,6 +22,7 @@ pub use self::{
         OAuthRegistration,
     },
     blobs::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions, NoBlobs},
+    extensions::Extension,
     ports::{Queries, QueriesErrorKind},
     types::{
         AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
@@ -28,7 +30,7 @@ pub use self::{
         ToolCallRecord, TurnEndEvent, TurnStatus,
     },
     workspaces::{
-        Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceName,
-        WorkspaceOutput, WorkspaceWrite, Workspaces, WorkspacesErrorKind,
+        RoleWorkspace, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId,
+        WorkspaceName, WorkspaceOutput, WorkspaceWrite, Workspaces, WorkspacesErrorKind,
     },
 };
