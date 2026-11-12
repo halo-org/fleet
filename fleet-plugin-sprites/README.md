@@ -41,16 +41,22 @@ The workspace config accepts these optional fields:
   lowercase letters, digits and hyphens.
 - `setup` is a script run with `bash -lc` when a workspace opens and it differs
   from the last script that succeeded on the sprite.
-- `repo` is a git URL. Each workspace ID gets a worktree in
-  `/home/sprite/worktrees/<id>` on a new branch `fleet/<id>` from the latest
-  default branch, without an upstream. An existing branch of that name is
-  reused. The bare clone lives in `/home/sprite/repos/` under the URL with `%`
-  and `/` percent-encoded, and is fetched before each new worktree.
+- `repos` is a git URL or a list of them. With one URL, each workspace ID gets
+  a worktree in `/home/sprite/worktrees/<id>`. With a list, that directory
+  holds a worktree of each repository, named after the last segment of its URL
+  without `.git`. Names must be distinct. Each worktree is on a new branch
+  `fleet/<id>` from the latest default branch, without an upstream. An existing
+  branch of that name is reused. Bare clones live in `/home/sprite/repos/`
+  under the URL with `%` and `/` percent-encoded, and are fetched before each
+  new worktree.
 
 ```json
 {
   "sprite": "dev",
-  "repo": "https://github.com/halo-org/fleet.git"
+  "repos": [
+    "https://github.com/halo-org/fleet.git",
+    "https://github.com/halo-org/fleet-web.git"
+  ]
 }
 ```
 
@@ -62,8 +68,8 @@ be safe to rerun, because it runs again after a failure or a change. Repository
 provisioning holds another lock and resumes after a failed or cancelled open.
 Git credentials are not managed. Configure them on the sprite.
 
-Relative file paths and command working directories start in the worktree with
-`repo`, and in `/home/sprite` otherwise.
+Relative file paths and command working directories start in
+`/home/sprite/worktrees/<id>` with `repos`, and in `/home/sprite` otherwise.
 File writes go to a temporary sibling that is then renamed over the destination.
 A failed rename may leave the temporary file behind.
 
@@ -78,8 +84,9 @@ group. Exits caused by signals are reported as codes above 128.
   removed by hand.
 - Changing `sprite` for an existing ID opens a new environment, because the
   previous sprite is not consulted.
-- Changing `repo` for an existing ID keeps its worktree, which still uses the
-  previous clone. Removing `setup` or `repo` does not undo them.
+- Changing `repos` for an existing ID keeps existing worktrees, which still use
+  their previous clones. Switching between one URL and a list nests worktrees
+  inconsistently. Removing `setup` or `repos` does not undo them.
 - A changed setup runs while other workspaces may be using the sprite. Workspaces
   sharing a sprite with different setups run them in turn as they open.
 - Retried commands return `unsafe-to-retry` because Sprites exec is not idempotent.

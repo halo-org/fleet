@@ -75,10 +75,13 @@ impl Guest for Sprites {
                                 "title": "Setup script",
                                 "description": "Runs with bash when a sprite is first opened.",
                             },
-                            "repo": {
-                                "type": "string",
-                                "title": "Repository",
-                                "description": "Git URL to clone. Each workspace gets a worktree on its own branch.",
+                            "repos": {
+                                "title": "Repositories",
+                                "description": "Git URLs to clone. Each workspace gets a worktree of each on its own branch. A list puts each worktree in a subdirectory named after its repository.",
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                ],
                             },
                         },
                         "additionalProperties": false,
@@ -115,14 +118,14 @@ impl Guest for Sprites {
             let args = vec!["-c".into(), SETUP.into(), "bash".into(), setup.clone()];
             provision(&sprite, "setup", args).await?;
         }
-        if let Some(repo) = &config.repo {
+        for (url, tree) in config.worktrees(&context.id) {
             let args = vec![
                 "-c".into(),
                 REPO.into(),
                 "bash".into(),
-                repo.clone(),
-                crate::config::repository(repo),
-                config.directory(&context.id),
+                url.to_owned(),
+                crate::config::repository(url),
+                tree,
                 format!("fleet/{id}"),
             ];
             provision(&sprite, "repo", args).await?;
