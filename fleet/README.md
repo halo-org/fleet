@@ -211,7 +211,7 @@ They do not add validation to core.
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside
 text. Blob IDs, like agent IDs, are decimal strings. Image bytes are immutable and stored in
 separate raw tables in `fleet.db`; events contain references, not base64 payloads. The database
-is upgraded to format 5 when opened. Older Fleet binaries cannot reopen it.
+uses format 5. Older Fleet binaries cannot open it.
 
 Image uploads accept PNG, JPEG, GIF, and WebP, up to 10 MiB per image. The server validates the
 actual format and decodes with resource limits (8,192 pixels per edge and 32 million pixels).

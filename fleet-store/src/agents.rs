@@ -547,12 +547,8 @@ mod tests {
         Agent, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
         RuntimeStore,
     };
-    #[cfg(feature = "queries")]
-    use fleet_kit::{AgentMetadata, Queries, QueryUpdate};
     #[cfg(not(feature = "queries"))]
     use redb::ReadableDatabase as _;
-    #[cfg(feature = "queries")]
-    use serde_json::{Value, json};
 
     fn agent() -> Agent {
         Agent {
@@ -633,93 +629,6 @@ mod tests {
             assert_eq!(value.title.as_deref(), Some("Title"));
             assert_eq!(value.metadata_version, 2);
             assert_eq!(value.inbox, BUSY);
-        });
-
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[cfg(feature = "queries")]
-    #[test]
-    fn open_migrates_metadata_and_titles() {
-        let path = std::env::temp_dir().join(format!(
-            "fleet-metadata-upgrade-{}.redb",
-            std::process::id()
-        ));
-        let mut agent = agent();
-        agent.extensions.insert(
-            "fleet".into(),
-            json!({
-                "title": "Legacy title",
-            }),
-        );
-        let message = Message {
-            id: 1.into(),
-            mode: MessageMode::Steer,
-            content: vec![ContentBlock::Text("Hello".into())],
-        };
-
-        futures_executor::block_on(async {
-            {
-                let store = Store::open(&path).unwrap();
-                store.create_agent("create", &agent, None).await.unwrap();
-                store
-                    .send_message("send", agent.id, &message)
-                    .await
-                    .unwrap();
-                store
-                    .worker()
-                    .call(|worker| {
-                        let transaction = worker.database.begin_write()?;
-                        {
-                            let mut records = Records(transaction.open_table(records::RECORDS)?);
-                            let key = records::key(records::AGENT, 1, &[]);
-                            let mut agent = records.get::<Value>(&key)?.unwrap();
-                            agent.as_object_mut().unwrap().remove("metadata_revision");
-                            records.put(&key, &agent)?;
-
-                            let key = records::key(SUMMARY, 1, &[]);
-                            let mut summary = records.get::<Value>(&key)?.unwrap();
-                            let value = summary["value"].as_object_mut().unwrap();
-                            value.remove("title");
-                            value.remove("metadata_version");
-                            records.put(&key, &summary)?;
-                            records.put(&[], &2_u32)?;
-                        }
-                        transaction.commit()?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap();
-            }
-
-            let store = Store::open(&path).unwrap();
-            let response = Queries::agent(&store, agent.id, None).await.unwrap();
-            agent.extensions =
-                JsonObject::from_iter([("fleet.title".into(), "Legacy title".into())]);
-            assert_eq!(response.revision, 2.into());
-            assert_eq!(
-                response.value,
-                QueryUpdate::Changed(AgentMetadata {
-                    agent: agent.clone(),
-                    version: 1.into(),
-                }),
-            );
-
-            let page = store.agents(AgentsQuery::default()).await.unwrap();
-            assert_eq!(page.agents.len(), 1);
-            assert_eq!(page.agents[0].title.as_deref(), Some("Legacy title"));
-            assert_eq!(page.agents[0].metadata_version, 1.into());
-
-            store
-                .set_title("rename", agent.id, 1.into(), Some("New title"))
-                .await
-                .unwrap();
-            let update = store.updates(agent.id, 2.into()).await.unwrap();
-            assert_eq!(update.revision, 3.into());
-            assert_matches!(
-                update.agent,
-                QueryUpdate::Changed(metadata) if metadata.version == 3.into(),
-            );
         });
 
         std::fs::remove_file(path).unwrap();

@@ -34,13 +34,11 @@ struct WakeStream {
 impl Store {
     /// Opens a store, creating it if needed.
     ///
-    /// Format 2, 3 and 4 databases are upgraded transactionally to format 5 for metadata
-    /// revisions, image content and top-level `fleet.title` keys. Older binaries cannot
-    /// reopen an upgraded database.
-    ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be opened or the worker cannot be started.
+    /// Returns [`UnsupportedFormat`](StoreError::UnsupportedFormat) for databases in another
+    /// format. Returns other errors if the database cannot be opened or the worker cannot be
+    /// started.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Self::new(redb::Database::create(path)?)
     }
@@ -63,24 +61,6 @@ impl Store {
             match records.get::<u32>(&[])? {
                 Some(5) => {}
                 None => records.put(&[], &5_u32)?,
-                Some(format @ 2..=4) => {
-                    crate::title_migration::migrate(&mut records)?;
-                    if format == 2 {
-                        // Legacy metadata last changed at creation. Refresh the projection
-                        // in case an agent already carried an application title.
-                        let agents = records
-                            .prefix::<AgentRecord>(&[records::AGENT])?
-                            .collect::<Result<Vec<_>, _>>()?;
-                        for agent in agents {
-                            crate::agents::sync_agent(
-                                &mut records,
-                                &agent,
-                                crate::agents::now_millis(),
-                            )?;
-                        }
-                    }
-                    records.put(&[], &5_u32)?;
-                }
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
             crate::agents::expire(&mut records, crate::agents::now_millis())?;
