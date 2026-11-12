@@ -9,7 +9,7 @@ use fleet_core::{
 };
 use fleet_kit::{
     AgentCollection as _, AgentSummary, AgentsQuery, CollectionRevision, EventDirection,
-    InboxAction, InboxFilter, InboxState, Queries,
+    InboxAction, InboxFilter, InboxState, Queries, QueryUpdate,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::future;
@@ -391,6 +391,87 @@ fn snoozes_are_idle_only_version_checked_and_cancelled_by_activity() {
         assert_eq!(expired.agents[0].inbox, InboxState::Pending);
         assert_eq!(expired.agents[0].since, deadline);
         assert_eq!(store.next_snooze().await.unwrap(), None);
+    });
+}
+
+#[test]
+fn pins_survive_activity_and_snoozes_but_not_settling() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        store
+            .create_agent("create", &agent(1), Some(&message(1)))
+            .await
+            .unwrap();
+        let busy = summary(&store, 1).await;
+        assert_eq!(busy.inbox, InboxState::Busy);
+        assert_eq!(busy.pinned, None);
+
+        store
+            .set_pinned("pin", 1.into(), busy.metadata_version, true)
+            .await
+            .unwrap();
+        let pinned = summary(&store, 1).await;
+        assert!(pinned.pinned.is_some());
+        assert!(pinned.metadata_version > busy.metadata_version);
+        store
+            .set_pinned("pin", 1.into(), busy.metadata_version, true)
+            .await
+            .unwrap();
+        store
+            .set_pinned("pin-again", 1.into(), pinned.metadata_version, true)
+            .await
+            .unwrap();
+        assert_eq!(summary(&store, 1).await, pinned);
+
+        store.consume_messages(1.into(), None, true).await.unwrap();
+        store
+            .append_model_response(1.into(), 0.into(), true, &response())
+            .await
+            .unwrap();
+        let idle = summary(&store, 1).await;
+        assert_eq!(idle.inbox, InboxState::Pending);
+        assert_eq!(idle.pinned, pinned.pinned);
+
+        let deadline = now() + 60_000;
+        store
+            .set_inbox(
+                "snooze",
+                1.into(),
+                idle.version,
+                InboxAction::Snooze(deadline),
+            )
+            .await
+            .unwrap();
+        store.expire_snoozes(deadline).await.unwrap();
+        let woken = summary(&store, 1).await;
+        assert_eq!(woken.inbox, InboxState::Pending);
+        assert_eq!(woken.pinned, pinned.pinned);
+        assert_eq!(woken.metadata_version, pinned.metadata_version);
+
+        store
+            .set_inbox("settle", 1.into(), woken.version, InboxAction::Settle)
+            .await
+            .unwrap();
+        let settled = summary(&store, 1).await;
+        let metadata = Queries::agent(&store, 1.into(), None).await.unwrap().value;
+        assert_eq!(settled.inbox, InboxState::Settled);
+        assert_eq!(settled.pinned, None);
+        assert!(settled.metadata_version > woken.metadata_version);
+        assert_matches!(
+            metadata,
+            QueryUpdate::Changed(metadata) if metadata.agent.extensions.is_empty()
+        );
+
+        let error = store
+            .set_pinned("pin-settled", 1.into(), settled.metadata_version, true)
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::Conflict(_));
+        store
+            .set_pinned("unpin", 1.into(), settled.metadata_version, false)
+            .await
+            .unwrap();
+        assert_eq!(summary(&store, 1).await, settled);
     });
 }
 

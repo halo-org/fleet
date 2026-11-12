@@ -103,49 +103,15 @@ impl Store {
                             Err(StoreError::IdempotencyConflict)
                         };
                     }
-                    if let Request::SetTitle {
-                        id,
-                        expected,
-                        title,
-                    } = &request
-                    {
-                        let (changed, summary_changed) = crate::metadata::set_title(
-                            &mut records,
-                            *id,
-                            *expected,
-                            title.as_deref(),
-                        )?;
+                    let edit = apply_collection_request(&mut records, &request)?;
+                    if let Some((id, changed, summary_changed)) = edit {
                         records.put(&request_key, &request)?;
                         drop(records);
                         transaction.commit()?;
                         if changed {
-                            worker.notifications.notify(Topic::Agent(*id));
+                            worker.notifications.notify(Topic::Agent(id));
                         }
                         if summary_changed {
-                            worker.notifications.notify(Topic::Agents);
-                            worker.notifications.notify(Topic::Snoozes);
-                        }
-                        return Ok(());
-                    }
-                    if let Request::SetInbox {
-                        id,
-                        expected,
-                        inbox,
-                        until,
-                    } = &request
-                    {
-                        let changed = crate::agents::set_inbox(
-                            &mut records,
-                            *id,
-                            *expected,
-                            *inbox,
-                            *until,
-                            crate::agents::now_millis(),
-                        )?;
-                        records.put(&request_key, &request)?;
-                        drop(records);
-                        transaction.commit()?;
-                        if changed {
                             worker.notifications.notify(Topic::Agents);
                             worker.notifications.notify(Topic::Snoozes);
                         }
@@ -182,6 +148,56 @@ impl Store {
     }
 }
 
+fn apply_collection_request(
+    records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
+    request: &Request,
+) -> Result<Option<(u128, bool, bool)>, StoreError> {
+    let (id, (changed, summary_changed)) = match request {
+        Request::SetTitle {
+            id,
+            expected,
+            title,
+        } => (
+            *id,
+            crate::metadata::set_title(records, *id, *expected, title.as_deref())?,
+        ),
+        Request::SetPinned {
+            id,
+            expected,
+            pinned,
+        } => (
+            *id,
+            crate::metadata::set_pinned(
+                records,
+                *id,
+                *expected,
+                *pinned,
+                crate::agents::now_millis(),
+            )?,
+        ),
+        Request::SetInbox {
+            id,
+            expected,
+            inbox,
+            until,
+        } => (
+            *id,
+            crate::agents::set_inbox(
+                records,
+                *id,
+                *expected,
+                *inbox,
+                *until,
+                crate::agents::now_millis(),
+            )?,
+        ),
+        Request::CreateAgent(..) | Request::SendMessage(..) | Request::InterruptAgent(..) => {
+            return Ok(None);
+        }
+    };
+    Ok(Some((id, changed, summary_changed)))
+}
+
 fn apply_agent_request(
     records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
     request: &Request,
@@ -214,7 +230,9 @@ fn apply_agent_request(
         Request::InterruptAgent(id, message) => {
             (records.agent(*id)?, message.as_ref(), true, false)
         }
-        Request::SetInbox { .. } | Request::SetTitle { .. } => unreachable!(),
+        Request::SetTitle { .. } | Request::SetPinned { .. } | Request::SetInbox { .. } => {
+            unreachable!()
+        }
     };
     let id = agent.agent.id;
     if !create {

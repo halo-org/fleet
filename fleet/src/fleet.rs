@@ -268,6 +268,24 @@ impl Fleet {
         .await
     }
 
+    /// Pins or unpins an agent if its metadata has not changed.
+    pub async fn set_pinned(
+        &self,
+        key: String,
+        agent: AgentId,
+        expected: Revision,
+        pinned: bool,
+    ) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| {
+            fleet
+                .state
+                .store
+                .set_pinned(&key, agent, expected, pinned)
+                .await
+        })
+        .await
+    }
+
     /// Applies a version-checked, idempotent inbox action.
     pub async fn set_inbox(
         &self,
@@ -821,6 +839,94 @@ mod tests {
     }
 
     #[test]
+    fn set_pinned_updates_reads_and_settling_unpins() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pin = |key: &str, expected: &str, body: &'static [u8]| {
+            Request::builder()
+                .method("PUT")
+                .uri("/agents/1/pinned")
+                .header("content-type", "application/json")
+                .header("idempotency-key", key)
+                .header("if-match", format!("\"{expected}\""))
+                .body(Full::new(Bytes::from_static(body)))
+                .unwrap()
+        };
+
+        runtime.block_on(async {
+            let fleet = idle_fleet().await;
+            let response =
+                crate::api::handle(fleet.clone(), pin("pin", "1", br#"{"pinned":true}"#))
+                    .await
+                    .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            let response = crate::api::handle(fleet.clone(), request("/agents/1"))
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let agent: Value = serde_json::from_slice(&bytes).unwrap();
+            let pinned = agent;
+            assert!(pinned["pinned"].is_u64());
+            let response = crate::api::handle(fleet.clone(), request("/agents"))
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let page: Value = serde_json::from_slice(&bytes).unwrap();
+            let summary = &page["agents"][0];
+            assert_eq!(summary["pinned"], pinned["pinned"]);
+
+            let settle = Request::builder()
+                .method("PUT")
+                .uri("/agents/1/inbox")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "settle")
+                .header(
+                    "if-match",
+                    format!("\"{}\"", summary["version"].as_str().unwrap()),
+                )
+                .body(Full::new(Bytes::from_static(br#"{"state":"settled"}"#)))
+                .unwrap();
+            let response = crate::api::handle(fleet.clone(), settle).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+            let response = crate::api::handle(fleet.clone(), request("/agents/1"))
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let agent: Value = serde_json::from_slice(&bytes).unwrap();
+            let version = agent["metadata_version"].as_str().unwrap();
+            assert_eq!(agent["pinned"], Value::Null);
+            assert_ne!(agent["metadata_version"], pinned["metadata_version"]);
+
+            let cases = [
+                (
+                    "pin-settled",
+                    br#"{"pinned":true}"#.as_slice(),
+                    StatusCode::CONFLICT,
+                ),
+                (
+                    "invalid",
+                    br#"{"pinned":null}"#.as_slice(),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    "unpin",
+                    br#"{"pinned":false}"#.as_slice(),
+                    StatusCode::NO_CONTENT,
+                ),
+            ];
+            for (key, body, status) in cases {
+                let request = pin(key, version, body);
+                let response = crate::api::handle(fleet.clone(), request).await.unwrap();
+                assert_eq!(response.status(), status, "{key}");
+            }
+        });
+    }
+
+    #[test]
     fn create_agent_accepts_title() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -858,6 +964,7 @@ mod tests {
                     "role": "assistant",
                     "parameters": {},
                     "title": "Initial title",
+                    "pinned": null,
                     "metadata_version": "1",
                 })
             );
