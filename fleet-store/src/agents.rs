@@ -28,7 +28,6 @@ const SNOOZE: u8 = 17;
 const PENDING: u8 = 0;
 const BUSY: u8 = 1;
 const SNOOZED: u8 = 2;
-#[cfg(feature = "queries")]
 const SETTLED: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +35,8 @@ struct Summary {
     role: String,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    pinned: Option<u64>,
     #[serde(default = "records::initial_metadata_revision")]
     metadata_version: u128,
     inbox: u8,
@@ -62,6 +63,7 @@ impl SummaryRecord {
             id: self.id.into(),
             role: value.role.into(),
             title: value.title,
+            pinned: value.pinned,
             metadata_version: value.metadata_version.into(),
             version: CollectionRevision(self.version),
             inbox,
@@ -216,6 +218,7 @@ pub fn sync_agent(
         .unwrap_or_else(|| Summary {
             role: agent.agent.role.name.clone(),
             title: None,
+            pinned: None,
             metadata_version: agent.metadata_revision,
             inbox: PENDING,
             since: now,
@@ -237,6 +240,7 @@ pub fn sync_agent(
     }
     value.role.clone_from(&agent.agent.role.name);
     value.title = crate::metadata::agent_title(&agent.agent.extensions).map(str::to_owned);
+    value.pinned = crate::metadata::agent_pinned(&agent.agent.extensions);
     value.metadata_version = agent.metadata_revision;
     value.interrupt_pending = agent.interrupt_intent;
     write_summary(records, id, old.as_ref(), value)
@@ -249,8 +253,8 @@ pub fn set_inbox(
     inbox: u8,
     until: Option<u64>,
     now: u64,
-) -> Result<bool, StoreError> {
-    let agent = records.agent(id)?;
+) -> Result<(bool, bool), StoreError> {
+    let mut agent = records.agent(id)?;
     let old = records
         .get::<SummaryRecord>(&records::key(SUMMARY, id, &[]))?
         .ok_or(StoreError::UnsupportedFormat)?;
@@ -268,12 +272,25 @@ pub fn set_inbox(
         ));
     }
     let mut value = old.value.clone().ok_or(StoreError::AgentNotFound)?;
+    let changed = inbox == SETTLED && crate::metadata::unpin(records, &mut agent)?;
+    value.pinned = crate::metadata::agent_pinned(&agent.agent.extensions);
+    value.metadata_version = agent.metadata_revision;
     if value.inbox != inbox || value.until != until {
         value.inbox = inbox;
         value.until = until;
         value.since = now;
     }
-    write_summary(records, id, Some(&old), value)
+    Ok((changed, write_summary(records, id, Some(&old), value)?))
+}
+
+pub fn settled<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    records: &Records<T>,
+    id: u128,
+) -> Result<bool, StoreError> {
+    Ok(records
+        .get::<SummaryRecord>(&records::key(SUMMARY, id, &[]))?
+        .and_then(|row| row.value)
+        .is_some_and(|value| value.inbox == SETTLED))
 }
 
 pub fn expire(
@@ -443,6 +460,24 @@ impl AgentCollection for Store {
                 id: agent.into(),
                 expected: expected.into(),
                 title: title.map(str::to_owned),
+            },
+        )
+        .await
+    }
+
+    async fn set_pinned(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
+        expected: Revision,
+        pinned: bool,
+    ) -> Result<(), StoreError> {
+        self.request(
+            idempotency_key.into(),
+            Request::SetPinned {
+                id: agent.into(),
+                expected: expected.into(),
+                pinned,
             },
         )
         .await

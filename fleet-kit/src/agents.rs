@@ -18,6 +18,12 @@ pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
     extensions.get("fleet.title")?.as_str()
 }
 
+/// Returns when the agent was pinned, in Unix milliseconds.
+#[must_use]
+pub fn agent_pinned(extensions: &JsonObject) -> Option<u64> {
+    extensions.get("fleet.pinned")?.as_u64()
+}
+
 /// A durable collection revision. Comparable only within the same store.
 ///
 /// This is independent of an individual agent's revision. Providers must order
@@ -79,6 +85,8 @@ pub struct AgentSummary {
     pub role: RoleName,
     /// The optional display title.
     pub title: Option<String>,
+    /// When the agent was pinned, in Unix milliseconds.
+    pub pinned: Option<u64>,
     /// Last metadata change, in this agent's revision sequence.
     pub metadata_version: Revision,
     /// Last collection change to this summary.
@@ -197,7 +205,22 @@ pub trait AgentCollection {
         title: Option<&str>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Pins or unpins the agent if its metadata is still at `expected`.
+    ///
+    /// `expected` is [`AgentSummary::metadata_version`], not its collection version.
+    /// Pinning records the current time and keeps an existing pin. Settled agents
+    /// cannot be pinned. Activity does not prevent changes.
+    fn set_pinned(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
+        expected: Revision,
+        pinned: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Applies an idempotent action if the agent is idle at `expected`.
+    ///
+    /// Settling also unpins the agent.
     fn set_inbox(
         &self,
         idempotency_key: &str,

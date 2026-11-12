@@ -1,4 +1,6 @@
-use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetTitleRequest};
+use crate::api_types::{
+    AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetPinnedRequest, SetTitleRequest,
+};
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRoleEntry,
     ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails, ErrorResponse, EventsQuery,
@@ -82,10 +84,15 @@ where
         (&Method::PUT, ["", "agents", agent_id, "title"]) => {
             set_title(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
+        (&Method::PUT, ["", "agents", agent_id, "pinned"]) => {
+            set_pinned(fleet, parse_id(agent_id)?, &parts.headers, body).await
+        }
         (&Method::PUT, ["", "agents", agent_id, "inbox"]) => {
             set_inbox(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
-        (_, ["", "agents", _, "title" | "inbox"]) => Err(ApiError::MethodNotAllowed("PUT")),
+        (_, ["", "agents", _, "title" | "pinned" | "inbox"]) => {
+            Err(ApiError::MethodNotAllowed("PUT"))
+        }
         (&Method::POST, ["", "agents", agent_id, "messages"]) => {
             send_message(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
@@ -250,6 +257,26 @@ where
     let request: SetTitleRequest = read_json(headers, body).await?;
     fleet
         .set_title(key, agent_id, expected, request.title)
+        .await
+        .map_err(ApiError::Fleet)?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+async fn set_pinned<B>(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    let key = idempotency_key(headers)?;
+    let expected = expected_version(headers, "metadata")?.into();
+    let request: SetPinnedRequest = read_json(headers, body).await?;
+    fleet
+        .set_pinned(key, agent_id, expected, request.pinned)
         .await
         .map_err(ApiError::Fleet)?;
     Ok(empty_response(StatusCode::NO_CONTENT))

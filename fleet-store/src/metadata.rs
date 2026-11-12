@@ -13,6 +13,10 @@ pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
     extensions.get("fleet.title")?.as_str()
 }
 
+pub fn agent_pinned(extensions: &JsonObject) -> Option<u64> {
+    extensions.get("fleet.pinned")?.as_u64()
+}
+
 pub fn set_title(
     records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
     id: u128,
@@ -42,6 +46,45 @@ pub fn set_title(
     Ok((changed, summary_changed))
 }
 
+pub fn set_pinned(
+    records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
+    id: u128,
+    expected: u128,
+    pinned: bool,
+    now: u64,
+) -> Result<(bool, bool), StoreError> {
+    let mut agent: AgentRecord = records.agent(id)?;
+    if agent.metadata_revision != expected {
+        return Err(StoreError::PreconditionFailed);
+    }
+    if agent_pinned(&agent.agent.extensions).is_some() == pinned {
+        return Ok((false, false));
+    }
+    if pinned && agents::settled(records, id)? {
+        return Err(StoreError::Conflict("settled agents cannot be pinned"));
+    }
+    let mut metadata = agent.agent.clone();
+    if pinned {
+        metadata
+            .extensions
+            .insert("fleet.pinned".into(), now.into());
+    } else {
+        metadata.extensions.remove("fleet.pinned");
+    }
+    let changed = records.update_metadata(&mut agent, metadata)?;
+    let summary_changed = agents::sync_agent(records, &agent, now)?;
+    Ok((changed, summary_changed))
+}
+
+pub fn unpin(
+    records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
+    agent: &mut AgentRecord,
+) -> Result<bool, StoreError> {
+    let mut metadata = agent.agent.clone();
+    metadata.extensions.remove("fleet.pinned");
+    records.update_metadata(agent, metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +109,26 @@ mod tests {
 
             #[cfg(feature = "queries")]
             assert_eq!(title, fleet_kit::agent_title(&extensions));
+        }
+    }
+
+    #[test]
+    fn agent_pinned_reads_millisecond_times() {
+        let cases = [
+            (json!(null), None),
+            (json!(true), None),
+            (json!(-1), None),
+            (json!(1000), Some(1000)),
+        ];
+
+        for (value, expected) in cases {
+            let extensions = JsonObject::from_iter([("fleet.pinned".into(), value)]);
+
+            let pinned = agent_pinned(&extensions);
+            assert_eq!(pinned, expected);
+
+            #[cfg(feature = "queries")]
+            assert_eq!(pinned, fleet_kit::agent_pinned(&extensions));
         }
     }
 

@@ -15,7 +15,7 @@ mod workspaces;
 pub use self::{
     agents::{
         AgentCollection, AgentPosition, AgentSummary, AgentsPage, AgentsQuery, AgentsUpdates,
-        CollectionRevision, InboxAction, InboxFilter, InboxState, agent_title,
+        CollectionRevision, InboxAction, InboxFilter, InboxState, agent_pinned, agent_title,
     },
     authentication::{
         AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthConfig,

@@ -105,6 +105,14 @@ pub struct SetTitleRequest {
     pub title: Option<String>,
 }
 
+/// A request to pin or unpin an agent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPinnedRequest {
+    /// Whether the agent should be pinned.
+    pub pinned: bool,
+}
+
 /// A request to interrupt an agent.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +303,7 @@ pub struct ApiAgentSummary {
     id: u128,
     role: String,
     title: Option<String>,
+    pinned: Option<u64>,
     #[serde(serialize_with = "serialize_id")]
     metadata_version: u128,
     #[serde(serialize_with = "serialize_id")]
@@ -313,6 +322,7 @@ impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
             id: value.id.into(),
             role: value.role.to_string(),
             title: value.title,
+            pinned: value.pinned,
             metadata_version: value.metadata_version.into(),
             version: value.version.0,
             inbox: inbox_name(value.inbox),
@@ -390,7 +400,9 @@ pub struct ApiAgent {
     pub parameters: JsonObject,
     /// The optional display title.
     pub title: Option<String>,
-    /// The last metadata change, used by title edits' If-Match precondition.
+    /// When the agent was pinned, in Unix milliseconds.
+    pub pinned: Option<u64>,
+    /// The last metadata change, used by title and pin edits' If-Match precondition.
     #[serde(serialize_with = "serialize_id")]
     pub metadata_version: u128,
 }
@@ -1308,11 +1320,13 @@ impl From<AgentMetadata> for ApiAgent {
     fn from(metadata: AgentMetadata) -> Self {
         let agent = metadata.agent;
         let title = fleet_kit::agent_title(&agent.extensions).map(str::to_owned);
+        let pinned = fleet_kit::agent_pinned(&agent.extensions);
         Self {
             id: agent.id.into(),
             role: agent.role.name.into(),
             parameters: agent.role.config,
             title,
+            pinned,
             metadata_version: metadata.version.into(),
         }
     }

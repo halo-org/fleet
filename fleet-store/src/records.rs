@@ -80,6 +80,11 @@ pub enum Request {
         expected: u128,
         title: Option<String>,
     },
+    SetPinned {
+        id: u128,
+        expected: u128,
+        pinned: bool,
+    },
     SetInbox {
         id: u128,
         expected: u128,
