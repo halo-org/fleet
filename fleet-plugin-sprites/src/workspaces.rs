@@ -128,7 +128,7 @@ impl Guest for Sprites {
                 tree,
                 format!("fleet/{id}"),
             ];
-            provision(&sprite, "repo", args).await?;
+            provision(&sprite, &format!("repo {url}"), args).await?;
         }
         let bytes = serde_json::to_vec(&config).expect("config serializes");
         replace(&sprite, &marker, bytes, true).await
