@@ -141,9 +141,7 @@ fn metadata(name: &str, title: &str, description: &str, schema: &serde_json::Val
         input_schema: schema.to_string(),
         output_schema: None,
         extensions: serde_json::json!({
-            "fleet": {
-                "title": title,
-            },
+            "fleet.title": title,
         })
         .to_string(),
     }

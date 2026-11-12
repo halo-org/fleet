@@ -59,33 +59,31 @@ impl Guest for Sprites {
         Ok(Some(Workspace {
             name,
             extensions: serde_json::json!({
-                "fleet": {
-                    "title": "Sprites",
-                    "description": "Run commands and access files in a Sprites VM.",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "sprite": {
-                                "type": "string",
-                                "title": "Sprite",
-                                "description": "Shares a named sprite instead of creating one per workspace.",
-                            },
-                            "setup": {
-                                "type": "string",
-                                "title": "Setup script",
-                                "description": "Runs with bash when a sprite is first opened.",
-                            },
-                            "repos": {
-                                "title": "Repositories",
-                                "description": "Git URLs to clone. Each workspace gets a worktree of each on its own branch. A list puts each worktree in a subdirectory named after its repository.",
-                                "oneOf": [
-                                    {"type": "string"},
-                                    {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                                ],
-                            },
+                "fleet.title": "Sprites",
+                "fleet.description": "Run commands and access files in a Sprites VM.",
+                "fleet.schema": {
+                    "type": "object",
+                    "properties": {
+                        "sprite": {
+                            "type": "string",
+                            "title": "Sprite",
+                            "description": "Shares a named sprite instead of creating one per workspace.",
                         },
-                        "additionalProperties": false,
+                        "setup": {
+                            "type": "string",
+                            "title": "Setup script",
+                            "description": "Runs with bash when a sprite is first opened.",
+                        },
+                        "repos": {
+                            "title": "Repositories",
+                            "description": "Git URLs to clone. Each workspace gets a worktree of each on its own branch. A list puts each worktree in a subdirectory named after its repository.",
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                            ],
+                        },
                     },
+                    "additionalProperties": false,
                 },
             })
             .to_string(),

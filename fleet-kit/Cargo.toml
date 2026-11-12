@@ -13,3 +13,5 @@ workspace = true
 [dependencies]
 fleet-core.workspace = true
 futures-util.workspace = true
+serde = { workspace = true, features = ["alloc", "derive"] }
+serde_json = { workspace = true, features = ["alloc"] }

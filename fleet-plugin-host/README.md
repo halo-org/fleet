@@ -52,7 +52,7 @@ Clocks and randomness are supplied by the host. HTTP and credentials are not nee
 
 This registers `host:default`. The workspace config must supply `cwd` as an
 absolute path covered by a workspace mount. Set it in the role's
-`extensions.fleet.workspace.config` when using the basic tools plugin.
+`workspace.config` when using the basic tools plugin.
 There is no provider-wide default directory. Opening a workspace binds its ID to
 that directory. Reopening is safe, but changing the directory for an existing ID
 is rejected. Different IDs may share a directory.

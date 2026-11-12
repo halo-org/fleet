@@ -10,7 +10,7 @@ use redb::Table;
 // Keep the persisted projection independent of the optional kit interfaces.
 // Core-only writers must maintain it when reopening a database used by kit.
 pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
-    extensions.get("fleet")?.get("title")?.as_str()
+    extensions.get("fleet.title")?.as_str()
 }
 
 pub fn set_title(
@@ -27,19 +27,14 @@ pub fn set_title(
         return Ok((false, false));
     }
     let mut metadata = agent.agent.clone();
-    let fleet = metadata
-        .extensions
-        .entry("fleet")
-        .or_insert_with(|| JsonObject::new().into());
-    let fleet = fleet
-        .as_object_mut()
-        .ok_or(StoreError::Conflict("fleet metadata must be an object"))?;
     match title {
         Some(title) => {
-            fleet.insert("title".into(), title.into());
+            metadata
+                .extensions
+                .insert("fleet.title".into(), title.into());
         }
         None => {
-            fleet.remove("title");
+            metadata.extensions.remove("fleet.title");
         }
     }
     let changed = records.update_metadata(&mut agent, metadata)?;
@@ -59,23 +54,12 @@ mod tests {
     fn agent_title_reads_string_titles() {
         let cases = [
             (json!(null), None),
-            (json!("other data"), None),
-            (
-                json!({
-                    "title": 1,
-                }),
-                None,
-            ),
-            (
-                json!({
-                    "title": "Title",
-                }),
-                Some("Title"),
-            ),
+            (json!(1), None),
+            (json!("Title"), Some("Title")),
         ];
 
         for (value, expected) in cases {
-            let extensions = JsonObject::from_iter([("fleet".into(), value)]);
+            let extensions = JsonObject::from_iter([("fleet.title".into(), value)]);
 
             let title = agent_title(&extensions);
             assert_eq!(title, expected);

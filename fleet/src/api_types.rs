@@ -1,3 +1,4 @@
+use crate::roles;
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
@@ -9,7 +10,10 @@ use fleet_kit::{
     AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
     MessageRecord, Preview, PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::value::MapDeserializer};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{DeserializeOwned, value::MapDeserializer},
+};
 use std::collections::BTreeMap;
 
 // === Configuration ===
@@ -55,22 +59,6 @@ pub struct ApiRoleParameter {
     /// The value configured by the role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct RoleMetadata {
-    title: Option<String>,
-    description: Option<String>,
-    hidden: bool,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct ParameterMetadata {
-    title: Option<String>,
-    description: Option<String>,
-    schema: Option<serde_json::Value>,
 }
 
 // === Requests ===
@@ -866,24 +854,13 @@ impl TryFrom<Role> for ApiRole {
     type Error = serde_json::Error;
 
     fn try_from(role: Role) -> Result<Self, Self::Error> {
-        let metadata = role
-            .extensions
-            .get("fleet")
-            .map(RoleMetadata::deserialize)
-            .transpose()?
-            .unwrap_or_default();
         let parameters = role
             .parameters
             .iter()
             .map(|(name, parameter)| {
-                let metadata = parameter
-                    .extensions
-                    .get("fleet")
-                    .map(ParameterMetadata::deserialize)
-                    .transpose()?
-                    .unwrap_or_default();
-                let default = if metadata
-                    .schema
+                let schema: Option<serde_json::Value> =
+                    extension(&parameter.extensions, roles::SCHEMA)?;
+                let default = if schema
                     .as_ref()
                     .is_some_and(|schema| schema.get("writeOnly") == Some(&true.into()))
                 {
@@ -894,9 +871,9 @@ impl TryFrom<Role> for ApiRole {
                 Ok((
                     name.to_string(),
                     ApiRoleParameter {
-                        title: metadata.title,
-                        description: metadata.description,
-                        schema: metadata.schema,
+                        title: extension(&parameter.extensions, roles::TITLE)?,
+                        description: extension(&parameter.extensions, roles::DESCRIPTION)?,
+                        schema,
                         default,
                     },
                 ))
@@ -905,12 +882,19 @@ impl TryFrom<Role> for ApiRole {
 
         Ok(Self {
             name: role.name.to_string(),
-            title: metadata.title,
-            description: metadata.description,
-            hidden: metadata.hidden,
+            title: extension(&role.extensions, roles::TITLE)?,
+            description: extension(&role.extensions, roles::DESCRIPTION)?,
+            hidden: extension(&role.extensions, roles::HIDDEN)?.unwrap_or_default(),
             parameters,
         })
     }
+}
+
+fn extension<T: DeserializeOwned>(
+    extensions: &JsonObject,
+    key: &str,
+) -> Result<Option<T>, serde_json::Error> {
+    extensions.get(key).map_or(Ok(None), Option::deserialize)
 }
 
 fn parameter_default(role: &Role, target: &RoleParameterTarget) -> Option<serde_json::Value> {
@@ -946,9 +930,7 @@ impl CreateAgentRequest {
             extensions: JsonObject::new(),
         };
         if let Some(title) = title {
-            agent
-                .extensions
-                .insert("fleet".into(), serde_json::json!({ "title": title }));
+            agent.extensions.insert(roles::TITLE.into(), title.into());
         }
 
         (agent, message.map(Into::into))

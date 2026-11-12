@@ -117,10 +117,11 @@ tools: {}
 You are a helpful assistant.
 ```
 
-The Markdown body is the system prompt. YAML frontmatter supports `model`,
-`tools`, `parameters`, `compaction` and `extensions`. Only `model` is required.
-Each model or tool selection has a `name` and an optional `config` object.
-Tools are keyed by their alias.
+The Markdown body is the system prompt. YAML frontmatter supports `title`,
+`description`, `hidden`, `model`, `tools`, `workspace`, `parameters` and
+`compaction`. Only `model` is required. Each model or tool selection has a
+`name` and an optional `config` object. Tools are keyed by their alias.
+`workspace` selects a workspace for the tools, as described by the tools plugin.
 
 OpenAI web search is enabled through the model's configuration:
 
@@ -139,10 +140,11 @@ provider tools. Role parameters can target `[tools]` in the model configuration.
 Provider tool calls are retained for replay with the same provider and model.
 They are omitted when either changes.
 
-Parameters have a `target` and optional `extensions`. Targets use `type: model`,
-`type: tool` or `type: extensions`, with a `path` array of object keys. Tool
-targets also specify the tool alias in `tool`. Compaction accepts `threshold`
-and `instructions`.
+Parameters have a `target` and optional `title`, `description` and `schema`.
+Targets use `type: model`, `type: tool` or `type: workspace`, with a `path` array
+of object keys. Tool targets also specify the tool alias in `tool`. Workspace
+paths start at the role's `workspace`, for example `[config, cwd]`. Compaction
+accepts `threshold` and `instructions`.
 
 Role names follow the same naming rules as providers. Role files are read on each
 lookup, so edits apply without restarting Fleet.
@@ -154,41 +156,37 @@ These endpoints do not expose plugin configuration or credentials.
 
 ### Role selection
 
-Role titles, descriptions and visibility are defined in `extensions.fleet`.
-Hidden roles remain usable by name but do not appear in the role picker.
-Parameters use the same namespace for titles, descriptions and JSON Schemas:
+Roles and parameters have optional titles and descriptions. Hidden roles remain
+usable by name but do not appear in the role picker. Parameters may describe
+their values with a JSON Schema:
 
 ```yaml
+title: Reviewer
+description: Review code changes.
+hidden: false
 model:
   name: work:example
   config:
     effort: high
-extensions:
-  fleet:
-    title: Reviewer
-    description: Review code changes.
-    hidden: false
 parameters:
   effort:
+    title: Reasoning effort
+    schema:
+      type: string
+      oneOf:
+        - const: low
+          title: Low
+        - const: high
+          title: High
     target:
       type: model
       path: [effort]
-    extensions:
-      fleet:
-        title: Reasoning effort
-        schema:
-          type: string
-          oneOf:
-            - const: low
-              title: Low
-            - const: high
-              title: High
 ```
 
 The API exposes `title`, `description`, `hidden` and `parameters` as ordinary
 fields. Each parameter exposes its title, description, schema and configured
-default, when present. Other extensions, parameter targets and system prompts
-are not included. Parameters marked `writeOnly` do not expose their defaults.
+default, when present. Model and tool config, workspaces, parameter targets and
+system prompts are not included. Parameters marked `writeOnly` do not expose their defaults.
 
 The UI uses choices for `enum` or `oneOf` with `const`, toggles for booleans,
 numeric fields for numbers, and checkboxes for unique arrays of choices. String
@@ -206,7 +204,7 @@ They do not add validation to core.
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside
 text. Blob IDs, like agent IDs, are decimal strings. Image bytes are immutable and stored in
 separate raw tables in `fleet.db`; events contain references, not base64 payloads. The database
-is upgraded to format 4 when opened. Older Fleet binaries cannot reopen it.
+is upgraded to format 5 when opened. Older Fleet binaries cannot reopen it.
 
 Image uploads accept PNG, JPEG, GIF, and WebP, up to 10 MiB per image. The server validates the
 actual format and decodes with resource limits (8,192 pixels per edge and 32 million pixels).

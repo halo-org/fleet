@@ -15,7 +15,7 @@ use crate::{EventDirection, Revision};
 /// Returns the application title stored in an agent's extensions.
 #[must_use]
 pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
-    extensions.get("fleet")?.get("title")?.as_str()
+    extensions.get("fleet.title")?.as_str()
 }
 
 /// A durable collection revision. Comparable only within the same store.

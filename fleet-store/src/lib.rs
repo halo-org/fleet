@@ -23,6 +23,7 @@ mod preview;
 mod records;
 mod store;
 mod store_error;
+mod title_migration;
 mod worker;
 
 #[cfg(feature = "queries")]
