@@ -27,9 +27,9 @@ pub(crate) use self::{
     admin_auth::AdminToken,
     api_types::{
         ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
-        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRole, ApiToolCallRecord,
-        CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery, InterruptAgentRequest,
-        SinceQuery,
+        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRoleEntry,
+        ApiToolCallRecord, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery,
+        InterruptAgentRequest, SinceQuery,
     },
     authentication::Authentication,
     authentication_error::AuthenticationError,
@@ -40,7 +40,7 @@ pub(crate) use self::{
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
     plugins::{PluginConfig, ProviderConfig},
-    roles::Roles,
+    roles::{InvalidRole, RoleDefinition, Roles},
 };
 
 use core::{error::Error, net::SocketAddr, pin::pin, time::Duration};

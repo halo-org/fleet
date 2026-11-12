@@ -1,6 +1,6 @@
 use crate::api_types::{AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetTitleRequest};
 use crate::{
-    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
+    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRoleEntry,
     ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails, ErrorResponse, EventsQuery,
     Fleet, FleetError, InterruptAgentRequest, SinceQuery,
 };
@@ -60,6 +60,7 @@ where
     match (&parts.method, segments.as_slice()) {
         (&Method::GET, ["", "providers"]) => Ok(providers(fleet)),
         (&Method::GET, ["", "roles"]) => roles(fleet).await,
+        (&Method::GET, ["", "roles", name]) => role(fleet, name).await,
         (&Method::POST, ["", "agents"]) => create_agent(fleet, &parts.headers, body).await,
         (&Method::GET, ["", "agents"]) => {
             let query: AgentsReadQuery = parse_query(parts.uri.query())?;
@@ -128,7 +129,7 @@ where
         (_, ["", "agents", _, "interrupts"]) => Err(ApiError::MethodNotAllowed("POST")),
         (
             _,
-            ["", "agents", _]
+            ["", "agents" | "roles", _]
             | ["", "providers" | "roles"]
             | [
                 "",
@@ -163,15 +164,27 @@ async fn roles(fleet: &Fleet) -> Result<Response<ResponseBody>, ApiError> {
         .await
         .map_err(ApiError::Fleet)?
         .into_iter()
-        .map(ApiRole::try_from)
-        .collect::<Result<_, _>>()
-        .map_err(|error| {
-            ApiError::Fleet(FleetError::Role(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error,
-            )))
-        })?;
+        .map(ApiRoleEntry::from)
+        .collect();
     let mut response = json_response(StatusCode::OK, &roles);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn role(fleet: &Fleet, name: &str) -> Result<Response<ResponseBody>, ApiError> {
+    let role = fleet
+        .role(&name.into())
+        .await
+        .map_err(|error| match error {
+            FleetError::Role(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                ApiError::InvalidRole(error.to_string())
+            }
+            error => ApiError::Fleet(error),
+        })?
+        .ok_or(ApiError::RoleNotFound)?;
+    let mut response = json_response(StatusCode::OK, &role);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -605,6 +618,8 @@ pub enum ApiError {
     Unauthorized,
     CrossOrigin,
     NotFound,
+    RoleNotFound,
+    InvalidRole(String),
     MethodNotAllowed(&'static str),
     UnsupportedMediaType,
     BodyTooLarge,
@@ -614,6 +629,7 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    #[expect(clippy::too_many_lines, reason = "maps each API error in one place")]
     fn details(&self) -> (StatusCode, &'static str, &str) {
         match self {
             Self::Authentication(error) => crate::authentication_api::error_details(error),
@@ -627,6 +643,12 @@ impl ApiError {
             ),
             Self::CrossOrigin => (StatusCode::FORBIDDEN, "cross_origin", "Origin not allowed"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Route not found"),
+            Self::RoleNotFound => (StatusCode::NOT_FOUND, "role_not_found", "Role not found"),
+            Self::InvalidRole(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_role",
+                message.as_str(),
+            ),
             Self::MethodNotAllowed(_) => (
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",

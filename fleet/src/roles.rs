@@ -4,7 +4,7 @@ use fleet_core::{
     RoleParameterTarget,
 };
 use fleet_kit::{Extension as _, RoleWorkspace};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io, path::PathBuf};
 
 /// The extension key of a display title.
@@ -22,23 +22,45 @@ pub struct Roles {
     directory: PathBuf,
 }
 
-#[derive(Deserialize)]
+/// A role in the shape of its file.
+#[derive(Serialize)]
+pub struct RoleDefinition {
+    name: String,
+    #[serde(flatten)]
+    frontmatter: Frontmatter,
+    system_prompt: String,
+}
+
+/// A role that could not be read.
+#[derive(Debug)]
+pub struct InvalidRole {
+    /// The role name.
+    pub name: RoleName,
+    /// Why the role is invalid.
+    pub error: io::Error,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frontmatter {
+    #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(default)]
     hidden: bool,
     model: Selection,
     #[serde(default)]
     tools: BTreeMap<String, Selection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<RoleWorkspace>,
     #[serde(default)]
     parameters: BTreeMap<String, Parameter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     compaction: Option<Compaction>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Selection {
     name: String,
@@ -46,16 +68,19 @@ struct Selection {
     config: JsonObject,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameter {
+    #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<JsonValue>,
     target: Target,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Target {
     Model { path: Vec<String> },
@@ -63,10 +88,12 @@ enum Target {
     Workspace { path: Vec<String> },
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Compaction {
+    #[serde(skip_serializing_if = "Option::is_none")]
     threshold: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
 }
 
@@ -76,8 +103,8 @@ impl Roles {
         Self { directory }
     }
 
-    /// Lists the available roles.
-    pub async fn list(&self) -> io::Result<Vec<Role>> {
+    /// Lists the available roles, including invalid ones.
+    pub async fn list(&self) -> io::Result<Vec<Result<Role, InvalidRole>>> {
         let mut directory = match tokio::fs::read_dir(&self.directory).await {
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -92,18 +119,46 @@ impl Roles {
                 && let Some(name) = path.file_stem().and_then(|name| name.to_str())
                 && valid_name(name)
             {
-                names.push(name.to_owned());
+                names.push(RoleName::from(name.to_owned()));
             }
         }
 
         names.sort_unstable();
         let mut roles = Vec::with_capacity(names.len());
         for name in names {
-            if let Some(role) = fleet_core::Roles::get(self, &name.into()).await? {
-                roles.push(role);
+            match self
+                .definition(&name)
+                .await
+                .and_then(|definition| definition.map(Role::try_from).transpose())
+            {
+                Ok(Some(role)) => roles.push(Ok(role)),
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    roles.push(Err(InvalidRole { name, error }));
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(roles)
+    }
+
+    /// Returns the definition of a role.
+    ///
+    /// Invalid roles return [`InvalidData`](io::ErrorKind::InvalidData) errors.
+    pub async fn definition(&self, name: &RoleName) -> io::Result<Option<RoleDefinition>> {
+        if !valid_name(name.as_ref()) {
+            return Ok(None);
+        }
+
+        match tokio::fs::read_to_string(self.path(name)).await {
+            Ok(source) => RoleDefinition::parse(name.to_string(), &source).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn path(&self, name: &RoleName) -> PathBuf {
+        self.directory.join(format!("{name}.md"))
     }
 }
 
@@ -111,22 +166,88 @@ impl fleet_core::Roles for Roles {
     type Error = io::Error;
 
     async fn get(&self, name: &RoleName) -> Result<Option<Role>, Self::Error> {
-        if !valid_name(name.as_ref()) {
-            return Ok(None);
+        self.definition(name)
+            .await
+            .and_then(|definition| definition.map(Role::try_from).transpose())
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid role {}: {error}", self.path(name).display()),
+                    )
+                } else {
+                    error
+                }
+            })
+    }
+}
+
+impl RoleDefinition {
+    fn parse(name: String, source: &str) -> io::Result<Self> {
+        let mut lines = source.split_inclusive('\n');
+        if lines.next().map(str::trim_end) != Some("---") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected YAML frontmatter between --- lines",
+            ));
         }
 
-        let path = self.directory.join(format!("{name}.md"));
-        let source = match tokio::fs::read_to_string(&path).await {
-            Ok(source) => source,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
+        let mut frontmatter = String::new();
+        for line in lines.by_ref() {
+            if line.trim_end() == "---" {
+                return Ok(Self {
+                    name,
+                    frontmatter: yaml_serde::from_str(&frontmatter)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                    system_prompt: lines.collect(),
+                });
+            }
+            frontmatter.push_str(line);
+        }
 
-        parse(name.clone(), &source).map(Some).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid role {}: {error}", path.display()),
-            )
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing closing --- line",
+        ))
+    }
+}
+
+impl TryFrom<RoleDefinition> for Role {
+    type Error = io::Error;
+
+    fn try_from(definition: RoleDefinition) -> Result<Self, Self::Error> {
+        let RoleDefinition {
+            name,
+            frontmatter,
+            system_prompt,
+        } = definition;
+        let mut extensions = JsonObject::new();
+        insert(&mut extensions, TITLE, frontmatter.title);
+        insert(&mut extensions, DESCRIPTION, frontmatter.description);
+        insert(&mut extensions, HIDDEN, frontmatter.hidden.then_some(true));
+        if let Some(workspace) = frontmatter.workspace {
+            workspace.insert(&mut extensions)?;
+        }
+
+        Ok(Self {
+            name: name.into(),
+            parameters: frontmatter
+                .parameters
+                .into_iter()
+                .map(|(name, parameter)| (name.into(), parameter.into()))
+                .collect(),
+            model: frontmatter.model.into(),
+            tools: frontmatter
+                .tools
+                .into_iter()
+                .map(|(alias, tool)| (alias.into(), tool.into()))
+                .collect(),
+            system_prompt,
+            compaction: frontmatter.compaction.map(|compaction| RoleCompaction {
+                threshold: compaction.threshold,
+                instructions: compaction.instructions,
+            }),
+            extensions,
         })
     }
 }
@@ -172,63 +293,15 @@ fn valid_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn parse(name: RoleName, source: &str) -> io::Result<Role> {
-    let mut lines = source.split_inclusive('\n');
-    if lines.next().map(str::trim_end) != Some("---") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "expected YAML frontmatter between --- lines",
-        ));
-    }
-
-    let mut frontmatter = String::new();
-    for line in lines.by_ref() {
-        if line.trim_end() == "---" {
-            let frontmatter: Frontmatter = yaml_serde::from_str(&frontmatter)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let mut extensions = JsonObject::new();
-            insert(&mut extensions, TITLE, frontmatter.title);
-            insert(&mut extensions, DESCRIPTION, frontmatter.description);
-            insert(&mut extensions, HIDDEN, frontmatter.hidden.then_some(true));
-            if let Some(workspace) = frontmatter.workspace {
-                workspace.insert(&mut extensions)?;
-            }
-
-            return Ok(Role {
-                name,
-                parameters: frontmatter
-                    .parameters
-                    .into_iter()
-                    .map(|(name, parameter)| (name.into(), parameter.into()))
-                    .collect(),
-                model: frontmatter.model.into(),
-                tools: frontmatter
-                    .tools
-                    .into_iter()
-                    .map(|(alias, tool)| (alias.into(), tool.into()))
-                    .collect(),
-                system_prompt: lines.collect(),
-                compaction: frontmatter.compaction.map(|compaction| RoleCompaction {
-                    threshold: compaction.threshold,
-                    instructions: compaction.instructions,
-                }),
-                extensions,
-            });
-        }
-        frontmatter.push_str(line);
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "missing closing --- line",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ApiRole;
+    use crate::api_types::ApiRole;
     use serde_json::json;
+
+    fn parse(name: &str, source: &str) -> io::Result<Role> {
+        RoleDefinition::parse(name.into(), source)?.try_into()
+    }
 
     #[test]
     fn role_metadata_exposes_parameters_and_configured_defaults() {
@@ -273,7 +346,7 @@ parameters:
 Private instructions.
 ";
 
-        let role = parse("reviewer".into(), source).unwrap();
+        let role = parse("reviewer", source).unwrap();
         let role = ApiRole::try_from(role).unwrap();
         let value = serde_json::to_value(role).unwrap();
 
@@ -330,7 +403,7 @@ Be helpful.
 Keep this separator.
 ";
 
-        let role = parse("assistant".into(), source).unwrap();
+        let role = parse("assistant", source).unwrap();
         assert_eq!(role.name, "assistant".into());
         assert_eq!(role.model.name, "provider:model".into());
         assert_eq!(role.model.config["effort"], "high");
@@ -364,6 +437,86 @@ Keep this separator.
     }
 
     #[test]
+    fn definition_keeps_the_shape_of_the_file() {
+        let source = "\
+---
+title: Reviewer
+model:
+  name: provider:model
+  config:
+    effort: high
+tools:
+  search:
+    name: provider:search
+workspace:
+  name: host:default
+  config:
+    cwd: /project
+  id: '7'
+parameters:
+  cwd:
+    title: Directory
+    target: {type: workspace, path: [config, cwd]}
+  enabled:
+    target: {type: tool, tool: search, path: [enabled]}
+compaction:
+  threshold: 1000
+---
+Review changes.
+";
+
+        let definition = RoleDefinition::parse("reviewer".into(), source).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(definition).unwrap(),
+            json!({
+                "name": "reviewer",
+                "title": "Reviewer",
+                "hidden": false,
+                "model": {
+                    "name": "provider:model",
+                    "config": {
+                        "effort": "high",
+                    },
+                },
+                "tools": {
+                    "search": {
+                        "name": "provider:search",
+                        "config": {},
+                    },
+                },
+                "workspace": {
+                    "name": "host:default",
+                    "config": {
+                        "cwd": "/project",
+                    },
+                    "id": "7",
+                },
+                "parameters": {
+                    "cwd": {
+                        "title": "Directory",
+                        "target": {
+                            "type": "workspace",
+                            "path": ["config", "cwd"],
+                        },
+                    },
+                    "enabled": {
+                        "target": {
+                            "type": "tool",
+                            "tool": "search",
+                            "path": ["enabled"],
+                        },
+                    },
+                },
+                "compaction": {
+                    "threshold": 1000,
+                },
+                "system_prompt": "Review changes.\n",
+            }),
+        );
+    }
+
+    #[test]
     fn parse_rejects_missing_frontmatter_and_unknown_fields() {
         for source in [
             "Be helpful.",
@@ -371,7 +524,7 @@ Keep this separator.
             "---\nmodel:\n  name: provider:model\ntoolz: {}\n---\n",
             "---\nmodel:\n  name: provider:model\nextensions: {}\n---\n",
         ] {
-            let error = parse("assistant".into(), source).unwrap_err();
+            let error = parse("assistant", source).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
     }

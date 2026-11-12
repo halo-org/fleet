@@ -1,7 +1,9 @@
-use crate::{Authentication, Config, ErrorChain, ErrorHandler, IdleHandler};
+use crate::{
+    Authentication, Config, ErrorChain, ErrorHandler, IdleHandler, InvalidRole, RoleDefinition,
+};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, Roles, Tools,
+    Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, RoleName, Roles, Tools,
 };
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
@@ -95,11 +97,23 @@ impl Fleet {
             })
     }
 
-    /// Lists the available roles.
-    pub async fn roles(&self) -> Result<Vec<Role>, FleetError> {
+    /// Lists the available roles, including invalid ones.
+    pub async fn roles(&self) -> Result<Vec<Result<Role, InvalidRole>>, FleetError> {
         match &self.configuration {
             Some(configuration) => configuration.roles.list().await.map_err(FleetError::Role),
             None => Ok(Vec::new()),
+        }
+    }
+
+    /// Returns the definition of a role.
+    pub async fn role(&self, name: &RoleName) -> Result<Option<RoleDefinition>, FleetError> {
+        match &self.configuration {
+            Some(configuration) => configuration
+                .roles
+                .definition(name)
+                .await
+                .map_err(FleetError::Role),
+            None => Ok(None),
         }
     }
 
@@ -1718,5 +1732,87 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         });
+    }
+
+    #[test]
+    fn roles_include_definitions_and_invalid_roles() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "fleet-roles-{}",
+            crate::oauth::random_value().unwrap()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("assistant.md"),
+            "---\ntitle: Assistant\nmodel:\n  name: work:model\n---\nBe helpful.\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("broken.md"), "Be helpful.\n").unwrap();
+        let config = serde_json::from_value(json!({})).unwrap();
+        let fleet = Fleet::new(Store::memory().unwrap(), None)
+            .with_configuration(config, crate::Roles::new(directory.clone()));
+        let body = async |path| {
+            let response = crate::api::handle(fleet.clone(), request(path))
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        };
+
+        runtime.block_on(async {
+            let (status, roles) = body("/roles").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                roles,
+                json!([
+                    {
+                        "name": "assistant",
+                        "title": "Assistant",
+                        "hidden": false,
+                        "parameters": {},
+                    },
+                    {
+                        "name": "broken",
+                        "error": "expected YAML frontmatter between --- lines",
+                    },
+                ]),
+            );
+
+            let (status, role) = body("/roles/assistant").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                role,
+                json!({
+                    "name": "assistant",
+                    "title": "Assistant",
+                    "hidden": false,
+                    "model": {
+                        "name": "work:model",
+                        "config": {},
+                    },
+                    "tools": {},
+                    "parameters": {},
+                    "system_prompt": "Be helpful.\n",
+                }),
+            );
+
+            let (status, error) = body("/roles/broken").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error["error"]["code"], "invalid_role");
+            assert_eq!(
+                error["error"]["message"],
+                "expected YAML frontmatter between --- lines",
+            );
+
+            let (status, error) = body("/roles/missing").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(error["error"]["code"], "role_not_found");
+        });
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

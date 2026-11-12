@@ -150,9 +150,15 @@ Role names follow the same naming rules as providers. Role files are read on eac
 lookup, so edits apply without restarting Fleet.
 
 `GET /providers` lists provider names and their plugin names. `GET /roles` lists
-roles with their display metadata and parameters. `GET /connections` includes
-each connection's owning provider.
+roles with their display metadata and parameters. An invalid role file
+appears as `{"name": ..., "error": ...}` without failing the list.
+`GET /roles/{name}` returns a role's full definition in the shape of its file,
+with `name` and `system_prompt`. An invalid role returns `invalid_role` with
+the reason. `GET /connections` includes each connection's owning provider.
 These endpoints do not expose plugin configuration or credentials.
+
+Role definitions, including model and tool config and system prompts, are visible
+to API clients. Keep credentials in connections, not in roles.
 
 ### Role selection
 
@@ -186,7 +192,8 @@ parameters:
 The API exposes `title`, `description`, `hidden` and `parameters` as ordinary
 fields. Each parameter exposes its title, description, schema and configured
 default, when present. Model and tool config, workspaces, parameter targets and
-system prompts are not included. Parameters marked `writeOnly` do not expose their defaults.
+system prompts are left to the role's definition. Parameters marked `writeOnly`
+do not expose their defaults in the list.
 
 The UI uses choices for `enum` or `oneOf` with `const`, toggles for booleans,
 numeric fields for numbers, and checkboxes for unique arrays of choices. String
