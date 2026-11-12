@@ -1,4 +1,4 @@
-use crate::roles;
+use crate::{InvalidRole, roles};
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
@@ -42,6 +42,21 @@ pub struct ApiRole {
     pub hidden: bool,
     /// The available parameters.
     pub parameters: BTreeMap<String, ApiRoleParameter>,
+}
+
+/// An entry in the list of roles.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ApiRoleEntry {
+    /// A valid role.
+    Role(ApiRole),
+    /// A role that could not be read.
+    Invalid {
+        /// The role name.
+        name: String,
+        /// Why the role is invalid.
+        error: String,
+    },
 }
 
 /// A role parameter.
@@ -887,6 +902,25 @@ impl TryFrom<Role> for ApiRole {
             hidden: extension(&role.extensions, roles::HIDDEN)?.unwrap_or_default(),
             parameters,
         })
+    }
+}
+
+impl From<Result<Role, InvalidRole>> for ApiRoleEntry {
+    fn from(role: Result<Role, InvalidRole>) -> Self {
+        let role = role.and_then(|role| {
+            let name = role.name.clone();
+            ApiRole::try_from(role).map_err(|error| InvalidRole {
+                name,
+                error: error.into(),
+            })
+        });
+        match role {
+            Ok(role) => Self::Role(role),
+            Err(InvalidRole { name, error }) => Self::Invalid {
+                name: name.to_string(),
+                error: error.to_string(),
+            },
+        }
     }
 }
 
