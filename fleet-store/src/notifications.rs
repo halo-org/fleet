@@ -3,7 +3,7 @@ use crate::{
     notification_records::{DEVICE, NOTIFICATION, NotificationRecord},
     records::{self, AgentRecord, Records},
 };
-use fleet_core::{AgentId, JsonObject};
+use fleet_core::{AgentId, EventCursor, JsonObject};
 use redb::ReadableDatabase as _;
 
 /// A claim on an agent's notification.
@@ -21,6 +21,12 @@ impl NotificationClaim {
     #[must_use]
     pub const fn agent(&self) -> AgentId {
         self.agent
+    }
+
+    /// Returns the end of the finished turn.
+    #[must_use]
+    pub fn cursor(&self) -> EventCursor {
+        self.cursor.into()
     }
 }
 
