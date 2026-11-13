@@ -1,16 +1,25 @@
 # Roles plugin
 
-Provides `list_roles`, `read_role` and `write_role` through Fleet's roles interface.
-The plugin needs role access. It does not need process, filesystem or HTTP access.
+Provides `list_roles`, `read_role`, `write_role` and `edit_role` through Fleet's
+roles interface. The plugin needs role access. It does not need process, filesystem
+or HTTP access.
 
 - `list_roles` returns the name and version of each stored role.
 - `read_role` returns a role and its version.
 - `write_role` creates a role when no `version` is given and replaces it when
-  the version matches. It does not return the new version, so read the role again
-  before another replacement. A changed or existing role is reported to the model.
+  the version matches. A changed or existing role is reported to the model.
+- `edit_role` changes part of an existing role, in the shape `read_role` returns.
+  It first deletes the fields at the JSON Pointers in `remove`. It then merges
+  `merge` into the role: objects merge recursively, and other values, including
+  arrays and `null`, replace the current value. Last, it applies the exact
+  replacements in `system_prompt_edits`, where each `old` text must match exactly
+  once. A given `version` must match the current role. Roles cannot be renamed.
 
-Versions are decimal strings. Writes use the tool call ID as their idempotency key,
-so retries do not repeat a completed write. Roles are never deleted.
+Writes and edits return the new version unless the role changed again
+afterwards. Versions are decimal strings. Writes use the tool call ID as their
+idempotency key, so retries do not repeat a completed write. A concurrent change
+is reported to the model, which should read the role again. Roles are never
+deleted.
 
 Roles use Fleet's stored shape:
 
@@ -41,6 +50,9 @@ also name the tool alias in `tool`. Fleet accepts the role extensions
 `fleet.title`, `fleet.description`, `fleet.hidden` and `fleet.workspace`, and the
 parameter extensions `fleet.title`, `fleet.description` and `fleet.schema`.
 Extension parameter targets must start with `fleet.workspace`.
+
+Roles saved through the HTTP API or UI omit defaults such as `"fleet.hidden": false`
+and an empty `compaction`. They read back without them.
 
 ## Build
 
