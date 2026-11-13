@@ -301,9 +301,27 @@ Rebuild existing provider components against the updated WIT files before using 
 
 Fleet sends a Web Push notification to every registered device when an agent completes a turn
 with no queued messages. Interrupted turns, snooze expiry and restoring an agent do not notify.
-The payload is JSON such as
-`{"kind":"turn_completed","agent":"123","title":"Fix the build","role":"coder"}`, with a null
-title when the agent has none. Clients compose the visible text.
+The payload is a [Declarative Web Push](https://www.w3.org/TR/push-api/#declarative-push-message)
+message such as
+
+```json
+{
+  "web_push": 8030,
+  "notification": {
+    "title": "Fix the build",
+    "body": "The build passes again.",
+    "navigate": "https://fleet.example/#agent/123",
+    "tag": "agent-123"
+  }
+}
+```
+
+The title is the agent's title, or its role and the end of its ID. The body is the final reply as
+plain text with whitespace collapsed, or "Finished" when the reply has no text. Markdown is not
+removed. `navigate` opens the agent at `/#agent/{id}` on the origin that registered the device. It
+is relative when that origin is not HTTPS. Browsers with declarative push show the notification
+themselves. Others pass it to the service worker's `push` event. Messages are padded to 2048 bytes
+so their size does not reveal the reply length, and long replies are shortened to fit.
 
 1. `GET /notifications` returns `{"web_push":{"public_key":"..."}}`, the base64url VAPID public
    key to pass as `applicationServerKey` when subscribing.

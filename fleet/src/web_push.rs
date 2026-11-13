@@ -20,6 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::{Host, Url};
 
 const RECORD_SIZE: u32 = 4096;
+const MESSAGE_SIZE: usize = 2048;
+const HEADER_SIZE: usize = 86;
+const TAG_SIZE: usize = 16;
 const TTL: Duration = Duration::from_hours(12);
 
 /// Sends encrypted messages to browser push services.
@@ -61,6 +64,8 @@ pub enum WebPushError {
     Transport(reqwest::Error),
     /// The subscription is invalid.
     Invalid(&'static str),
+    /// The payload is larger than [`WebPush::MAX_PAYLOAD`].
+    TooLarge,
     /// The message could not be encrypted or signed.
     Encryption,
 }
@@ -76,6 +81,9 @@ struct Claims<'a> {
 struct Length(usize);
 
 impl WebPush {
+    /// The largest payload in bytes. Every message is padded to the same size.
+    pub const MAX_PAYLOAD: usize = MESSAGE_SIZE - HEADER_SIZE - 1 - TAG_SIZE;
+
     /// Generates a PKCS #8 application server key.
     pub fn generate_key() -> Result<Vec<u8>, Unspecified> {
         Ok(
@@ -115,15 +123,7 @@ impl WebPush {
         payload: &[u8],
     ) -> Result<(), WebPushError> {
         let endpoint = endpoint(&subscription.endpoint)?;
-        let ua_public = decode::<65>(&subscription.keys.p256dh)
-            .ok_or(WebPushError::Invalid("invalid p256dh key"))?;
-        let auth = decode::<16>(&subscription.keys.auth)
-            .ok_or(WebPushError::Invalid("invalid auth secret"))?;
-        let mut salt = [0; 16];
-        let body = aws_lc_rs::rand::fill(&mut salt)
-            .and_then(|()| PrivateKey::generate(&ECDH_P256))
-            .and_then(|key| encrypt(&ua_public, &auth, &key, salt, payload))
-            .map_err(|_| WebPushError::Encryption)?;
+        let body = message(subscription, payload)?;
         let authorization = self.authorization(&endpoint, subject)?;
         let response = self
             .client
@@ -194,6 +194,7 @@ impl fmt::Display for WebPushError {
             }
             Self::Transport(_) => f.write_str("could not reach push service"),
             Self::Invalid(message) => f.write_str(message),
+            Self::TooLarge => f.write_str("push message is too large"),
             Self::Encryption => f.write_str("could not encrypt or sign push message"),
         }
     }
@@ -264,12 +265,28 @@ fn decode<const N: usize>(value: &str) -> Option<[u8; N]> {
         .ok()
 }
 
+fn message(subscription: &Subscription, payload: &[u8]) -> Result<Vec<u8>, WebPushError> {
+    let ua_public = decode::<65>(&subscription.keys.p256dh)
+        .ok_or(WebPushError::Invalid("invalid p256dh key"))?;
+    let auth = decode::<16>(&subscription.keys.auth)
+        .ok_or(WebPushError::Invalid("invalid auth secret"))?;
+    let padding = WebPush::MAX_PAYLOAD
+        .checked_sub(payload.len())
+        .ok_or(WebPushError::TooLarge)?;
+    let mut salt = [0; 16];
+    aws_lc_rs::rand::fill(&mut salt)
+        .and_then(|()| PrivateKey::generate(&ECDH_P256))
+        .and_then(|key| encrypt(&ua_public, &auth, &key, salt, payload, padding))
+        .map_err(|_| WebPushError::Encryption)
+}
+
 fn encrypt(
     ua_public: &[u8; 65],
     auth: &[u8; 16],
     as_private: &PrivateKey,
     salt: [u8; 16],
     payload: &[u8],
+    padding: usize,
 ) -> Result<Vec<u8>, Unspecified> {
     let as_public = as_private.compute_public_key()?;
     let ikm = agreement::agree(
@@ -298,6 +315,7 @@ fn encrypt(
 
     let mut record = payload.to_vec();
     record.push(2);
+    record.resize(record.len().saturating_add(padding), 0);
     LessSafeKey::new(UnboundKey::new(&AES_128_GCM, &cek)?).seal_in_place_append_tag(
         Nonce::assume_unique_for_key(nonce),
         Aad::empty(),
@@ -318,6 +336,7 @@ fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::assert_matches;
 
     fn base64(value: &str) -> Vec<u8> {
         URL_SAFE_NO_PAD.decode(value).unwrap()
@@ -336,6 +355,7 @@ mod tests {
             &as_private,
             decode("DGv6ra1nlYgDCS1FRnbzlw").unwrap(),
             b"When I grow up, I want to be a watermelon",
+            0,
         )
         .unwrap();
 
@@ -346,6 +366,25 @@ mod tests {
             "8pfeW0KbunFT06SuDKoJH9Ql87S1QUrdirN6GcG7sFz1y1sqLgVi1VhjVkHsUoEsbI_0LpXMuGvnzQ",
         );
         assert_eq!(body, [header, ciphertext].concat());
+    }
+
+    #[test]
+    fn messages_are_padded_to_one_size() {
+        let subscription = Subscription {
+            endpoint: "https://push.example/send/abc".into(),
+            keys: Keys {
+                p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4".into(),
+                auth: "BTBZMqHH6r4Tts7J_aSIgg".into(),
+            },
+        };
+
+        let short = message(&subscription, b"{}").unwrap();
+        let long = message(&subscription, &[b'a'; WebPush::MAX_PAYLOAD]).unwrap();
+        let error = message(&subscription, &[b'a'; WebPush::MAX_PAYLOAD + 1]).unwrap_err();
+
+        assert_eq!(short.len(), MESSAGE_SIZE);
+        assert_eq!(long.len(), MESSAGE_SIZE);
+        assert_matches!(error, WebPushError::TooLarge);
     }
 
     #[test]

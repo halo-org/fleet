@@ -4,14 +4,15 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use core::time::Duration;
-use fleet_core::{JsonObject, RuntimeStore as _};
+use fleet_core::{AgentId, EventPayload, JsonObject, ModelOutput, RoleName, RuntimeStore as _};
 use fleet_store::{NotificationClaim, Store, StoreError};
-use futures_util::future;
+use futures_util::{StreamExt as _, TryStreamExt as _, future};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use std::{borrow::Cow, path::Path, sync::Arc};
 
 const ATTEMPTS: u32 = 3;
 const MAX_TITLE_CHARS: usize = 200;
+const MAX_BODY_CHARS: usize = 400;
 
 /// Delivers notifications to registered devices.
 #[derive(Clone)]
@@ -37,12 +38,25 @@ enum Transport {
     },
 }
 
+struct Message {
+    title: String,
+    body: String,
+    route: String,
+    tag: String,
+}
+
 #[derive(Serialize)]
 struct Payload<'a> {
-    kind: &'static str,
-    agent: String,
-    title: Option<&'a str>,
-    role: &'a str,
+    web_push: u16,
+    notification: Notification<'a>,
+}
+
+#[derive(Serialize)]
+struct Notification<'a> {
+    title: &'a str,
+    body: &'a str,
+    navigate: &'a str,
+    tag: &'a str,
 }
 
 impl Notifications {
@@ -83,32 +97,44 @@ impl Notifications {
     /// Delivery to each device is best effort. Devices that no longer exist are removed.
     pub async fn deliver(&self, store: &Store, claim: NotificationClaim) -> Result<(), StoreError> {
         if let Some(agent) = store.agent(claim.agent()).await? {
-            let title = fleet_kit::agent_title(&agent.extensions).map(|title| {
-                title
-                    .char_indices()
-                    .nth(MAX_TITLE_CHARS)
-                    .map_or(title, |(end, _)| title.get(..end).unwrap_or(title))
-            });
-            let payload = serde_json::to_vec(&Payload {
-                kind: "turn_completed",
-                agent: u128::from(claim.agent()).to_string(),
-                title,
-                role: agent.role.name.as_ref(),
-            })
-            .expect("notification payload is serializable");
+            let events = store
+                .events(claim.agent(), claim.cursor(), None)
+                .take(2)
+                .try_collect::<Vec<_>>()
+                .await?;
+            let output = events
+                .into_iter()
+                .find_map(|event| match event.payload {
+                    EventPayload::ModelResponse(response) => Some(response.output),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let message = Message::new(
+                claim.agent(),
+                fleet_kit::agent_title(&agent.extensions),
+                &agent.role.name,
+                &output,
+            );
             let topic = URL_SAFE_NO_PAD.encode(u128::from(claim.agent()).to_be_bytes());
             let devices = store.devices().await?;
             future::join_all(
                 devices
                     .into_iter()
-                    .map(|(id, device)| self.send(store, id, device, &topic, &payload)),
+                    .map(|(id, device)| self.send(store, id, device, &topic, &message)),
             )
             .await;
         }
         store.complete_notification(claim).await
     }
 
-    async fn send(&self, store: &Store, id: u128, value: JsonObject, topic: &str, payload: &[u8]) {
+    async fn send(
+        &self,
+        store: &Store,
+        id: u128,
+        value: JsonObject,
+        topic: &str,
+        message: &Message,
+    ) {
         let device = match serde_json::from_value::<Device>(value.clone().into()) {
             Ok(device) => device,
             Err(error) => {
@@ -123,11 +149,12 @@ impl Notifications {
             origin,
             subscription,
         } = &device.transport;
+        let payload = message.payload(origin.as_deref());
         let mut delay = Duration::from_secs(1);
         for attempt in 1..=ATTEMPTS {
             match self
                 .web_push
-                .send(subscription, origin.as_deref(), topic, payload)
+                .send(subscription, origin.as_deref(), topic, &payload)
                 .await
             {
                 Ok(()) => return,
@@ -182,5 +209,131 @@ impl Device {
             unreachable!("device serializes to an object");
         };
         device
+    }
+}
+
+impl Message {
+    fn new(agent: AgentId, title: Option<&str>, role: &RoleName, output: &[ModelOutput]) -> Self {
+        let id = u128::from(agent).to_string();
+        let title = title.map_or_else(
+            || {
+                let suffix = id.get(id.len().saturating_sub(6)..).unwrap_or(&id);
+                format!("{role} · {suffix}")
+            },
+            |title| crate::notifications::truncate(title, MAX_TITLE_CHARS).to_owned(),
+        );
+        let body = output
+            .iter()
+            .filter_map(|output| match output {
+                ModelOutput::Text(text) => Some(text),
+                _ => None,
+            })
+            .flat_map(|text| text.split(|c: char| c.is_whitespace() || c.is_control()))
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            title,
+            body: if body.is_empty() {
+                "Finished".into()
+            } else {
+                body
+            },
+            route: format!("/#agent/{id}"),
+            tag: format!("agent-{id}"),
+        }
+    }
+
+    fn payload(&self, origin: Option<&str>) -> Vec<u8> {
+        let navigate = format!("{}{}", origin.unwrap_or_default(), self.route);
+        let mut chars = MAX_BODY_CHARS;
+        loop {
+            let payload = serde_json::to_vec(&Payload {
+                web_push: 8030,
+                notification: Notification {
+                    title: &self.title,
+                    body: &crate::notifications::excerpt(&self.body, chars),
+                    navigate: &navigate,
+                    tag: &self.tag,
+                },
+            })
+            .expect("notification payload is serializable");
+            let excess = payload.len().saturating_sub(WebPush::MAX_PAYLOAD);
+            if excess == 0 || chars == 0 {
+                return payload;
+            }
+            chars = chars.saturating_sub(excess);
+        }
+    }
+}
+
+fn excerpt(text: &str, chars: usize) -> Cow<'_, str> {
+    if text.chars().nth(chars).is_none() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!(
+            "{}…",
+            crate::notifications::truncate(text, chars.saturating_sub(1))
+        ))
+    }
+}
+
+fn truncate(text: &str, chars: usize) -> &str {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text, |(end, _)| text.get(..end).unwrap_or(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn payload_shows_the_reply() {
+        let message = Message::new(
+            1_234_567.into(),
+            None,
+            &"coder".into(),
+            &[
+                ModelOutput::Text("Fixed the\nbuild.".into()),
+                ModelOutput::Text("Tests\tpass.\u{7}".into()),
+            ],
+        );
+
+        let payload = message.payload(Some("https://fleet.example"));
+
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "web_push": 8030,
+                "notification": {
+                    "title": "coder · 234567",
+                    "body": "Fixed the build. Tests pass.",
+                    "navigate": "https://fleet.example/#agent/1234567",
+                    "tag": "agent-1234567"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn long_replies_are_shortened_to_fit() {
+        let title = "題".repeat(300);
+        let message = Message::new(
+            1.into(),
+            Some(&title),
+            &"coder".into(),
+            &[ModelOutput::Text("返信".repeat(1000))],
+        );
+
+        let payload = message.payload(None);
+
+        assert!(payload.len() <= WebPush::MAX_PAYLOAD);
+        let payload = serde_json::from_slice::<serde_json::Value>(&payload).unwrap();
+        let notification = &payload["notification"];
+        assert_eq!(notification["title"], "題".repeat(MAX_TITLE_CHARS));
+        assert!(notification["body"].as_str().unwrap().ends_with('…'));
+        assert_eq!(notification["navigate"], "/#agent/1");
     }
 }
