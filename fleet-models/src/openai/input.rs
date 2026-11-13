@@ -152,13 +152,20 @@ fn encode_output(output: &[ModelOutput], compatible: bool) -> Result<Vec<Value>,
                 }
             }
             ModelOutput::ToolCall(call) => {
-                items.push(json!({
-                    "type": "function_call",
-                    "call_id": call.id.as_ref(),
-                    "name": call.tool.as_ref(),
-                    "arguments": Value::Object(call.input.clone()).to_string(),
-                    "status": "completed",
-                }));
+                let mut item = serde_json::Map::from_iter([
+                    ("type".into(), "function_call".into()),
+                    ("call_id".into(), call.id.as_ref().into()),
+                    ("name".into(), call.tool.as_ref().into()),
+                    (
+                        "arguments".into(),
+                        Value::Object(call.input.clone()).to_string().into(),
+                    ),
+                    ("status".into(), "completed".into()),
+                ]);
+                if call.is_async {
+                    item.insert("async".into(), true.into());
+                }
+                items.push(item.into());
             }
             ModelOutput::ProviderToolCall(call) if compatible => {
                 let item: Value = serde_json::from_str(&call.payload).map_err(|error| {

@@ -149,6 +149,7 @@ impl<H, C, B> OpenAiModels<H, C, B> {
                 description: tool.description.clone(),
                 parameters: tool.input_schema.clone().into(),
                 strict: false,
+                r#async: tool.is_async,
             })
             .map(api::Tool::Function)
             .chain(config.tools.into_iter().flatten().map(api::Tool::Provider))
@@ -312,7 +313,7 @@ mod tests {
         Configured, ContentBlock, Error as _, JsonObject, Model, ModelCompaction, ModelContext,
         ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelProviderToolCall,
         ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Models as _, ModelsErrorKind,
-        ToolCall,
+        ToolCall, ToolOutput, ToolResult,
     };
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
     use http::{HeaderMap, Request, Response, StatusCode, header};
@@ -560,6 +561,98 @@ mod tests {
         assert_eq!(request["tools"][0]["type"], "function");
         assert_eq!(request["tools"][0]["name"], "read");
         assert_eq!(request["tools"][1], tools[0]);
+    }
+
+    #[test]
+    fn request_marks_async_function_tools() {
+        let models = models(TestHttp::default());
+        let mut context = context();
+        for (name, is_async) in [("read", false), ("build", true)] {
+            context.tools.push(ModelTool {
+                name: name.into(),
+                description: None,
+                is_async,
+                input_schema: JsonObject::new(),
+            });
+        }
+
+        let request = models.request(&context, None, &[]).unwrap();
+        let request = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            request["tools"],
+            json!([
+                {
+                    "type": "function",
+                    "name": "read",
+                    "parameters": {},
+                    "strict": false,
+                },
+                {
+                    "type": "function",
+                    "name": "build",
+                    "parameters": {},
+                    "strict": false,
+                    "async": true,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn request_replays_late_async_results_after_user_messages() {
+        let models = models(TestHttp::default());
+        let context = context();
+        let input = [
+            ModelInput::Assistant(
+                models.provenance(&context),
+                vec![ModelOutput::ToolCall(ToolCall {
+                    id: "call-build".into(),
+                    tool: "build".into(),
+                    is_async: true,
+                    input: JsonObject::new(),
+                })],
+            ),
+            ModelInput::User(vec![ContentBlock::Text("Any news?".into())]),
+            ModelInput::ToolResult(ToolResult {
+                call_id: "call-build".into(),
+                output: ToolOutput {
+                    content: vec![ContentBlock::Text("Built.".into())],
+                    structured_content: None,
+                    is_error: false,
+                },
+            }),
+        ];
+
+        let request = models.request(&context, None, &input).unwrap();
+        assert_eq!(
+            Value::from(request.input),
+            json!([
+                {
+                    "type": "function_call",
+                    "call_id": "call-build",
+                    "name": "build",
+                    "arguments": "{}",
+                    "status": "completed",
+                    "async": true,
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Any news?",
+                    }],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-build",
+                    "output": [{
+                        "type": "input_text",
+                        "text": "Built.",
+                    }],
+                },
+            ])
+        );
     }
 
     #[test]
@@ -1585,7 +1678,6 @@ mod tests {
 
     #[test]
     fn tool_images_preserve_structured_output_and_error_status() {
-        use fleet_core::{ToolOutput, ToolResult};
         use fleet_kit::Blobs as _;
 
         let http = TestHttp::new([response(&[message("Seen.", None)], false)]);
