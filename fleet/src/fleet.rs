@@ -6,9 +6,10 @@ use fleet_core::{
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
     AgentsUpdates, CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord,
-    Preview, Queries as _, QueryResponse, QueryUpdate, Revision, ToolCallRecord, TurnEndEvent,
+    Preview, Queries as _, QueryResponse, QueryUpdate, Revision, RoleStore as _, RoleVersion,
+    StoredRole, ToolCallRecord, TurnEndEvent,
 };
-use fleet_store::{RoleVersion, Store, StoreError, StoredRole};
+use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
 use std::{
     sync::Arc,

@@ -9,6 +9,7 @@ use wasmtime::{Store, component::InstancePre};
 #[derive(Clone)]
 pub struct WasmTools {
     blobs: Option<crate::WasmBlobs>,
+    roles: Option<crate::WasmRoles>,
     instance: ToolProviderPre<WasmState>,
     environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
@@ -22,6 +23,7 @@ impl WasmTools {
     ) -> Result<Self, WasmError> {
         Ok(Self {
             blobs: None,
+            roles: None,
             instance: ToolProviderPre::new(instance).map_err(WasmError::runtime)?,
             environment,
             workers,
@@ -30,6 +32,10 @@ impl WasmTools {
 
     pub(crate) fn set_blobs(&mut self, blobs: Option<crate::WasmBlobs>) {
         self.blobs = blobs;
+    }
+
+    pub(crate) fn set_roles(&mut self, roles: Option<crate::WasmRoles>) {
+        self.roles = roles;
     }
 
     fn store(&self) -> Store<WasmState> {
@@ -77,6 +83,11 @@ impl WasmTools {
             self.blobs
                 .as_ref()
                 .and_then(|blobs| blobs.for_agent(context.agent_id)),
+        );
+        store.data_mut().set_roles(
+            self.roles
+                .as_ref()
+                .map(|roles| roles.for_agent(context.agent_id)),
         );
         let output = store
             .run_concurrent(async |accessor| {
