@@ -4,8 +4,8 @@ use fleet_core::{
     RoleParameterTarget,
 };
 use fleet_kit::{Extension as _, RoleWorkspace};
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io, path::PathBuf};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 
 /// The extension key of a display title.
 pub const TITLE: &str = "fleet.title";
@@ -16,33 +16,10 @@ pub const HIDDEN: &str = "fleet.hidden";
 /// The extension key of a parameter's JSON Schema.
 pub const SCHEMA: &str = "fleet.schema";
 
-/// Loads roles from Markdown files.
-#[derive(Clone)]
-pub struct Roles {
-    directory: PathBuf,
-}
-
-/// A role in the shape of its file.
-#[derive(Serialize)]
-pub struct RoleDefinition {
-    name: String,
-    #[serde(flatten)]
-    frontmatter: Frontmatter,
-    system_prompt: String,
-}
-
-/// A role that could not be read.
-#[derive(Debug)]
-pub struct InvalidRole {
-    /// The role name.
-    pub name: RoleName,
-    /// Why the role is invalid.
-    pub error: io::Error,
-}
-
-#[derive(Serialize, Deserialize)]
+/// A role in the shape edited through the API, without its name.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Frontmatter {
+pub struct RoleDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,9 +35,11 @@ struct Frontmatter {
     parameters: BTreeMap<String, Parameter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     compaction: Option<Compaction>,
+    #[serde(default)]
+    system_prompt: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Selection {
     name: String,
@@ -68,7 +47,7 @@ struct Selection {
     config: JsonObject,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameter {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,7 +59,7 @@ struct Parameter {
     target: Target,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Target {
     Model { path: Vec<String> },
@@ -88,7 +67,7 @@ enum Target {
     Workspace { path: Vec<String> },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Compaction {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,153 +76,32 @@ struct Compaction {
     instructions: Option<String>,
 }
 
-impl Roles {
-    /// Creates a role loader for a directory.
-    pub const fn new(directory: PathBuf) -> Self {
-        Self { directory }
-    }
-
-    /// Lists the available roles, including invalid ones.
-    pub async fn list(&self) -> io::Result<Vec<Result<Role, InvalidRole>>> {
-        let mut directory = match tokio::fs::read_dir(&self.directory).await {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        let mut names = Vec::new();
-
-        while let Some(entry) = directory.next_entry().await? {
-            let path = entry.path();
-            if path.extension().is_some_and(|extension| extension == "md")
-                && entry.file_type().await?.is_file()
-                && let Some(name) = path.file_stem().and_then(|name| name.to_str())
-                && valid_name(name)
-            {
-                names.push(RoleName::from(name.to_owned()));
-            }
-        }
-
-        names.sort_unstable();
-        let mut roles = Vec::with_capacity(names.len());
-        for name in names {
-            match self
-                .definition(&name)
-                .await
-                .and_then(|definition| definition.map(Role::try_from).transpose())
-            {
-                Ok(Some(role)) => roles.push(Ok(role)),
-                Ok(None) => {}
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                    roles.push(Err(InvalidRole { name, error }));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(roles)
-    }
-
-    /// Returns the definition of a role.
-    ///
-    /// Invalid roles return [`InvalidData`](io::ErrorKind::InvalidData) errors.
-    pub async fn definition(&self, name: &RoleName) -> io::Result<Option<RoleDefinition>> {
-        if !valid_name(name.as_ref()) {
-            return Ok(None);
-        }
-
-        match tokio::fs::read_to_string(self.path(name)).await {
-            Ok(source) => RoleDefinition::parse(name.to_string(), &source).map(Some),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn path(&self, name: &RoleName) -> PathBuf {
-        self.directory.join(format!("{name}.md"))
-    }
-}
-
-impl fleet_core::Roles for Roles {
-    type Error = io::Error;
-
-    async fn get(&self, name: &RoleName) -> Result<Option<Role>, Self::Error> {
-        self.definition(name)
-            .await
-            .and_then(|definition| definition.map(Role::try_from).transpose())
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::InvalidData {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid role {}: {error}", self.path(name).display()),
-                    )
-                } else {
-                    error
-                }
-            })
-    }
-}
-
 impl RoleDefinition {
-    fn parse(name: String, source: &str) -> io::Result<Self> {
-        let mut lines = source.split_inclusive('\n');
-        if lines.next().map(str::trim_end) != Some("---") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected YAML frontmatter between --- lines",
-            ));
-        }
-
-        let mut frontmatter = String::new();
-        for line in lines.by_ref() {
-            if line.trim_end() == "---" {
-                return Ok(Self {
-                    name,
-                    frontmatter: yaml_serde::from_str(&frontmatter)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                    system_prompt: lines.collect(),
-                });
-            }
-            frontmatter.push_str(line);
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "missing closing --- line",
-        ))
-    }
-}
-
-impl TryFrom<RoleDefinition> for Role {
-    type Error = io::Error;
-
-    fn try_from(definition: RoleDefinition) -> Result<Self, Self::Error> {
-        let RoleDefinition {
-            name,
-            frontmatter,
-            system_prompt,
-        } = definition;
+    /// Converts the definition to a role with the given name.
+    pub fn into_role(self, name: RoleName) -> Result<Role, serde_json::Error> {
         let mut extensions = JsonObject::new();
-        insert(&mut extensions, TITLE, frontmatter.title);
-        insert(&mut extensions, DESCRIPTION, frontmatter.description);
-        insert(&mut extensions, HIDDEN, frontmatter.hidden.then_some(true));
-        if let Some(workspace) = frontmatter.workspace {
+        insert(&mut extensions, TITLE, self.title);
+        insert(&mut extensions, DESCRIPTION, self.description);
+        insert(&mut extensions, HIDDEN, self.hidden.then_some(true));
+        if let Some(workspace) = self.workspace {
             workspace.insert(&mut extensions)?;
         }
 
-        Ok(Self {
-            name: name.into(),
-            parameters: frontmatter
+        Ok(Role {
+            name,
+            parameters: self
                 .parameters
                 .into_iter()
                 .map(|(name, parameter)| (name.into(), parameter.into()))
                 .collect(),
-            model: frontmatter.model.into(),
-            tools: frontmatter
+            model: self.model.into(),
+            tools: self
                 .tools
                 .into_iter()
                 .map(|(alias, tool)| (alias.into(), tool.into()))
                 .collect(),
-            system_prompt,
-            compaction: frontmatter.compaction.map(|compaction| RoleCompaction {
+            system_prompt: self.system_prompt,
+            compaction: self.compaction.map(|compaction| RoleCompaction {
                 threshold: compaction.threshold,
                 instructions: compaction.instructions,
             }),
@@ -252,11 +110,52 @@ impl TryFrom<RoleDefinition> for Role {
     }
 }
 
+impl TryFrom<Role> for RoleDefinition {
+    type Error = serde_json::Error;
+
+    fn try_from(role: Role) -> Result<Self, Self::Error> {
+        let mut extensions = role.extensions;
+        let definition = Self {
+            title: take(&mut extensions, TITLE)?,
+            description: take(&mut extensions, DESCRIPTION)?,
+            hidden: take(&mut extensions, HIDDEN)?.unwrap_or_default(),
+            model: role.model.into(),
+            tools: role
+                .tools
+                .into_iter()
+                .map(|(alias, tool)| (alias.into(), tool.into()))
+                .collect(),
+            workspace: take(&mut extensions, RoleWorkspace::KEY)?,
+            parameters: role
+                .parameters
+                .into_iter()
+                .map(|(name, parameter)| Ok((name.into(), parameter.try_into()?)))
+                .collect::<Result<_, Self::Error>>()?,
+            compaction: role.compaction.map(|compaction| Compaction {
+                threshold: compaction.threshold,
+                instructions: compaction.instructions,
+            }),
+            system_prompt: role.system_prompt,
+        };
+        unsupported(&extensions)?;
+        Ok(definition)
+    }
+}
+
 impl<N: From<String>> From<Selection> for Configured<N> {
     fn from(selection: Selection) -> Self {
         Self {
             name: selection.name.into(),
             config: selection.config,
+        }
+    }
+}
+
+impl<N: Into<String>> From<Configured<N>> for Selection {
+    fn from(configured: Configured<N>) -> Self {
+        Self {
+            name: configured.name.into(),
+            config: configured.config,
         }
     }
 }
@@ -280,73 +179,141 @@ impl From<Parameter> for RoleParameter {
     }
 }
 
-fn insert(extensions: &mut JsonObject, key: &str, value: Option<impl Into<JsonValue>>) {
-    if let Some(value) = value {
-        extensions.insert(key.into(), value.into());
+impl TryFrom<RoleParameter> for Parameter {
+    type Error = serde_json::Error;
+
+    fn try_from(parameter: RoleParameter) -> Result<Self, Self::Error> {
+        let mut extensions = parameter.extensions;
+        let target = match parameter.target {
+            RoleParameterTarget::Model(path) => Target::Model { path },
+            RoleParameterTarget::Tool(tool, path) => Target::Tool {
+                tool: tool.into(),
+                path,
+            },
+            RoleParameterTarget::Extensions(path) => match path.split_first() {
+                Some((key, path)) if key == RoleWorkspace::KEY => Target::Workspace {
+                    path: path.to_vec(),
+                },
+                _ => {
+                    return Err(serde::de::Error::custom(
+                        "parameter targets an unsupported extension",
+                    ));
+                }
+            },
+        };
+        let parameter = Self {
+            title: take(&mut extensions, TITLE)?,
+            description: take(&mut extensions, DESCRIPTION)?,
+            schema: take(&mut extensions, SCHEMA)?,
+            target,
+        };
+        unsupported(&extensions)?;
+        Ok(parameter)
     }
 }
 
-fn valid_name(name: &str) -> bool {
+/// Returns whether a role name is valid.
+pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+fn insert(extensions: &mut JsonObject, key: &str, value: Option<impl Into<JsonValue>>) {
+    if let Some(value) = value {
+        extensions.insert(key.into(), value.into());
+    }
+}
+
+fn take<T: DeserializeOwned>(
+    extensions: &mut JsonObject,
+    key: &str,
+) -> Result<Option<T>, serde_json::Error> {
+    extensions
+        .remove(key)
+        .map_or(Ok(None), Option::<T>::deserialize)
+}
+
+fn unsupported(extensions: &JsonObject) -> Result<(), serde_json::Error> {
+    extensions.keys().next().map_or(Ok(()), |key| {
+        Err(serde::de::Error::custom(format_args!(
+            "unsupported extension {key}"
+        )))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api_types::ApiRole;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    fn parse(name: &str, source: &str) -> io::Result<Role> {
-        RoleDefinition::parse(name.into(), source)?.try_into()
+    fn role(name: &str, definition: Value) -> Role {
+        serde_json::from_value::<RoleDefinition>(definition)
+            .unwrap()
+            .into_role(name.into())
+            .unwrap()
     }
 
     #[test]
     fn role_metadata_exposes_parameters_and_configured_defaults() {
-        let source = "\
----
-title: Reviewer
-description: Review changes.
-hidden: true
-model:
-  name: provider:model
-  config:
-    effort: high
-    token: private
-tools:
-  search:
-    name: provider:search
-    config:
-      enabled: false
-workspace:
-  name: host:default
-  config:
-    cwd: /project
-parameters:
-  effort:
-    title: Reasoning
-    schema:
-      type: string
-      enum: [low, high]
-    target: {type: model, path: [effort]}
-  search:
-    target: {type: tool, tool: search, path: [enabled]}
-  cwd:
-    target: {type: workspace, path: [config, cwd]}
-  missing:
-    target: {type: model, path: [missing]}
-  token:
-    schema:
-      type: string
-      writeOnly: true
-    target: {type: model, path: [token]}
----
-Private instructions.
-";
-
-        let role = parse("reviewer", source).unwrap();
+        let role = role(
+            "reviewer",
+            json!({
+                "title": "Reviewer",
+                "description": "Review changes.",
+                "hidden": true,
+                "model": {
+                    "name": "provider:model",
+                    "config": {
+                        "effort": "high",
+                        "token": "private",
+                    },
+                },
+                "tools": {
+                    "search": {
+                        "name": "provider:search",
+                        "config": {
+                            "enabled": false,
+                        },
+                    },
+                },
+                "workspace": {
+                    "name": "host:default",
+                    "config": {
+                        "cwd": "/project",
+                    },
+                },
+                "parameters": {
+                    "effort": {
+                        "title": "Reasoning",
+                        "schema": {
+                            "type": "string",
+                            "enum": ["low", "high"],
+                        },
+                        "target": {"type": "model", "path": ["effort"]},
+                    },
+                    "search": {
+                        "target": {"type": "tool", "tool": "search", "path": ["enabled"]},
+                    },
+                    "cwd": {
+                        "target": {"type": "workspace", "path": ["config", "cwd"]},
+                    },
+                    "missing": {
+                        "target": {"type": "model", "path": ["missing"]},
+                    },
+                    "token": {
+                        "schema": {
+                            "type": "string",
+                            "writeOnly": true,
+                        },
+                        "target": {"type": "model", "path": ["token"]},
+                    },
+                },
+                "system_prompt": "Private instructions.",
+            }),
+        );
         let role = ApiRole::try_from(role).unwrap();
         let value = serde_json::to_value(role).unwrap();
 
@@ -373,164 +340,95 @@ Private instructions.
     }
 
     #[test]
-    fn parse_preserves_prompt_and_configuration() {
-        let source = "\
----
-model:
-  name: provider:model
-  config:
-    effort: high
-tools:
-  search:
-    name: provider:search
-workspace:
-  name: sprites:default
-  id: '7'
-parameters:
-  effort:
-    target:
-      type: model
-      path: [effort]
-  repos:
-    target:
-      type: workspace
-      path: [config, repos]
----
+    fn definitions_round_trip_through_roles() {
+        let definition = json!({
+            "title": "Reviewer",
+            "hidden": false,
+            "model": {
+                "name": "provider:model",
+                "config": {
+                    "effort": "high",
+                },
+            },
+            "tools": {
+                "search": {
+                    "name": "provider:search",
+                    "config": {},
+                },
+            },
+            "workspace": {
+                "name": "host:default",
+                "config": {
+                    "cwd": "/project",
+                },
+                "id": "7",
+            },
+            "parameters": {
+                "cwd": {
+                    "title": "Directory",
+                    "target": {
+                        "type": "workspace",
+                        "path": ["config", "cwd"],
+                    },
+                },
+                "enabled": {
+                    "target": {
+                        "type": "tool",
+                        "tool": "search",
+                        "path": ["enabled"],
+                    },
+                },
+            },
+            "compaction": {
+                "threshold": 1000,
+            },
+            "system_prompt": "Review changes.\n",
+        });
 
-Be helpful.
-
----
-Keep this separator.
-";
-
-        let role = parse("assistant", source).unwrap();
-        assert_eq!(role.name, "assistant".into());
-        assert_eq!(role.model.name, "provider:model".into());
-        assert_eq!(role.model.config["effort"], "high");
-        assert_eq!(role.tools[&"search".into()].name, "provider:search".into());
+        let role = role("reviewer", definition.clone());
         assert_eq!(
-            role.parameters[&"effort".into()].target,
-            RoleParameterTarget::Model(vec!["effort".into()]),
-        );
-        assert_eq!(
-            role.parameters[&"repos".into()].target,
+            role.parameters[&"cwd".into()].target,
             RoleParameterTarget::Extensions(vec![
                 "fleet.workspace".into(),
                 "config".into(),
-                "repos".into(),
+                "cwd".into(),
             ]),
         );
-        assert_eq!(
-            serde_json::Value::from(role.extensions),
-            json!({
-                "fleet.workspace": {
-                    "name": "sprites:default",
-                    "config": {},
-                    "id": "7",
-                },
-            }),
-        );
-        assert_eq!(
-            role.system_prompt,
-            "\nBe helpful.\n\n---\nKeep this separator.\n",
-        );
+        let role = RoleDefinition::try_from(role).unwrap();
+        assert_eq!(serde_json::to_value(role).unwrap(), definition);
     }
 
     #[test]
-    fn definition_keeps_the_shape_of_the_file() {
-        let source = "\
----
-title: Reviewer
-model:
-  name: provider:model
-  config:
-    effort: high
-tools:
-  search:
-    name: provider:search
-workspace:
-  name: host:default
-  config:
-    cwd: /project
-  id: '7'
-parameters:
-  cwd:
-    title: Directory
-    target: {type: workspace, path: [config, cwd]}
-  enabled:
-    target: {type: tool, tool: search, path: [enabled]}
-compaction:
-  threshold: 1000
----
-Review changes.
-";
-
-        let definition = RoleDefinition::parse("reviewer".into(), source).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(definition).unwrap(),
-            json!({
-                "name": "reviewer",
-                "title": "Reviewer",
-                "hidden": false,
-                "model": {
-                    "name": "provider:model",
-                    "config": {
-                        "effort": "high",
-                    },
-                },
-                "tools": {
-                    "search": {
-                        "name": "provider:search",
-                        "config": {},
-                    },
-                },
-                "workspace": {
-                    "name": "host:default",
-                    "config": {
-                        "cwd": "/project",
-                    },
-                    "id": "7",
-                },
-                "parameters": {
-                    "cwd": {
-                        "title": "Directory",
-                        "target": {
-                            "type": "workspace",
-                            "path": ["config", "cwd"],
-                        },
-                    },
-                    "enabled": {
-                        "target": {
-                            "type": "tool",
-                            "tool": "search",
-                            "path": ["enabled"],
-                        },
-                    },
-                },
-                "compaction": {
-                    "threshold": 1000,
-                },
-                "system_prompt": "Review changes.\n",
-            }),
-        );
-    }
-
-    #[test]
-    fn parse_rejects_missing_frontmatter_and_unknown_fields() {
-        for source in [
-            "Be helpful.",
-            "---\nmodel:\n  name: provider:model\n",
-            "---\nmodel:\n  name: provider:model\ntoolz: {}\n---\n",
-            "---\nmodel:\n  name: provider:model\nextensions: {}\n---\n",
+    fn definitions_reject_unknown_fields() {
+        for definition in [
+            json!({}),
+            json!({"model": {"name": "provider:model"}, "name": "assistant"}),
+            json!({"model": {"name": "provider:model"}, "extensions": {}}),
         ] {
-            let error = parse("assistant", source).unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            serde_json::from_value::<RoleDefinition>(definition).unwrap_err();
         }
     }
 
     #[test]
-    fn role_names_cannot_escape_the_directory() {
+    fn unrepresentable_roles_are_errors() {
+        let mut extended = role("assistant", json!({"model": {"name": "provider:model"}}));
+        extended.extensions.insert("other".into(), true.into());
+        let mut targeted = role("assistant", json!({"model": {"name": "provider:model"}}));
+        targeted.parameters.insert(
+            "other".into(),
+            RoleParameter {
+                target: RoleParameterTarget::Extensions(vec!["other".into()]),
+                extensions: JsonObject::new(),
+            },
+        );
+
+        for role in [extended, targeted] {
+            RoleDefinition::try_from(role).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn role_names_are_path_segments() {
         for name in [
             "",
             ".",

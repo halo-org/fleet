@@ -68,6 +68,7 @@ impl Store {
         transaction.open_table(crate::blob_records::BYTES)?;
         transaction.open_table(crate::blob_records::UPLOADS)?;
         transaction.open_table(crate::blob_records::CHUNKS)?;
+        transaction.open_table(crate::role_records::ROLES)?;
         transaction.commit()?;
         let notifications = Notifications::default();
         let worker = Arc::new(WorkerHandle::new(database, notifications.clone())?);
@@ -102,6 +103,12 @@ impl Store {
                         } else {
                             Err(StoreError::IdempotencyConflict)
                         };
+                    }
+                    if crate::role_records::apply(&transaction, &mut records, &request)? {
+                        records.put(&request_key, &request)?;
+                        drop(records);
+                        transaction.commit()?;
+                        return Ok(());
                     }
                     let edit = apply_collection_request(&mut records, &request)?;
                     if let Some((id, changed, summary_changed)) = edit {
@@ -191,7 +198,11 @@ fn apply_collection_request(
                 crate::agents::now_millis(),
             )?,
         ),
-        Request::CreateAgent(..) | Request::SendMessage(..) | Request::InterruptAgent(..) => {
+        Request::CreateAgent(..)
+        | Request::SendMessage(..)
+        | Request::InterruptAgent(..)
+        | Request::PutRole { .. }
+        | Request::DeleteRole { .. } => {
             return Ok(None);
         }
     };
@@ -230,7 +241,11 @@ fn apply_agent_request(
         Request::InterruptAgent(id, message) => {
             (records.agent(*id)?, message.as_ref(), true, false)
         }
-        Request::SetTitle { .. } | Request::SetPinned { .. } | Request::SetInbox { .. } => {
+        Request::SetTitle { .. }
+        | Request::SetPinned { .. }
+        | Request::SetInbox { .. }
+        | Request::PutRole { .. }
+        | Request::DeleteRole { .. } => {
             unreachable!()
         }
     };

@@ -27,7 +27,7 @@ pub(crate) use self::{
     admin_auth::AdminToken,
     api_types::{
         ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
-        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRoleEntry,
+        ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRole, ApiRoleDefinition,
         ApiToolCallRecord, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery,
         InterruptAgentRequest, SinceQuery,
     },
@@ -40,7 +40,7 @@ pub(crate) use self::{
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
     plugins::{PluginConfig, ProviderConfig},
-    roles::{InvalidRole, RoleDefinition, Roles},
+    roles::RoleDefinition,
 };
 
 use core::{error::Error, net::SocketAddr, pin::pin, time::Duration};
@@ -118,12 +118,11 @@ async fn start(admin_token: Option<OsString>) -> Result<(), Box<dyn Error + Send
     .await?;
     let providers =
         crate::plugins::load(&config, &config_dir, &cache_dir, &authentication, &store).await?;
-    let roles = Roles::new(config_dir.join("roles"));
     let address = config.listen;
     let fleet = fleet
         .with_authentication(authentication)
-        .with_configuration(config, roles.clone());
-    let agents = fleet.run(&roles, &providers, &providers);
+        .with_configuration(config);
+    let agents = fleet.run(&providers, &providers);
 
     let result = run(
         admin_token,

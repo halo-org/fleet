@@ -102,4 +102,3 @@ wasmtime-wasi = { version = "50.0.1", default-features = false }
 wasmtime-wasi-http = { version = "50.0.1", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 wit-bindgen = { version = "0.63.0", default-features = false }
-yaml_serde = { version = "0.10.7", default-features = false }

@@ -57,13 +57,16 @@ approved HTTP origin. It receives the connection's bearer credentials.
 
 A role selects a model and its runtime options:
 
-```yaml
-model:
-  name: openai:gpt-6.1-sol
-  config:
-    effort: xhigh
-    tools:
-      - type: web_search
+```json
+{
+  "model": {
+    "name": "openai:gpt-6.1-sol",
+    "config": {
+      "effort": "xhigh",
+      "tools": [{ "type": "web_search" }]
+    }
+  }
+}
 ```
 
 Model config supports `effort`, `speed` and provider `tools`. Missing or null

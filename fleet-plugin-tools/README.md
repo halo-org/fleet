@@ -59,29 +59,28 @@ any workspace providers, including remote ones.
 
 Select the workspace in the role:
 
-```yaml
-tools:
-  bash:
-    name: tools:bash
-  read:
-    name: tools:read
-  write:
-    name: tools:write
-  edit:
-    name: tools:edit
-workspace:
-  name: host:default
-  config:
-    cwd: /home/user/project
+```json
+{
+  "tools": {
+    "bash": { "name": "tools:bash" },
+    "read": { "name": "tools:read" },
+    "write": { "name": "tools:write" },
+    "edit": { "name": "tools:edit" }
+  },
+  "workspace": {
+    "name": "host:default",
+    "config": { "cwd": "/home/user/project" }
+  }
+}
 ```
 
 The agent ID identifies its workspace environment by default. An optional `id`
 as a decimal string selects an existing environment, allowing agents to share
 it. Reuse both its name and config. Role parameters can target fields under the
-workspace with `type: workspace`.
+workspace with `"type": "workspace"`.
 
 Workspace selection and config come only from the `fleet.workspace` entry in
-the role's extensions, which Fleet role files spell `workspace`. Provider config
+the role's extensions, which Fleet role definitions spell `workspace`. Provider config
 and per-tool config accept `shell`, `timeout_ms`, `output_limit` and
 `read_limit`. Non-null tool settings override provider settings. An absent or
 null role workspace leaves the tools without a workspace.
