@@ -91,6 +91,14 @@ pub enum Request {
         inbox: u8,
         until: Option<u64>,
     },
+    PutRole {
+        expected: Option<u128>,
+        role: data::Role,
+    },
+    DeleteRole {
+        name: String,
+        expected: u128,
+    },
 }
 
 impl<T: ReadableTable<&'static [u8], &'static [u8]>> Records<T> {

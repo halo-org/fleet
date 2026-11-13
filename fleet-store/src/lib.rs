@@ -11,6 +11,9 @@
 //! including title/inbox mutations and the store's snooze-management methods.
 //! Persisted records, idempotency receipts, and index maintenance are shared by
 //! both configurations, so a database can be reopened with or without `queries`.
+//!
+//! The `roles` feature stores versioned roles and implements [`fleet_core::Roles`]. Role
+//! records live in their own table, which is created and preserved with all feature sets.
 
 mod agents;
 mod blob_records;
@@ -21,6 +24,9 @@ mod metadata;
 mod notifications;
 mod preview;
 mod records;
+mod role_records;
+#[cfg(feature = "roles")]
+mod roles;
 mod store;
 mod store_error;
 mod worker;
@@ -30,6 +36,8 @@ mod queries;
 
 #[cfg(feature = "blobs")]
 pub use self::blobs::{AgentBlobs, MAX_BLOB_BYTES, MAX_UPLOAD_CHUNK_BYTES, Upload};
+#[cfg(feature = "roles")]
+pub use self::roles::{RoleVersion, StoredRole};
 pub(crate) use self::{
     notifications::{Notifications, Topic},
     worker::WorkerHandle,

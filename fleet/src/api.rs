@@ -2,13 +2,15 @@ use crate::api_types::{
     AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetPinnedRequest, SetTitleRequest,
 };
 use crate::{
-    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRoleEntry,
-    ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails, ErrorResponse, EventsQuery,
-    Fleet, FleetError, InterruptAgentRequest, SinceQuery,
+    ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
+    ApiRoleDefinition, ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails,
+    ErrorResponse, EventsQuery, Fleet, FleetError, InterruptAgentRequest, RoleDefinition,
+    SinceQuery,
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
 use fleet_kit::{QueriesErrorKind, QueryUpdate};
+use fleet_store::RoleVersion;
 use futures_util::Stream;
 use http_body_util::{
     BodyExt as _, Full, LengthLimitError, Limited, StreamBody, combinators::UnsyncBoxBody,
@@ -43,6 +45,10 @@ where
     Ok(response)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "routes each API request in one place"
+)]
 async fn route<B>(fleet: &Fleet, request: Request<B>) -> Result<Response<ResponseBody>, ApiError>
 where
     B: Body<Data = Bytes>,
@@ -63,6 +69,9 @@ where
         (&Method::GET, ["", "providers"]) => Ok(providers(fleet)),
         (&Method::GET, ["", "roles"]) => roles(fleet).await,
         (&Method::GET, ["", "roles", name]) => role(fleet, name).await,
+        (&Method::PUT, ["", "roles", name]) => put_role(fleet, name, &parts.headers, body).await,
+        (&Method::DELETE, ["", "roles", name]) => delete_role(fleet, name, &parts.headers).await,
+        (_, ["", "roles", _]) => Err(ApiError::MethodNotAllowed("GET, PUT, DELETE")),
         (&Method::POST, ["", "agents"]) => create_agent(fleet, &parts.headers, body).await,
         (&Method::GET, ["", "agents"]) => {
             let query: AgentsReadQuery = parse_query(parts.uri.query())?;
@@ -136,7 +145,7 @@ where
         (_, ["", "agents", _, "interrupts"]) => Err(ApiError::MethodNotAllowed("POST")),
         (
             _,
-            ["", "agents" | "roles", _]
+            ["", "agents", _]
             | ["", "providers" | "roles"]
             | [
                 "",
@@ -166,13 +175,17 @@ fn providers(fleet: &Fleet) -> Response<ResponseBody> {
 }
 
 async fn roles(fleet: &Fleet) -> Result<Response<ResponseBody>, ApiError> {
-    let roles: Vec<_> = fleet
+    let roles = fleet
         .roles()
         .await
         .map_err(ApiError::Fleet)?
         .into_iter()
-        .map(ApiRoleEntry::from)
-        .collect();
+        .map(|stored| {
+            let name = stored.role.name.clone();
+            ApiRole::try_from(stored.role)
+                .map_err(|error| ApiError::InvalidRole(format!("Role {name} is invalid: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut response = json_response(StatusCode::OK, &roles);
     response
         .headers_mut()
@@ -184,18 +197,60 @@ async fn role(fleet: &Fleet, name: &str) -> Result<Response<ResponseBody>, ApiEr
     let role = fleet
         .role(&name.into())
         .await
-        .map_err(|error| match error {
-            FleetError::Role(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                ApiError::InvalidRole(error.to_string())
-            }
-            error => ApiError::Fleet(error),
-        })?
+        .map_err(ApiError::Fleet)?
         .ok_or(ApiError::RoleNotFound)?;
+    let role = ApiRoleDefinition::try_from(role)
+        .map_err(|error| ApiError::InvalidRole(format!("Role {name} is invalid: {error}")))?;
     let mut response = json_response(StatusCode::OK, &role);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+async fn put_role<B>(
+    fleet: &Fleet,
+    name: &str,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    if !crate::roles::valid_name(name) {
+        return Err(ApiError::BadRequest(
+            "Role names may contain only ASCII letters, digits, - and _".into(),
+        ));
+    }
+    let key = idempotency_key(headers)?;
+    let expected = expected_role_version(headers)?;
+    let definition: RoleDefinition = read_json(headers, body).await?;
+    let role = definition
+        .into_role(name.into())
+        .map_err(|error| ApiError::BadRequest(format!("Invalid role: {error}")))?;
+    fleet
+        .put_role(key, role, expected)
+        .await
+        .map_err(ApiError::Fleet)?;
+    Ok(match expected {
+        Some(_) => empty_response(StatusCode::NO_CONTENT),
+        None => created_response(&format!("/roles/{name}")),
+    })
+}
+
+async fn delete_role(
+    fleet: &Fleet,
+    name: &str,
+    headers: &HeaderMap,
+) -> Result<Response<ResponseBody>, ApiError> {
+    let key = idempotency_key(headers)?;
+    let expected = expected_version(headers, "role")?.into();
+    fleet
+        .delete_role(key, name.into(), expected)
+        .await
+        .map_err(ApiError::Fleet)?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
 async fn agents_subscription(
@@ -240,6 +295,21 @@ fn expected_version(headers: &HeaderMap, resource: &str) -> Result<u128, ApiErro
         return Err(ApiError::BadRequest("If-Match must occur once".into()));
     }
     parse_id(expected)
+}
+
+fn expected_role_version(headers: &HeaderMap) -> Result<Option<RoleVersion>, ApiError> {
+    let mut values = headers.get_all(header::IF_NONE_MATCH).iter();
+    match (
+        values.next(),
+        values.next(),
+        headers.contains_key(header::IF_MATCH),
+    ) {
+        (None, _, true) => Ok(Some(expected_version(headers, "role")?.into())),
+        (Some(value), None, false) if value == "*" => Ok(None),
+        _ => Err(ApiError::BadRequest(
+            "Use If-Match with the quoted role version, or If-None-Match: * to create".into(),
+        )),
+    }
 }
 
 async fn set_title<B>(
@@ -656,7 +726,6 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    #[expect(clippy::too_many_lines, reason = "maps each API error in one place")]
     fn details(&self) -> (StatusCode, &'static str, &str) {
         match self {
             Self::Authentication(error) => crate::authentication_api::error_details(error),
@@ -699,7 +768,7 @@ impl ApiError {
             Self::Fleet(FleetError::Store(fleet_store::StoreError::PreconditionFailed)) => (
                 StatusCode::PRECONDITION_FAILED,
                 "precondition_failed",
-                "Agent resource changed",
+                "Resource changed",
             ),
             Self::Blob(error)
             | Self::Fleet(FleetError::Store(
@@ -756,11 +825,6 @@ impl ApiError {
                     "Internal server error",
                 ),
             },
-            Self::Fleet(FleetError::Role(_)) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Could not read roles",
-            ),
         }
     }
 

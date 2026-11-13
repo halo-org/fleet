@@ -1,4 +1,4 @@
-use crate::{InvalidRole, roles};
+use crate::{RoleDefinition, roles};
 use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
@@ -10,6 +10,7 @@ use fleet_kit::{
     AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
     MessageRecord, Preview, PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
+use fleet_store::StoredRole;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{DeserializeOwned, value::MapDeserializer},
@@ -44,19 +45,17 @@ pub struct ApiRole {
     pub parameters: BTreeMap<String, ApiRoleParameter>,
 }
 
-/// An entry in the list of roles.
+/// A role's full definition.
 #[derive(Serialize)]
-#[serde(untagged)]
-pub enum ApiRoleEntry {
-    /// A valid role.
-    Role(ApiRole),
-    /// A role that could not be read.
-    Invalid {
-        /// The role name.
-        name: String,
-        /// Why the role is invalid.
-        error: String,
-    },
+pub struct ApiRoleDefinition {
+    /// The role name.
+    pub name: String,
+    /// The role version, used by edits' If-Match precondition.
+    #[serde(serialize_with = "serialize_id")]
+    pub version: u128,
+    /// The definition.
+    #[serde(flatten)]
+    pub definition: RoleDefinition,
 }
 
 /// A role parameter.
@@ -917,22 +916,15 @@ impl TryFrom<Role> for ApiRole {
     }
 }
 
-impl From<Result<Role, InvalidRole>> for ApiRoleEntry {
-    fn from(role: Result<Role, InvalidRole>) -> Self {
-        let role = role.and_then(|role| {
-            let name = role.name.clone();
-            ApiRole::try_from(role).map_err(|error| InvalidRole {
-                name,
-                error: error.into(),
-            })
-        });
-        match role {
-            Ok(role) => Self::Role(role),
-            Err(InvalidRole { name, error }) => Self::Invalid {
-                name: name.to_string(),
-                error: error.to_string(),
-            },
-        }
+impl TryFrom<StoredRole> for ApiRoleDefinition {
+    type Error = serde_json::Error;
+
+    fn try_from(stored: StoredRole) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: stored.role.name.to_string(),
+            version: stored.version.into(),
+            definition: stored.role.try_into()?,
+        })
     }
 }
 

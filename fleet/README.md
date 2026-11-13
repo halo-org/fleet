@@ -1,6 +1,6 @@
 # Fleet configuration
 
-Fleet reads `config.json` and `roles/*.md` from its platform config directory.
+Fleet reads `config.json` from its platform config directory.
 On Linux this is `$XDG_CONFIG_HOME/fleet`, or `~/.config/fleet`.
 On macOS it is `~/Library/Application Support/fleet`.
 On Windows it is `%APPDATA%\fleet`.
@@ -105,57 +105,77 @@ The plugins in this repository are published for each commit on `main`, for exam
 
 ## Roles
 
-`roles/assistant.md` defines a role named `assistant`:
+Roles are stored in `fleet.db` and edited through the API. A role definition is
+a JSON object:
 
-```markdown
----
-model:
-  name: work:example
-  config: {}
-tools: {}
----
-You are a helpful assistant.
+```json
+{
+  "model": {
+    "name": "work:example",
+    "config": {}
+  },
+  "tools": {},
+  "system_prompt": "You are a helpful assistant."
+}
 ```
 
-The Markdown body is the system prompt. YAML frontmatter supports `title`,
-`description`, `hidden`, `model`, `tools`, `workspace`, `parameters` and
-`compaction`. Only `model` is required. Each model or tool selection has a
-`name` and an optional `config` object. Tools are keyed by their alias.
-`workspace` selects a workspace for the tools, as described by the tools plugin.
+Definitions support `title`, `description`, `hidden`, `model`, `tools`,
+`workspace`, `parameters`, `compaction` and `system_prompt`. Only `model` is
+required. Each model or tool selection has a `name` and an optional `config`
+object. Tools are keyed by their alias. `workspace` selects a workspace for the
+tools, as described by the tools plugin.
 
 OpenAI web search is enabled through the model's configuration:
 
-```yaml
-model:
-  name: openai:gpt-6-astra
-  config:
-    tools:
-      - type: web_search
+```json
+{
+  "model": {
+    "name": "openai:gpt-6-astra",
+    "config": {
+      "tools": [{ "type": "web_search" }]
+    }
+  }
+}
 ```
 
 These tools run within the model provider and can be used alongside the role's
 ordinary tools. Each definition accepts OpenAI's web search options, such as
 `search_context_size` and `filters`. Missing, null or empty `tools` disables
-provider tools. Role parameters can target `[tools]` in the model configuration.
+provider tools. Role parameters can target `["tools"]` in the model configuration.
 Provider tool calls are retained for replay with the same provider and model.
 They are omitted when either changes.
 
 Parameters have a `target` and optional `title`, `description` and `schema`.
-Targets use `type: model`, `type: tool` or `type: workspace`, with a `path` array
-of object keys. Tool targets also specify the tool alias in `tool`. Workspace
-paths start at the role's `workspace`, for example `[config, cwd]`. Compaction
-accepts `threshold` and `instructions`.
+Targets use `"type": "model"`, `"type": "tool"` or `"type": "workspace"`, with a
+`path` array of object keys. Tool targets also specify the tool alias in `tool`.
+Workspace paths start at the role's `workspace`, for example `["config", "cwd"]`.
+Compaction accepts `threshold` and `instructions`.
 
-Role names follow the same naming rules as providers. Role files are read on each
-lookup, so edits apply without restarting Fleet.
+Role names follow the same naming rules as providers. Agents look up their role
+on each turn, so edits apply to running agents without restarting Fleet.
 
 `GET /providers` lists provider names and their plugin names. `GET /roles` lists
-roles with their display metadata and parameters. An invalid role file
-appears as `{"name": ..., "error": ...}` without failing the list.
-`GET /roles/{name}` returns a role's full definition in the shape of its file,
-with `name` and `system_prompt`. An invalid role returns `invalid_role` with
-the reason. `GET /connections` includes each connection's owning provider.
-These endpoints do not expose plugin configuration or credentials.
+roles with their display metadata and parameters. `GET /roles/{name}` returns a
+role's full definition with its `name` and `version`. `GET /connections` includes
+each connection's owning provider. These endpoints do not expose plugin
+configuration or credentials.
+
+`PUT /roles/{name}` stores a definition, without `name` or `version`, and requires
+an `Idempotency-Key`. Send `If-None-Match: *` to create a role or `If-Match` with
+the quoted version to replace one. `DELETE /roles/{name}` also requires an
+`Idempotency-Key` and `If-Match`. A changed or missing role returns
+`precondition_failed`.
+Versions are unique within the database, so a recreated role does not match an
+earlier version. To import a role, send its definition:
+
+```sh
+curl -X PUT http://127.0.0.1:1337/roles/assistant \
+  -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: import-assistant" \
+  -H "If-None-Match: *" \
+  --data @assistant.json
+```
 
 Role definitions, including model and tool config and system prompts, are visible
 to API clients. Keep credentials in connections, not in roles.
@@ -166,27 +186,29 @@ Roles and parameters have optional titles and descriptions. Hidden roles remain
 usable by name but do not appear in the role picker. Parameters may describe
 their values with a JSON Schema:
 
-```yaml
-title: Reviewer
-description: Review code changes.
-hidden: false
-model:
-  name: work:example
-  config:
-    effort: high
-parameters:
-  effort:
-    title: Reasoning effort
-    schema:
-      type: string
-      oneOf:
-        - const: low
-          title: Low
-        - const: high
-          title: High
-    target:
-      type: model
-      path: [effort]
+```json
+{
+  "title": "Reviewer",
+  "description": "Review code changes.",
+  "hidden": false,
+  "model": {
+    "name": "work:example",
+    "config": { "effort": "high" }
+  },
+  "parameters": {
+    "effort": {
+      "title": "Reasoning effort",
+      "schema": {
+        "type": "string",
+        "oneOf": [
+          { "const": "low", "title": "Low" },
+          { "const": "high", "title": "High" }
+        ]
+      },
+      "target": { "type": "model", "path": ["effort"] }
+    }
+  }
+}
 ```
 
 The API exposes `title`, `description`, `hidden` and `parameters` as ordinary

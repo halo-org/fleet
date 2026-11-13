@@ -52,7 +52,7 @@ impl fmt::Display for StoreError {
             Self::BlobConflict => f.write_str("blob ID already names different content"),
             Self::UploadNotFound => f.write_str("upload not found or expired"),
             Self::UploadConflict => f.write_str("upload offset or state changed"),
-            Self::PreconditionFailed => f.write_str("agent resource changed"),
+            Self::PreconditionFailed => f.write_str("resource changed"),
             Self::Conflict(message) => f.write_str(message),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::AgentNotFound => f.write_str("agent not found"),

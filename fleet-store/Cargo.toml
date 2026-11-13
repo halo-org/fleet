@@ -27,3 +27,4 @@ futures-executor = { workspace = true, features = ["std"] }
 [features]
 queries = ["dep:fleet-kit"]
 blobs = ["dep:fleet-kit", "dep:image", "dep:sha2"]
+roles = []

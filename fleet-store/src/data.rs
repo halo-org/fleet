@@ -1,10 +1,11 @@
 use fleet_core::JsonObject;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: u128,
-    pub role: Role,
+    pub role: Configured,
     pub extensions: JsonObject,
 }
 
@@ -139,6 +140,36 @@ pub enum TurnEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
+    pub name: String,
+    pub parameters: BTreeMap<String, RoleParameter>,
+    pub model: Configured,
+    pub tools: BTreeMap<String, Configured>,
+    pub system_prompt: String,
+    pub compaction: Option<RoleCompaction>,
+    pub extensions: JsonObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleParameter {
+    pub target: RoleParameterTarget,
+    pub extensions: JsonObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoleParameterTarget {
+    Model(Vec<String>),
+    Tool(String, Vec<String>),
+    Extensions(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleCompaction {
+    pub threshold: Option<u32>,
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Configured {
     pub name: String,
     pub config: JsonObject,
 }
@@ -557,8 +588,108 @@ impl From<TurnEnd> for fleet_core::TurnEnd {
     }
 }
 
-impl From<fleet_core::Configured<fleet_core::RoleName>> for Role {
-    fn from(value: fleet_core::Configured<fleet_core::RoleName>) -> Self {
+impl From<fleet_core::Role> for Role {
+    fn from(value: fleet_core::Role) -> Self {
+        Self {
+            name: value.name.into(),
+            parameters: value
+                .parameters
+                .into_iter()
+                .map(|(name, parameter)| (name.into(), parameter.into()))
+                .collect(),
+            model: value.model.into(),
+            tools: value
+                .tools
+                .into_iter()
+                .map(|(alias, tool)| (alias.into(), tool.into()))
+                .collect(),
+            system_prompt: value.system_prompt,
+            compaction: value.compaction.map(Into::into),
+            extensions: value.extensions,
+        }
+    }
+}
+
+impl From<Role> for fleet_core::Role {
+    fn from(value: Role) -> Self {
+        Self {
+            name: value.name.into(),
+            parameters: value
+                .parameters
+                .into_iter()
+                .map(|(name, parameter)| (name.into(), parameter.into()))
+                .collect(),
+            model: value.model.into(),
+            tools: value
+                .tools
+                .into_iter()
+                .map(|(alias, tool)| (alias.into(), tool.into()))
+                .collect(),
+            system_prompt: value.system_prompt,
+            compaction: value.compaction.map(Into::into),
+            extensions: value.extensions,
+        }
+    }
+}
+
+impl From<fleet_core::RoleParameter> for RoleParameter {
+    fn from(value: fleet_core::RoleParameter) -> Self {
+        Self {
+            target: value.target.into(),
+            extensions: value.extensions,
+        }
+    }
+}
+
+impl From<RoleParameter> for fleet_core::RoleParameter {
+    fn from(value: RoleParameter) -> Self {
+        Self {
+            target: value.target.into(),
+            extensions: value.extensions,
+        }
+    }
+}
+
+impl From<fleet_core::RoleParameterTarget> for RoleParameterTarget {
+    fn from(value: fleet_core::RoleParameterTarget) -> Self {
+        match value {
+            fleet_core::RoleParameterTarget::Model(path) => Self::Model(path),
+            fleet_core::RoleParameterTarget::Tool(alias, path) => Self::Tool(alias.into(), path),
+            fleet_core::RoleParameterTarget::Extensions(path) => Self::Extensions(path),
+        }
+    }
+}
+
+impl From<RoleParameterTarget> for fleet_core::RoleParameterTarget {
+    fn from(value: RoleParameterTarget) -> Self {
+        match value {
+            RoleParameterTarget::Model(path) => Self::Model(path),
+            RoleParameterTarget::Tool(alias, path) => Self::Tool(alias.into(), path),
+            RoleParameterTarget::Extensions(path) => Self::Extensions(path),
+        }
+    }
+}
+
+impl From<fleet_core::RoleCompaction> for RoleCompaction {
+    fn from(value: fleet_core::RoleCompaction) -> Self {
+        Self {
+            threshold: value.threshold,
+            instructions: value.instructions,
+        }
+    }
+}
+
+impl From<RoleCompaction> for fleet_core::RoleCompaction {
+    fn from(value: RoleCompaction) -> Self {
+        Self {
+            threshold: value.threshold,
+            instructions: value.instructions,
+        }
+    }
+}
+
+impl<N: Into<String>> From<fleet_core::Configured<N>> for Configured {
+    fn from(value: fleet_core::Configured<N>) -> Self {
         Self {
             name: value.name.into(),
             config: value.config,
@@ -566,8 +697,8 @@ impl From<fleet_core::Configured<fleet_core::RoleName>> for Role {
     }
 }
 
-impl From<Role> for fleet_core::Configured<fleet_core::RoleName> {
-    fn from(value: Role) -> Self {
+impl<N: From<String>> From<Configured> for fleet_core::Configured<N> {
+    fn from(value: Configured) -> Self {
         Self {
             name: value.name.into(),
             config: value.config,
