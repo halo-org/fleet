@@ -19,6 +19,7 @@
       pluginNames = [
         "host"
         "openai"
+        "roles"
         "sprites"
         "tools"
       ];

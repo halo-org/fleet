@@ -1,0 +1,118 @@
+/// Reads and writes stored roles.
+///
+/// Agents look up their role on each turn, so edits apply to agents already using it.
+/// The host scopes idempotency keys to the calling agent.
+interface roles {
+    use types.{json-object, configured};
+
+    /// Where a role parameter overrides.
+    variant role-parameter-target {
+        /// A path in the model's config.
+        model(list<string>),
+        /// A tool alias and a path in that tool's config.
+        tool(tuple<string, list<string>>),
+        /// A path in the role's extensions.
+        extensions(list<string>),
+    }
+
+    /// A parameter exposed by a role.
+    record role-parameter {
+        /// The parameter name, unique within the role.
+        name: string,
+        /// Where the parameter's value overrides.
+        target: role-parameter-target,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// A tool available to a role.
+    record role-tool {
+        /// The name models see, unique within the role.
+        alias: string,
+        /// The tool name and config.
+        tool: configured,
+    }
+
+    /// The compaction settings of a role.
+    record role-compaction {
+        /// The input token count that triggers compaction, or none for the model's default.
+        threshold: option<u32>,
+        /// Custom summarization instructions, or none for the provider's default.
+        instructions: option<string>,
+    }
+
+    /// A role.
+    record role {
+        /// The name that uniquely identifies this role.
+        name: string,
+        /// The parameters this role exposes.
+        parameters: list<role-parameter>,
+        /// The model name and config.
+        model: configured,
+        /// The tools available to agents with this role.
+        tools: list<role-tool>,
+        /// The system prompt to pass to the model.
+        system-prompt: string,
+        /// The compaction settings, or none for the model's defaults.
+        compaction: option<role-compaction>,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The version of a stored role.
+    ///
+    /// Versions are unique within the host, so a recreated role has a new version.
+    record role-version {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// A role with its version.
+    record stored-role {
+        /// The role.
+        role: role,
+        /// The version of the role.
+        version: role-version,
+    }
+
+    /// The kind of error returned by the roles host.
+    enum roles-error-kind {
+        /// The role's version does not match the expected version.
+        precondition-failed,
+        /// The idempotency key was used with different arguments.
+        idempotency-conflict,
+        /// The host does not accept the role.
+        invalid-role,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by the roles host.
+    record roles-error {
+        /// The kind of error.
+        kind: roles-error-kind,
+        /// A description of the error.
+        message: string,
+    }
+
+    /// Lists the stored roles by name.
+    %list: async func() -> result<list<stored-role>, roles-error>;
+
+    /// Returns a stored role.
+    get: async func(name: string) -> result<option<stored-role>, roles-error>;
+
+    /// Creates or replaces a role if its version matches.
+    ///
+    /// No expected version creates the role only if it does not exist. Storing an identical
+    /// role keeps its version. Retries with the same key and arguments succeed without
+    /// repeating the write, even if the role has since changed.
+    put: async func(idempotency-key: string, role: role, expected: option<role-version>)
+        -> result<_, roles-error>;
+}
+
+/// A host that provides roles.
+world role-host {
+    import roles;
+}

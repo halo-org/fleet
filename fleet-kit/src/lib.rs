@@ -9,6 +9,7 @@ mod authentication;
 mod blobs;
 mod extensions;
 mod ports;
+mod roles;
 mod types;
 mod workspaces;
 
@@ -24,6 +25,7 @@ pub use self::{
     blobs::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions, NoBlobs},
     extensions::Extension,
     ports::{Queries, QueriesErrorKind},
+    roles::{RoleStore, RoleStoreErrorKind, RoleVersion, StoredRole},
     types::{
         AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
         MessageRecord, Preview, PreviewContent, QueryResponse, QueryUpdate, Revision,

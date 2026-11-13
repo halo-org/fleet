@@ -17,6 +17,16 @@ pub mod blob_host {
 
 pub use blob_host::fleet::providers::blobs;
 
+pub mod role_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "role-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub use role_host::fleet::providers::roles;
+
 pub mod authentication {
     wasmtime::component::bindgen!({
         path: "wit",

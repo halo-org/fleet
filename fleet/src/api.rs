@@ -9,8 +9,8 @@ use crate::{
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
+use fleet_kit::RoleVersion;
 use fleet_kit::{QueriesErrorKind, QueryUpdate};
-use fleet_store::RoleVersion;
 use futures_util::Stream;
 use http_body_util::{
     BodyExt as _, Full, LengthLimitError, Limited, StreamBody, combinators::UnsyncBoxBody,

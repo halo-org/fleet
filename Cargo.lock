@@ -619,6 +619,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-roles"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-plugin-sprites"
 version = "0.0.0"
 dependencies = [

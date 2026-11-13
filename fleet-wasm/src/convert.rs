@@ -14,7 +14,7 @@ use fleet_kit::{
     WorkspaceWrite,
 };
 
-fn json(object: &JsonObject) -> String {
+pub fn json(object: &JsonObject) -> String {
     serde_json::to_string(object).expect("JSON objects can be serialized")
 }
 

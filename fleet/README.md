@@ -228,6 +228,20 @@ Reset removes an override. A supplied `null` is an explicit value, and a schema'
 `default` annotation does not change the role's config. Schemas guide the form.
 They do not add validation to core.
 
+### Plugin access
+
+Approve `"roles": true` in a plugin's `capabilities` and have its component import
+`fleet:providers/roles@0.0.0`. Tool calls can then list, read and write every stored role.
+Model calls and metadata lookups receive no role access. Fleet accepts only valid names and
+roles that the API can represent as definitions. Idempotency keys are scoped to the provider
+and agent. The capability grants no deletion and applies no further policy. Plugins such as
+[`fleet-plugin-roles`](../fleet-plugin-roles) read their limits from provider config, which
+only administrators control.
+
+Agents look up their role on every turn. Write access lets an agent change its own model,
+tools and system prompt from its next turn, and those of every agent sharing a writable role.
+Give it only to agents trusted with the access of any role they can write.
+
 ## Images and blobs
 
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside

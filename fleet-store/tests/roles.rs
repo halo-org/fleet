@@ -6,7 +6,8 @@
 mod tests {
     use core::assert_matches;
     use fleet_core::{Configured, JsonObject, Role, Roles as _};
-    use fleet_store::{Store, StoreError, StoredRole};
+    use fleet_kit::{RoleStore as _, StoredRole};
+    use fleet_store::{Store, StoreError};
     use std::collections::BTreeMap;
 
     fn role(name: &str, system_prompt: &str) -> Role {

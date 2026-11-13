@@ -17,6 +17,7 @@ mod idle_handler;
 mod oauth;
 mod oauth_callback;
 mod oci;
+mod plugin_roles;
 mod plugins;
 mod roles;
 mod server;
@@ -39,6 +40,7 @@ pub(crate) use self::{
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
+    plugin_roles::PluginRoles,
     plugins::{PluginConfig, ProviderConfig},
     roles::RoleDefinition,
 };
@@ -117,7 +119,7 @@ async fn start(admin_token: Option<OsString>) -> Result<(), Box<dyn Error + Send
     )
     .await?;
     let providers =
-        crate::plugins::load(&config, &config_dir, &cache_dir, &authentication, &store).await?;
+        crate::plugins::load(&config, &config_dir, &cache_dir, &authentication, &fleet).await?;
     let address = config.listen;
     let fleet = fleet
         .with_authentication(authentication)

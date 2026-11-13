@@ -1,6 +1,7 @@
 use crate::{
     WasmBlobs, WasmCredentials, WasmOrigins, WasmWorkers, WasmWorkspaceHost,
     bindings::{configuration, credentials},
+    wasm_roles::WasmAgentRoles,
 };
 use std::sync::Arc;
 use wasmtime::{
@@ -24,6 +25,7 @@ pub struct WasmState {
     blobs: Option<WasmBlobs>,
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
+    roles: Option<WasmAgentRoles>,
     workspace_host: Option<WasmWorkspaceHost>,
     workers: Option<WasmWorkers>,
     limits: StoreLimits,
@@ -49,6 +51,7 @@ impl WasmState {
             blobs: None,
             config,
             credentials,
+            roles: None,
             workspace_host,
             workers,
             limits: StoreLimits::default(),
@@ -82,6 +85,14 @@ impl WasmState {
     pub fn with_blobs(mut self, blobs: Option<WasmBlobs>) -> Self {
         self.blobs = blobs;
         self
+    }
+
+    pub fn roles(&self) -> Option<WasmAgentRoles> {
+        self.roles.clone()
+    }
+
+    pub fn set_roles(&mut self, roles: Option<WasmAgentRoles>) {
+        self.roles = roles;
     }
 
     pub fn workspace_host(&self) -> Option<WasmWorkspaceHost> {

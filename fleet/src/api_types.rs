@@ -6,11 +6,11 @@ use fleet_core::{
     ModelReasoning, ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput,
     ToolResult, TurnEnd,
 };
+use fleet_kit::StoredRole;
 use fleet_kit::{
     AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
     MessageRecord, Preview, PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
-use fleet_store::StoredRole;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{DeserializeOwned, value::MapDeserializer},

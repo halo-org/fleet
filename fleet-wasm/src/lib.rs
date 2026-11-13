@@ -19,7 +19,8 @@
 //! through [`WasmWorkspaceHost`]. Blob imports delegate through [`WasmBlobs`]. Model calls can
 //! read only their input's blob references and cannot write. Tool access is supplied by an
 //! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
-//! Metadata lookups receive no blob capability.
+//! Metadata lookups receive no blob capability. Role imports delegate to an agent-scoped
+//! [`fleet_kit::RoleStore`] through [`WasmRoles`] and are available only to tool calls.
 //!
 //! # Private workers
 //!
@@ -97,6 +98,7 @@ mod wasm_process;
 mod wasm_process_group;
 mod wasm_prompts;
 mod wasm_registry;
+mod wasm_roles;
 mod wasm_state;
 mod wasm_tools;
 mod wasm_worker_connection;
@@ -112,6 +114,7 @@ pub use self::{
     wasm_error::WasmError,
     wasm_http::WasmOrigin,
     wasm_registry::{WasmProvider, WasmRegistry},
+    wasm_roles::WasmRoles,
     wasm_workspace_host::WasmWorkspaceHost,
 };
 

@@ -113,6 +113,7 @@ impl WasmProvider {
             workspace_host: capabilities.workspaces,
         };
         let blob_host = capabilities.blobs;
+        let roles = capabilities.roles;
         let workers = worker
             .map(|instance| WasmWorkers::new(instance, environment.clone()))
             .transpose()?;
@@ -130,6 +131,7 @@ impl WasmProvider {
         }
         if let Some(tools) = &mut tools {
             tools.set_blobs(blob_host);
+            tools.set_roles(roles);
         }
         let prompts = component
             .get_export_index(None, "fleet:providers/prompts@0.0.0")

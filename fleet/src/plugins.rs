@@ -1,9 +1,9 @@
-use crate::{Authentication, Config};
+use crate::{Authentication, Config, Fleet, PluginRoles};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
     Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmOrigin,
-    WasmProvider, WasmRegistry, WasmWorkspaceHost,
+    WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -71,6 +71,8 @@ pub struct PluginCapabilities {
     credentials: bool,
     #[serde(default)]
     workspaces: Vec<String>,
+    #[serde(default)]
+    roles: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,7 +110,7 @@ pub async fn load(
     directory: &Path,
     cache: &Path,
     authentication: &Authentication,
-    blobs: &fleet_store::Store,
+    fleet: &Fleet,
 ) -> Result<WasmRegistry, Box<dyn Error + Send + Sync>> {
     let order = provider_order(config)?;
     let wasm = Wasm::new()?;
@@ -169,10 +171,10 @@ pub async fn load(
                 .expect("dependency is loaded");
             workspaces.insert(dependency, provider.clone())?;
         }
-        let blob_store = blobs.clone();
+        let blob_store = fleet.blob_store().clone();
         let capabilities = WasmCapabilities {
             blobs: capabilities.blobs.then(|| {
-                WasmBlobs::new(blobs.clone()).with_agents(move |id| blob_store.agent_blobs(id))
+                WasmBlobs::new(blob_store.clone()).with_agents(move |id| blob_store.agent_blobs(id))
             }),
             http,
             filesystem: capabilities
@@ -191,6 +193,7 @@ pub async fn load(
                 .then(|| WasmCredentials::new(authentication.scope(name))),
             workspaces: (!capabilities.workspaces.is_empty())
                 .then(|| WasmWorkspaceHost::new(workspaces)),
+            roles: capabilities.roles.then(|| roles(fleet, name)),
         };
         let provider = wasm
             .provider(component, &provider.config, capabilities)
@@ -215,6 +218,12 @@ impl PluginConfig {
             Self::Local { capabilities, .. } | Self::Remote { capabilities, .. } => capabilities,
         }
     }
+}
+
+fn roles(fleet: &Fleet, provider: &str) -> WasmRoles {
+    let fleet = fleet.clone();
+    let provider = provider.to_owned();
+    WasmRoles::new(move |id| PluginRoles::new(fleet.clone(), &provider, id))
 }
 
 fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
