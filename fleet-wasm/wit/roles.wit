@@ -107,7 +107,8 @@ interface roles {
     ///
     /// No expected version creates the role only if it does not exist. Storing an identical
     /// role keeps its version. Retries with the same key and arguments succeed without
-    /// repeating the write, even if the role has since changed.
+    /// repeating the write, even if the role has since changed. Failed writes do not use up
+    /// their key.
     put: async func(idempotency-key: string, role: role, expected: option<role-version>)
         -> result<_, roles-error>;
 }

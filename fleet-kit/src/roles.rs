@@ -26,7 +26,8 @@ pub struct StoredRole {
 /// Mutations called repeatedly with the same idempotency key and arguments perform their side
 /// effects once. After a mutation succeeds, matching retries return success even if the role has
 /// since changed. Reusing a key with different arguments returns an
-/// [`IdempotencyConflict`](RoleStoreErrorKind::IdempotencyConflict) error.
+/// [`IdempotencyConflict`](RoleStoreErrorKind::IdempotencyConflict) error. Failed mutations do
+/// not use up their key.
 pub trait RoleStore {
     /// The error type returned by this provider.
     type Error: fleet_core::Error<RoleStoreErrorKind> + 'static;

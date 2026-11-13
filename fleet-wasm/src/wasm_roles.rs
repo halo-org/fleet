@@ -365,7 +365,27 @@ mod tests {
                         .await
                         .unwrap()
                         .unwrap();
-                        assert_eq!(Role::try_from(stored.role).unwrap(), role());
+                        assert_eq!(Role::try_from(stored.role.clone()).unwrap(), role());
+
+                        <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::put(
+                            accessor,
+                            "again".into(),
+                            stored.role,
+                            Some(stored.version),
+                        )
+                        .await
+                        .unwrap();
+                        let again = <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::get(
+                            accessor,
+                            "reviewer".into(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(
+                            RoleVersion::from(again.version),
+                            RoleVersion::from(stored.version)
+                        );
 
                         let error = <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::put(
                             accessor,

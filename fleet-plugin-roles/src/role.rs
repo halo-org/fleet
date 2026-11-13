@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// A role in the shape models read and write.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Role {
     name: String,
@@ -21,7 +21,7 @@ pub struct Role {
     extensions: Map<String, Value>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Selection {
     name: String,
@@ -29,7 +29,7 @@ struct Selection {
     config: Map<String, Value>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Parameter {
     target: Target,
@@ -37,7 +37,7 @@ struct Parameter {
     extensions: Map<String, Value>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Target {
     Model { path: Vec<String> },
@@ -45,7 +45,7 @@ enum Target {
     Extensions { path: Vec<String> },
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Compaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,11 +306,10 @@ mod tests {
                     },
                 },
             },
-            "compaction": {
-                "threshold": 1000,
-            },
+            "compaction": {},
             "extensions": {
                 "fleet.title": "Reviewer",
+                "fleet.hidden": false,
             },
         });
 
