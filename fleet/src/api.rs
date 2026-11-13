@@ -65,6 +65,10 @@ where
         return crate::authentication_api::route(fleet, &parts, &segments, body).await;
     }
 
+    if segments.get(1) == Some(&"notifications") {
+        return crate::notification_api::route(fleet, &parts, &segments, body).await;
+    }
+
     match (&parts.method, segments.as_slice()) {
         (&Method::GET, ["", "providers"]) => Ok(providers(fleet)),
         (&Method::GET, ["", "roles"]) => roles(fleet).await,

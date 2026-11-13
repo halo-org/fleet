@@ -531,6 +531,7 @@ dependencies = [
 name = "fleet"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
  "fleet-core",
  "fleet-kit",

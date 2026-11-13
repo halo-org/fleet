@@ -296,3 +296,29 @@ The OpenAI adapter replaces retained image data URLs with blob references before
 compaction. Those references remain inside its provider-specific state.
 
 Rebuild existing provider components against the updated WIT files before using this version.
+
+## Notifications
+
+Fleet sends a Web Push notification to every registered device when an agent completes a turn
+with no queued messages. Interrupted turns, snooze expiry and restoring an agent do not notify.
+The payload is JSON such as
+`{"kind":"turn_completed","agent":"123","title":"Fix the build","role":"coder"}`, with a null
+title when the agent has none. Clients compose the visible text.
+
+1. `GET /notifications` returns `{"web_push":{"public_key":"..."}}`, the base64url VAPID public
+   key to pass as `applicationServerKey` when subscribing.
+2. `PUT /notifications/devices/123` with JSON
+   `{"transport":"web_push","label":"Chrome on Android","endpoint":"https://...","keys":{"p256dh":"...","auth":"..."}}`
+   registers or replaces a device and returns 204. Allocate a random 128-bit ID per browser and
+   reuse it. Endpoints must use HTTPS and cannot be localhost or a non-public IP address.
+3. `DELETE /notifications/devices/123` removes a device and returns 204, even if it is unknown.
+
+Notifications are stored in `fleet.db`, one per agent, and delivered at least once. Before
+sending, Fleet checks that the agent has no newer events and nothing queued. Pushes use a 12 hour
+TTL and a per-agent `Topic`, so a newer notification replaces an undelivered one. Temporary push
+service failures are retried three times, then dropped. Devices whose subscriptions have expired
+are removed.
+
+The VAPID key pair is generated on first start and kept in a credential store in the
+`notifications` directory beside `fleet.db`. Deleting it invalidates every subscription. Clients
+resubscribe when they see a new key.

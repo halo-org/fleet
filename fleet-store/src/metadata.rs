@@ -155,8 +155,8 @@ mod tests {
                 .interrupt_agent("interrupt", agent.id, None)
                 .await
                 .unwrap();
-            let wake = store.notifications().listen(Topic::Wakes);
-            let preview = store.notifications().listen(Topic::Preview(1));
+            let wake = store.listeners().listen(Topic::Wakes);
+            let preview = store.listeners().listen(Topic::Preview(1));
 
             store.request("rename".into(), request).await.unwrap();
             assert_eq!(wake.now_or_never(), None);

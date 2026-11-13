@@ -14,6 +14,8 @@ mod error_chain;
 mod error_handler;
 mod fleet;
 mod idle_handler;
+mod notification_api;
+mod notifications;
 mod oauth;
 mod oauth_callback;
 mod oci;
@@ -23,6 +25,7 @@ mod roles;
 mod server;
 mod signals;
 mod subscription;
+mod web_push;
 
 pub(crate) use self::{
     admin_auth::AdminToken,
@@ -40,6 +43,7 @@ pub(crate) use self::{
     error_handler::ErrorHandler,
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
+    notifications::Notifications,
     plugin_roles::PluginRoles,
     plugins::{PluginConfig, ProviderConfig},
     roles::RoleDefinition,
@@ -118,11 +122,13 @@ async fn start(admin_token: Option<OsString>) -> Result<(), Box<dyn Error + Send
         fleet.idle_handler().clone(),
     )
     .await?;
+    let notifications = Notifications::open(&data_dir.join("notifications")).await?;
     let providers =
         crate::plugins::load(&config, &config_dir, &cache_dir, &authentication, &fleet).await?;
     let address = config.listen;
     let fleet = fleet
         .with_authentication(authentication)
+        .with_notifications(notifications)
         .with_configuration(config);
     let agents = fleet.run(&providers, &providers);
 

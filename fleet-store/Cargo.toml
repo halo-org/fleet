@@ -28,3 +28,4 @@ futures-executor = { workspace = true, features = ["std"] }
 queries = ["dep:fleet-kit"]
 blobs = ["dep:fleet-kit", "dep:image", "dep:sha2"]
 roles = ["dep:fleet-kit"]
+notifications = []

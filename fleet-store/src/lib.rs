@@ -15,13 +15,20 @@
 //! The `roles` feature stores versioned roles and implements [`fleet_core::Roles`] and
 //! `fleet_kit::RoleStore`. Role records live in their own table, which is created and preserved
 //! with all feature sets.
+//!
+//! The `notifications` feature claims notifications for completed turns and stores the devices
+//! that receive them. A notification is recorded in the transaction that completes a turn with no
+//! queued messages, with all feature sets.
 
 mod agents;
 mod blob_records;
 #[cfg(feature = "blobs")]
 mod blobs;
 mod data;
+mod listeners;
 mod metadata;
+mod notification_records;
+#[cfg(feature = "notifications")]
 mod notifications;
 mod preview;
 mod records;
@@ -37,8 +44,10 @@ mod queries;
 
 #[cfg(feature = "blobs")]
 pub use self::blobs::{AgentBlobs, MAX_BLOB_BYTES, MAX_UPLOAD_CHUNK_BYTES, Upload};
+#[cfg(feature = "notifications")]
+pub use self::notifications::NotificationClaim;
 pub(crate) use self::{
-    notifications::{Notifications, Topic},
+    listeners::{Listeners, Topic},
     worker::WorkerHandle,
 };
 pub use self::{store::Store, store_error::StoreError};

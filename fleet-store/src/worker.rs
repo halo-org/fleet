@@ -1,5 +1,5 @@
 use crate::{
-    Notifications, StoreError, Topic, data,
+    Listeners, StoreError, Topic, data,
     records::{self, AgentRecord, Records},
 };
 use fleet_core::{ModelResponseChunk, Wake};
@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, sync::mpsc, thread};
 
 pub struct Worker {
     pub database: redb::Database,
-    pub notifications: Notifications,
+    pub listeners: Listeners,
     pub previews: BTreeMap<u128, crate::preview::PreviewState>,
     pub wake_sequence: u128,
     pub wakes: BTreeMap<u128, (u128, Wake)>,
@@ -23,14 +23,14 @@ pub struct WorkerHandle {
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 
 impl WorkerHandle {
-    pub fn new(database: redb::Database, notifications: Notifications) -> Result<Self, StoreError> {
+    pub fn new(database: redb::Database, listeners: Listeners) -> Result<Self, StoreError> {
         let (sender, receiver) = mpsc::channel::<Job>();
         let thread = thread::Builder::new()
             .name("fleet-store".into())
             .spawn(move || {
                 let mut worker = Worker {
                     database,
-                    notifications,
+                    listeners,
                     previews: BTreeMap::new(),
                     wake_sequence: 0,
                     wakes: BTreeMap::new(),
@@ -112,16 +112,16 @@ impl Worker {
         };
         transaction.commit()?;
         if summary_changed {
-            self.notifications.notify(Topic::Agents);
-            self.notifications.notify(Topic::Snoozes);
+            self.listeners.notify(Topic::Agents);
+            self.listeners.notify(Topic::Snoozes);
         }
         if let Some(preview) = self.previews.get_mut(&agent_id)
             && (Some(preview.input_cursor) != latest_event || interrupted)
         {
             preview.invalidate();
-            self.notifications.notify(Topic::Preview(agent_id));
+            self.listeners.notify(Topic::Preview(agent_id));
         }
-        self.notifications.notify(Topic::Agent(agent_id));
+        self.listeners.notify(Topic::Agent(agent_id));
         Ok(result)
     }
 
@@ -136,7 +136,7 @@ impl Worker {
             Wake::Reconcile(agent_id.into())
         };
         self.wakes.insert(agent_id, (self.wake_sequence, wake));
-        self.notifications.notify(Topic::Wakes);
+        self.listeners.notify(Topic::Wakes);
     }
 
     pub fn publish(
@@ -149,7 +149,7 @@ impl Worker {
         if let Some(preview) = self.preview(agent_id, input_cursor)?
             && preview.apply(sequence, chunk)
         {
-            self.notifications.notify(Topic::Preview(agent_id));
+            self.listeners.notify(Topic::Preview(agent_id));
         }
         Ok(())
     }
@@ -162,7 +162,7 @@ impl Worker {
         if let Some(preview) = self.preview(agent_id, input_cursor)?
             && preview.start_compaction()
         {
-            self.notifications.notify(Topic::Preview(agent_id));
+            self.listeners.notify(Topic::Preview(agent_id));
         }
         Ok(())
     }

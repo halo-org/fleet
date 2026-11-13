@@ -139,9 +139,7 @@ impl Queries for Store {
             (self.clone(), None),
             move |(store, mut previous)| async move {
                 loop {
-                    let notified = store
-                        .notifications()
-                        .listen(Topic::Preview(agent_id.into()));
+                    let notified = store.listeners().listen(Topic::Preview(agent_id.into()));
                     let preview = store
                         .worker()
                         .call(move |worker| {
@@ -237,7 +235,7 @@ impl Queries for Store {
         after: Revision,
     ) -> Result<AgentUpdates, StoreError> {
         loop {
-            let notified = self.notifications().listen(Topic::Agent(agent_id.into()));
+            let notified = self.listeners().listen(Topic::Agent(agent_id.into()));
             let response = self
                 .query(agent_id, Some(after), move |records, agent| {
                     let Some(next) = u128::from(after).checked_add(1) else {
@@ -311,7 +309,7 @@ impl Queries for Store {
         message_id: MessageId,
     ) -> Result<TurnEndEvent, StoreError> {
         loop {
-            let notified = self.notifications().listen(Topic::Agent(agent_id.into()));
+            let notified = self.listeners().listen(Topic::Agent(agent_id.into()));
             let result = self
                 .query(agent_id, None, move |records, agent| {
                     let message = records
