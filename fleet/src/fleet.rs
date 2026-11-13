@@ -1951,4 +1951,40 @@ mod tests {
             assert_eq!(error["error"]["code"], "role_not_found");
         });
     }
+
+    #[test]
+    fn roles_are_imported_from_markdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fleet = Fleet::new(Store::memory().unwrap(), None);
+        let send = async |key: &str, content_type| {
+            let request = Request::builder()
+                .method("PUT")
+                .uri("/roles/assistant")
+                .header("content-type", content_type)
+                .header("idempotency-key", key)
+                .header("if-none-match", "*")
+                .body(Full::new(Bytes::from_static(
+                    b"---\nmodel:\n  name: work:model\n---\nBe helpful.\n",
+                )))
+                .unwrap();
+            crate::api::handle(fleet.clone(), request)
+                .await
+                .unwrap()
+                .status()
+        };
+
+        runtime.block_on(async {
+            let status = send("plain", "text/plain").await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            let status = send("markdown", "text/markdown; charset=utf-8").await;
+            assert_eq!(status, StatusCode::CREATED);
+
+            let role = fleet.role(&"assistant".into()).await.unwrap().unwrap();
+            assert_eq!(role.role.model.name, "work:model".into());
+            assert_eq!(role.role.system_prompt, "Be helpful.\n");
+        });
+    }
 }

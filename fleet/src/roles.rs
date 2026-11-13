@@ -77,6 +77,33 @@ struct Compaction {
 }
 
 impl RoleDefinition {
+    /// Parses Markdown with YAML frontmatter. The body is the system prompt.
+    pub fn from_markdown(source: &str) -> Result<Self, yaml_serde::Error> {
+        let mut lines = source.split_inclusive('\n');
+        if lines.next().map(str::trim_end) != Some("---") {
+            return Err(serde::de::Error::custom(
+                "expected YAML frontmatter between --- lines",
+            ));
+        }
+
+        let mut frontmatter = String::new();
+        for line in lines.by_ref() {
+            if line.trim_end() == "---" {
+                let mut definition: Self = yaml_serde::from_str(&frontmatter)?;
+                if !definition.system_prompt.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "system_prompt belongs after the frontmatter",
+                    ));
+                }
+                definition.system_prompt = lines.collect();
+                return Ok(definition);
+            }
+            frontmatter.push_str(line);
+        }
+
+        Err(serde::de::Error::custom("missing closing --- line"))
+    }
+
     /// Converts the definition to a role with the given name.
     pub fn into_role(self, name: RoleName) -> Result<Role, serde_json::Error> {
         let mut extensions = JsonObject::new();
@@ -406,6 +433,72 @@ mod tests {
             json!({"model": {"name": "provider:model"}, "extensions": {}}),
         ] {
             serde_json::from_value::<RoleDefinition>(definition).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn markdown_bodies_are_system_prompts() {
+        let source = "\
+---
+title: Reviewer
+model:
+  name: provider:model
+  config:
+    effort: high
+workspace:
+  name: sprites:default
+  id: '7'
+parameters:
+  repos:
+    target: {type: workspace, path: [config, repos]}
+---
+
+Be helpful.
+
+---
+Keep this separator.
+";
+
+        let definition = RoleDefinition::from_markdown(source).unwrap();
+        assert_eq!(
+            serde_json::to_value(definition).unwrap(),
+            json!({
+                "title": "Reviewer",
+                "hidden": false,
+                "model": {
+                    "name": "provider:model",
+                    "config": {
+                        "effort": "high",
+                    },
+                },
+                "tools": {},
+                "workspace": {
+                    "name": "sprites:default",
+                    "config": {},
+                    "id": "7",
+                },
+                "parameters": {
+                    "repos": {
+                        "target": {
+                            "type": "workspace",
+                            "path": ["config", "repos"],
+                        },
+                    },
+                },
+                "system_prompt": "\nBe helpful.\n\n---\nKeep this separator.\n",
+            }),
+        );
+    }
+
+    #[test]
+    fn markdown_rejects_missing_frontmatter_and_unknown_fields() {
+        for source in [
+            "Be helpful.",
+            "---\nmodel:\n  name: provider:model\n",
+            "---\nmodel:\n  name: provider:model\ntoolz: {}\n---\n",
+            "---\nmodel:\n  name: provider:model\nsystem_prompt: Be helpful.\n---\n",
+        ] {
+            RoleDefinition::from_markdown(source).unwrap_err();
         }
     }
 

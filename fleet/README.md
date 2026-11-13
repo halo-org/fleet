@@ -166,15 +166,19 @@ the quoted version to replace one. `DELETE /roles/{name}` also requires an
 `Idempotency-Key` and `If-Match`. A changed or missing role returns
 `precondition_failed`.
 Versions are unique within the database, so a recreated role does not match an
-earlier version. To import a role, send its definition:
+earlier version.
+
+`PUT` also accepts `text/markdown` with the definition as YAML frontmatter
+between `---` lines. The body after the frontmatter is the system prompt. To
+import a role file:
 
 ```sh
 curl -X PUT http://127.0.0.1:1337/roles/assistant \
   -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: text/markdown" \
   -H "Idempotency-Key: import-assistant" \
   -H "If-None-Match: *" \
-  --data @assistant.json
+  --data-binary @assistant.md
 ```
 
 Role definitions, including model and tool config and system prompts, are visible

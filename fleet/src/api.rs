@@ -225,7 +225,20 @@ where
     }
     let key = idempotency_key(headers)?;
     let expected = expected_role_version(headers)?;
-    let definition: RoleDefinition = read_json(headers, body).await?;
+    let definition = if is_media_type(headers, "text/markdown") {
+        let body = read_body(body).await?;
+        let source = str::from_utf8(&body)
+            .map_err(|_| ApiError::BadRequest("Markdown must be UTF-8".into()))?;
+        RoleDefinition::from_markdown(source)
+            .map_err(|error| ApiError::BadRequest(format!("Invalid role: {error}")))?
+    } else if is_media_type(headers, "application/json") {
+        serde_json::from_slice(&read_body(body).await?)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?
+    } else {
+        return Err(ApiError::UnsupportedMediaType(
+            "Request body must be unencoded application/json or text/markdown",
+        ));
+    };
     let role = definition
         .into_role(name.into())
         .map_err(|error| ApiError::BadRequest(format!("Invalid role: {error}")))?;
@@ -632,18 +645,31 @@ where
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn Error + Send + Sync>>,
 {
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next());
-
-    if !content_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-        || headers.contains_key(header::CONTENT_ENCODING)
-    {
-        return Err(ApiError::UnsupportedMediaType);
+    if !is_media_type(headers, "application/json") {
+        return Err(ApiError::UnsupportedMediaType(
+            "Request body must be unencoded application/json",
+        ));
     }
 
-    let body = Limited::new(body, MAX_BODY_BYTES)
+    serde_json::from_slice(&read_body(body).await?)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+fn is_media_type(headers: &HeaderMap, media_type: &str) -> bool {
+    !headers.contains_key(header::CONTENT_ENCODING)
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(media_type))
+}
+
+async fn read_body<B>(body: B) -> Result<Bytes, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    Ok(Limited::new(body, MAX_BODY_BYTES)
         .collect()
         .await
         .map_err(|error| {
@@ -653,9 +679,7 @@ where
                 ApiError::BadRequest("Could not read request body".into())
             }
         })?
-        .to_bytes();
-
-    serde_json::from_slice(&body).map_err(|error| ApiError::BadRequest(error.to_string()))
+        .to_bytes())
 }
 
 // === Responses ===
@@ -718,7 +742,7 @@ pub enum ApiError {
     RoleNotFound,
     InvalidRole(String),
     MethodNotAllowed(&'static str),
-    UnsupportedMediaType,
+    UnsupportedMediaType(&'static str),
     BodyTooLarge,
     Fleet(FleetError),
     Blob(fleet_store::StoreError),
@@ -750,10 +774,10 @@ impl ApiError {
                 "method_not_allowed",
                 "Method not allowed",
             ),
-            Self::UnsupportedMediaType => (
+            Self::UnsupportedMediaType(message) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
-                "Request body must be unencoded application/json",
+                message,
             ),
             Self::BodyTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
