@@ -49,6 +49,8 @@ pub struct FunctionTool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: bool,
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub r#async: bool,
 }
 
 #[derive(Serialize, Deserialize)]
