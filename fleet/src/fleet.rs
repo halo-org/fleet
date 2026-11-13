@@ -1,7 +1,7 @@
-use crate::{Authentication, Config, ErrorChain, ErrorHandler, IdleHandler};
+use crate::{Authentication, Config, ErrorChain, ErrorHandler, IdleHandler, Notifications};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, Message, MessageId, Models, Role, RoleName, Tools,
+    Agent, AgentId, ClientStore as _, JsonObject, Message, MessageId, Models, Role, RoleName, Tools,
 };
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
@@ -16,11 +16,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const NOTIFICATION_LEASE: u64 = 120_000;
+
 /// An AI agent harness.
 #[derive(Clone)]
 pub struct Fleet {
     state: Arc<State>,
     authentication: Option<Authentication>,
+    notifications: Option<Notifications>,
     configuration: Option<Arc<Configuration>>,
 }
 
@@ -50,6 +53,7 @@ impl Fleet {
     pub fn new(store: Store, idle_timeout: Option<Duration>) -> Self {
         Self {
             authentication: None,
+            notifications: None,
             configuration: None,
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
@@ -71,6 +75,29 @@ impl Fleet {
     /// Returns provider authentication when configured.
     pub const fn authentication(&self) -> Option<&Authentication> {
         self.authentication.as_ref()
+    }
+
+    /// Enables notifications.
+    pub fn with_notifications(mut self, notifications: Notifications) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    /// Returns notifications when configured.
+    pub const fn notifications(&self) -> Option<&Notifications> {
+        self.notifications.as_ref()
+    }
+
+    /// Creates or replaces a device that receives notifications.
+    pub async fn put_device(&self, id: u128, device: JsonObject) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| fleet.state.store.put_device(id, device).await)
+            .await
+    }
+
+    /// Deletes a device if it exists.
+    pub async fn delete_device(&self, id: u128) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| fleet.state.store.delete_device(id).await)
+            .await
     }
 
     /// Sets the server configuration.
@@ -164,7 +191,7 @@ impl Fleet {
             state.idle_handler.wait_for_mutations().await;
         };
 
-        let work = future::join(self.run_snoozes(), agents);
+        let work = future::join3(self.run_snoozes(), self.run_notifications(), agents);
         future::select(pin!(shutdown), pin!(work)).await;
     }
 
@@ -189,12 +216,7 @@ impl Fleet {
                     continue;
                 }
             };
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX);
+            let now = crate::fleet::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
                 if let Err(error) = self.state.store.expire_snoozes(now).await {
                     eprintln!("Could not expire snoozes: {}", ErrorChain(&error));
@@ -211,6 +233,84 @@ impl Fleet {
                 match deadline {
                     Some(deadline) => {
                         // Recheck wall time periodically in case the system clock moves.
+                        let delay = Duration::from_millis(deadline.saturating_sub(now))
+                            .min(Duration::from_secs(60));
+                        future::select(pin!(changed), pin!(tokio::time::sleep(delay))).await;
+                    }
+                    None => changed.await,
+                }
+            };
+            let stopped = matches!(
+                future::select(pin!(self.wait_for_shutdown()), pin!(wait)).await,
+                future::Either::Left(_)
+            );
+            drop(guard);
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    async fn run_notifications(&self) {
+        let Some(notifications) = &self.notifications else {
+            return;
+        };
+        loop {
+            let changed = self.state.store.notification_changed();
+            // Keep pending notifications alive through idle shutdown.
+            let Some(guard) = self.state.idle_handler.track_mutation() else {
+                return;
+            };
+            match self
+                .state
+                .store
+                .claim_notification(crate::fleet::now(), NOTIFICATION_LEASE)
+                .await
+            {
+                Ok(Some(claim)) => {
+                    let notifications = notifications.clone();
+                    let store = self.state.store.clone();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        if let Err(error) = notifications.deliver(&store, claim).await {
+                            eprintln!("Could not deliver notification: {}", ErrorChain(&error));
+                        }
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Could not claim notification: {}", ErrorChain(&error));
+                    drop(guard);
+                    future::select(
+                        pin!(self.wait_for_shutdown()),
+                        pin!(tokio::time::sleep(Duration::from_secs(1))),
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            let deadline = match self.state.store.next_notification().await {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    eprintln!(
+                        "Could not read notification deadlines: {}",
+                        ErrorChain(&error)
+                    );
+                    drop(guard);
+                    future::select(
+                        pin!(self.wait_for_shutdown()),
+                        pin!(tokio::time::sleep(Duration::from_secs(1))),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let now = crate::fleet::now();
+            let guard = deadline.map(|_| guard);
+            let wait = async {
+                match deadline {
+                    Some(deadline) => {
                         let delay = Duration::from_millis(deadline.saturating_sub(now))
                             .min(Duration::from_secs(60));
                         future::select(pin!(changed), pin!(tokio::time::sleep(delay))).await;
@@ -552,6 +652,15 @@ impl Fleet {
             })
             .map_err(FleetError::Store)
     }
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 impl fmt::Display for FleetError {
@@ -1151,6 +1260,54 @@ mod tests {
                 .unwrap()
                 .unwrap();
             fleet.state.idle_handler.wait_for_mutations().await;
+        });
+    }
+
+    #[test]
+    fn notification_worker_completes_turn_notifications() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let key = crate::web_push::WebPush::generate_key().unwrap();
+            let fleet = idle_fleet()
+                .await
+                .with_notifications(Notifications::new(&key).unwrap());
+            assert!(
+                fleet
+                    .state
+                    .store
+                    .next_notification()
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let worker_fleet = fleet.clone();
+            let worker = tokio::spawn(async move { worker_fleet.run_notifications().await });
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let changed = fleet.state.store.notification_changed();
+                    if fleet
+                        .state
+                        .store
+                        .next_notification()
+                        .await
+                        .unwrap()
+                        .is_none()
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .unwrap();
+            fleet.shutdown();
+            tokio::time::timeout(Duration::from_secs(1), worker)
+                .await
+                .unwrap()
+                .unwrap();
         });
     }
 

@@ -72,6 +72,7 @@ fleet-simulator.path = "fleet-simulator"
 fleet-store.path = "fleet-store"
 fleet-wasm.path = "fleet-wasm"
 
+aws-lc-rs = { version = "1.18.2", default-features = false }
 base64 = { version = "0.23.1", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
 fastrand = { version = "2.5.0", default-features = false }

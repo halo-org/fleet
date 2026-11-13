@@ -11,10 +11,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 base64 = { workspace = true, features = ["alloc"] }
 fleet-core.workspace = true
 fleet-kit.workspace = true
-fleet-store = { workspace = true, features = ["queries", "blobs", "roles"] }
+fleet-store = { workspace = true, features = ["queries", "blobs", "roles", "notifications"] }
 fleet-wasm.workspace = true
 form_urlencoded = { workspace = true, features = ["alloc"] }
 futures-util = { workspace = true, features = ["std"] }

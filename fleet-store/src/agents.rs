@@ -397,7 +397,7 @@ impl AgentCollection for Store {
 
     async fn agents_updates(&self, after: CollectionRevision) -> Result<AgentsUpdates, StoreError> {
         loop {
-            let notified = self.notifications().listen(Topic::Agents);
+            let notified = self.listeners().listen(Topic::Agents);
             let update = self
                 .worker()
                 .call(move |worker| {
@@ -535,8 +535,8 @@ impl Store {
                 let changed = expire(&mut Records(transaction.open_table(records::RECORDS)?), now)?;
                 transaction.commit()?;
                 if changed {
-                    worker.notifications.notify(Topic::Agents);
-                    worker.notifications.notify(Topic::Snoozes);
+                    worker.listeners.notify(Topic::Agents);
+                    worker.listeners.notify(Topic::Snoozes);
                 }
                 Ok(())
             })
@@ -569,7 +569,7 @@ impl Store {
 
     /// Registers immediately for deadline changes. Register before reading `next_snooze`.
     pub fn snooze_changed(&self) -> impl Future<Output = ()> + Send + use<> {
-        self.notifications().listen(Topic::Snoozes)
+        self.listeners().listen(Topic::Snoozes)
     }
 }
 

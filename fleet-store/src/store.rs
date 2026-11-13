@@ -1,5 +1,5 @@
 use crate::{
-    Notifications, StoreError, Topic, WorkerHandle, data,
+    Listeners, StoreError, Topic, WorkerHandle, data,
     records::{self, AgentRecord, EventRecord, MessageRecord, Records, Request, ToolCallRecord},
 };
 use fleet_core::{
@@ -21,7 +21,7 @@ use std::{
 #[derive(Clone)]
 pub struct Store {
     worker: Arc<WorkerHandle>,
-    notifications: Notifications,
+    listeners: Listeners,
 }
 
 struct WakeStream {
@@ -70,20 +70,17 @@ impl Store {
         transaction.open_table(crate::blob_records::CHUNKS)?;
         transaction.open_table(crate::role_records::ROLES)?;
         transaction.commit()?;
-        let notifications = Notifications::default();
-        let worker = Arc::new(WorkerHandle::new(database, notifications.clone())?);
-        Ok(Self {
-            worker,
-            notifications,
-        })
+        let listeners = Listeners::default();
+        let worker = Arc::new(WorkerHandle::new(database, listeners.clone())?);
+        Ok(Self { worker, listeners })
     }
 
     pub(crate) const fn worker(&self) -> &Arc<WorkerHandle> {
         &self.worker
     }
 
-    pub(crate) const fn notifications(&self) -> &Notifications {
-        &self.notifications
+    pub(crate) const fn listeners(&self) -> &Listeners {
+        &self.listeners
     }
 
     pub(crate) async fn request(
@@ -116,11 +113,11 @@ impl Store {
                         drop(records);
                         transaction.commit()?;
                         if changed {
-                            worker.notifications.notify(Topic::Agent(id));
+                            worker.listeners.notify(Topic::Agent(id));
                         }
                         if summary_changed {
-                            worker.notifications.notify(Topic::Agents);
-                            worker.notifications.notify(Topic::Snoozes);
+                            worker.listeners.notify(Topic::Agents);
+                            worker.listeners.notify(Topic::Snoozes);
                         }
                         return Ok(());
                     }
@@ -136,15 +133,15 @@ impl Store {
                 };
                 transaction.commit()?;
                 if summary_changed {
-                    worker.notifications.notify(Topic::Agents);
-                    worker.notifications.notify(Topic::Snoozes);
+                    worker.listeners.notify(Topic::Agents);
+                    worker.listeners.notify(Topic::Snoozes);
                 }
-                worker.notifications.notify(Topic::Agent(agent_id));
+                worker.listeners.notify(Topic::Agent(agent_id));
                 if interrupt {
                     if let Some(preview) = worker.previews.get_mut(&agent_id) {
                         preview.invalidate();
                     }
-                    worker.notifications.notify(Topic::Preview(agent_id));
+                    worker.listeners.notify(Topic::Preview(agent_id));
                 }
                 if wake {
                     worker.notify_wake(agent_id, interrupt);
@@ -365,7 +362,7 @@ impl RuntimeStore for Store {
                 if let Some(wake) = state.pending.pop_front() {
                     return Ok(Some((wake, state)));
                 }
-                let notified = state.store.notifications().listen(Topic::Wakes);
+                let notified = state.store.listeners().listen(Topic::Wakes);
                 let sequence = state.sequence;
                 let (latest, wakes) = state
                     .store
@@ -648,7 +645,7 @@ impl RuntimeStore for Store {
         let response: data::ModelResponse = response.clone().into();
         self.worker()
             .call(move |worker| {
-                worker.mutate(agent_id.into(), |records, agent| {
+                let notified = worker.mutate(agent_id.into(), |records, agent| {
                     agent.check_latest_event(Some(expected_latest_event.into()))?;
                     if agent.parked_at == agent.latest_event {
                         return Err(StoreError::Conflict("agent is parked at the input cursor"));
@@ -717,13 +714,21 @@ impl RuntimeStore for Store {
                         )?;
                     }
                     if ends_turn {
-                        records.append_event(
+                        let cursor = records.append_event(
                             agent,
                             data::EventPayload::TurnEnd(data::TurnEnd::Completed),
                         )?;
+                        if agent.pending_messages == 0 {
+                            crate::notification_records::record(records, agent.agent.id, cursor)?;
+                            return Ok(true);
+                        }
                     }
-                    Ok(())
-                })
+                    Ok(false)
+                })?;
+                if notified {
+                    worker.listeners.notify(Topic::Notifications);
+                }
+                Ok(())
             })
             .await
     }
