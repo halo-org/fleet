@@ -8,8 +8,8 @@ use fleet_core::{
     ModelOutput, ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage, RuntimeStore as _,
 };
 use fleet_kit::{
-    AgentCollection as _, AgentSummary, AgentsQuery, CollectionRevision, EventDirection,
-    InboxAction, InboxFilter, InboxState, Queries, QueryUpdate,
+    AgentCollection as _, AgentParent, AgentSummary, AgentsQuery, CollectionRevision,
+    EventDirection, Extension as _, InboxAction, InboxFilter, InboxState, Queries, QueryUpdate,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::future;
@@ -472,6 +472,40 @@ fn pins_survive_activity_and_snoozes_but_not_settling() {
             .await
             .unwrap();
         assert_eq!(summary(&store, 1).await, settled);
+    });
+}
+
+#[test]
+fn children_are_scanned_by_parent_instead_of_the_inbox() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        let parent = AgentParent {
+            agent: 1.into(),
+            call: "call".into(),
+        };
+        let mut child = agent(2);
+        parent.clone().insert(&mut child.extensions).unwrap();
+        store.create_agent("parent", &agent(1), None).await.unwrap();
+        let before = store.collection_revision().await.unwrap();
+        store.create_agent("child", &child, None).await.unwrap();
+
+        let roots = store.agents(AgentsQuery::default()).await.unwrap();
+        let children = store
+            .agents(AgentsQuery {
+                parent: Some(1.into()),
+                ..AgentsQuery::default()
+            })
+            .await
+            .unwrap();
+        let update = store.agents_updates(before).await.unwrap();
+
+        assert_eq!(roots.agents.len(), 1);
+        assert_eq!(roots.agents[0].id, 1.into());
+        assert_eq!(roots.agents[0].parent, None);
+        assert_eq!(children.agents.len(), 1);
+        assert_eq!(children.agents[0].id, 2.into());
+        assert_eq!(children.agents[0].parent, Some(parent));
+        assert_eq!(update.agents, children.agents);
     });
 }
 

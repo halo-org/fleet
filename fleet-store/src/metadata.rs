@@ -17,6 +17,16 @@ pub fn agent_pinned(extensions: &JsonObject) -> Option<u64> {
     extensions.get("fleet.pinned")?.as_u64()
 }
 
+pub fn agent_parent(extensions: &JsonObject) -> Option<(u128, &str)> {
+    let parent = extensions.get("fleet.parent")?;
+    let agent = parent.get("agent")?.as_str()?;
+    let agent = agent
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| agent.parse().ok())??;
+    Some((agent, parent.get("call")?.as_str()?))
+}
+
 pub fn set_title(
     records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
     id: u128,

@@ -718,7 +718,9 @@ impl RuntimeStore for Store {
                             agent,
                             data::EventPayload::TurnEnd(data::TurnEnd::Completed),
                         )?;
-                        if agent.pending_messages == 0 {
+                        if agent.pending_messages == 0
+                            && crate::metadata::agent_parent(&agent.agent.extensions).is_none()
+                        {
                             crate::notification_records::record(records, agent.agent.id, cursor)?;
                             return Ok(true);
                         }
