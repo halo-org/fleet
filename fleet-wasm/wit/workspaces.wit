@@ -1,11 +1,12 @@
 /// Provides workspace environments.
 ///
-/// Environment identity survives provider restarts. Sharing a context shares the environment.
+/// Environment identity survives provider restarts. Contexts with the same workspace and ID share
+/// the environment.
 /// Different IDs do not guarantee isolation, for example when they name the same local directory.
 /// Paths use / separators. Relative paths start in the workspace directory.
 /// Absolute paths refer to the workspace environment. Access is controlled by the provider.
 interface workspaces {
-    use types.{json-object, configured};
+    use types.{json-object, agent-id, configured};
 
     /// The metadata of a workspace.
     record workspace {
@@ -24,9 +25,13 @@ interface workspaces {
     }
 
     /// A workspace environment and its configuration.
+    ///
+    /// Retain the workspace and ID to reopen the environment or share it with another agent.
     record workspace-context {
         /// The workspace name and config.
         workspace: configured,
+        /// The ID of the agent using the environment.
+        agent-id: agent-id,
         /// The ID of the environment.
         id: workspace-id,
     }

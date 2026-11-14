@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, collections::BTreeMap, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::fmt;
-use fleet_core::{Configured, JsonObject};
+use fleet_core::{AgentId, Configured, JsonObject};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::Extension;
@@ -27,11 +27,13 @@ pub struct WorkspaceId(u128);
 
 /// A workspace environment and its configuration.
 ///
-/// Retain this value to reopen the environment or share it with another agent.
+/// Retain the workspace and ID to reopen the environment or share it with another agent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceContext {
     /// The workspace name and config.
     pub workspace: Configured<WorkspaceName>,
+    /// The ID of the agent using the environment.
+    pub agent_id: AgentId,
     /// The ID of the environment.
     pub id: WorkspaceId,
 }
@@ -118,7 +120,8 @@ pub enum WorkspaceExit {
 
 /// Provides workspace environments.
 ///
-/// Environment identity survives provider restarts. Sharing a context shares the environment.
+/// Environment identity survives provider restarts. Contexts with the same workspace and ID share
+/// the environment.
 /// Different IDs do not guarantee isolation, for example when they name the same local directory.
 /// Paths use `/` separators. Relative paths start in the workspace directory.
 /// Absolute paths refer to the workspace environment. Access is controlled by the provider.

@@ -212,6 +212,7 @@ fn convert_context(
             config: serde_json::from_str(&context.workspace.config)
                 .map_err(|source| json_error(&source))?,
         },
+        agent_id: context.agent_id.into(),
         id: ((u128::from(context.id.high) << 64) | u128::from(context.id.low)).into(),
     })
 }

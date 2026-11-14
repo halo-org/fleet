@@ -28,6 +28,12 @@ impl From<AgentId> for types::AgentId {
     }
 }
 
+impl From<types::AgentId> for AgentId {
+    fn from(id: types::AgentId) -> Self {
+        ((u128::from(id.high) << 64) | u128::from(id.low)).into()
+    }
+}
+
 impl From<fleet_core::BlobId> for types::BlobId {
     fn from(id: fleet_core::BlobId) -> Self {
         let id = u128::from(id);
@@ -503,6 +509,7 @@ impl workspaces::WorkspaceContext {
                 name: name.into(),
                 config: json(&value.workspace.config),
             },
+            agent_id: value.agent_id.into(),
             id: value.id.into(),
         }
     }
@@ -592,6 +599,7 @@ mod tests {
                 name: "example:local".into(),
                 config: JsonObject::from_iter([("cwd".into(), json!("/project"))]),
             },
+            agent_id: 1.into(),
             id: u128::MAX.into(),
         };
 
@@ -599,6 +607,8 @@ mod tests {
         let config: JsonObject = serde_json::from_str(&context.workspace.config).unwrap();
 
         assert_eq!(context.workspace.name, "local");
+        assert_eq!(context.agent_id.high, 0);
+        assert_eq!(context.agent_id.low, 1);
         assert_eq!(context.id.high, u64::MAX);
         assert_eq!(context.id.low, u64::MAX);
         assert_eq!(config["cwd"], "/project");
