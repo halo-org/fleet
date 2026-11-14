@@ -18,8 +18,7 @@ pub struct Request {
     pub input: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<Reasoning>,
+    pub reasoning: Reasoning,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,7 +30,9 @@ pub struct Request {
 
 #[derive(Serialize)]
 pub struct Reasoning {
-    pub effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    pub summary: &'static str,
 }
 
 #[derive(Serialize)]
