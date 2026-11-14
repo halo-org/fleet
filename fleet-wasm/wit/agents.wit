@@ -1,0 +1,156 @@
+/// Reads agents and creates agents for tool calls.
+///
+/// Reads are not restricted to related agents.
+interface agents {
+    use types.{
+        json-object, agent-id, configured, content-block, model-input, model-response,
+        model-usage, tool-call, tool-result,
+    };
+
+    /// The ID of a message.
+    record message-id {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// A cursor into an event log.
+    record event-cursor {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// An agent.
+    record agent {
+        /// The ID of the agent.
+        id: agent-id,
+        /// The role name and parameter values.
+        role: configured,
+        /// Additional data not interpreted by core.
+        extensions: json-object,
+    }
+
+    /// The end of a turn.
+    enum turn-end {
+        /// The agent finished responding.
+        completed,
+        /// The turn was interrupted.
+        interrupted,
+    }
+
+    /// The event that ended a turn.
+    record turn-end-event {
+        /// The cursor of the event.
+        cursor: event-cursor,
+        /// How the turn ended.
+        payload: turn-end,
+    }
+
+    /// Replacement model context and pending tool calls.
+    record compaction {
+        /// The last event included in this compaction.
+        last-event: event-cursor,
+        /// The input that replaces the compacted context.
+        input: list<model-input>,
+        /// All unresolved async tool calls from before this compaction.
+        pending-tool-calls: list<tool-call>,
+        /// How many tokens were used for compaction.
+        usage: model-usage,
+    }
+
+    /// An agent event payload.
+    variant event-payload {
+        /// Input sent to the agent.
+        input(tuple<message-id, list<content-block>>),
+        /// Response from the agent.
+        model-response(model-response),
+        /// Result of a tool called by the agent.
+        tool-result(tool-result),
+        /// Replacement model context and pending tool calls.
+        compaction(compaction),
+        /// The end of a turn.
+        turn-end(turn-end),
+    }
+
+    /// An agent event.
+    record event {
+        /// The cursor pointing to this event's position in the event log.
+        cursor: event-cursor,
+        /// The payload of this event.
+        payload: event-payload,
+    }
+
+    /// The direction to read events.
+    enum event-direction {
+        /// Reads from oldest to newest.
+        forward,
+        /// Reads from newest to oldest.
+        backward,
+    }
+
+    /// A query for an event history page.
+    record event-query {
+        /// The exclusive starting cursor, or none to start at the first event in this direction.
+        %from: option<event-cursor>,
+        /// The exclusive stopping cursor, or none for no stopping cursor.
+        until: option<event-cursor>,
+        /// The direction to read events.
+        direction: event-direction,
+        /// The maximum number of events to return. Must be positive.
+        limit: u32,
+    }
+
+    /// An agent created for a tool call.
+    record created-agent {
+        /// The ID of the agent.
+        agent: agent-id,
+        /// The ID of its initial message.
+        message: message-id,
+    }
+
+    /// The kind of error returned by the agents host.
+    enum agents-error-kind {
+        /// The agent does not exist.
+        agent-not-found,
+        /// The message does not exist.
+        message-not-found,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by the agents host.
+    record agents-error {
+        /// The kind of error.
+        kind: agents-error-kind,
+        /// A description of the error.
+        message: string,
+    }
+
+    /// Returns an agent.
+    get: async func(id: agent-id) -> result<agent, agents-error>;
+
+    /// Returns a page of an agent's events. Deleted events are omitted.
+    events: async func(id: agent-id, query: event-query) -> result<list<event>, agents-error>;
+
+    /// Waits for the turn containing the message to end.
+    ///
+    /// Repeated calls return the same turn end, even after later activity.
+    wait-for-turn-end: async func(id: agent-id, message: message-id)
+        -> result<turn-end-event, agents-error>;
+
+    /// Creates an agent for the current tool call with a queued initial message.
+    ///
+    /// The agent's fleet.parent extension records the calling agent and tool call. Retries from
+    /// the same call with the same arguments return the same agent and message. Only available
+    /// while executing a tool.
+    create: async func(role: configured, extensions: json-object, content: list<content-block>)
+        -> result<created-agent, agents-error>;
+}
+
+/// A host that provides agents.
+world agent-host {
+    import agents;
+}

@@ -27,6 +27,16 @@ pub mod role_host {
 
 pub use role_host::fleet::providers::roles;
 
+pub mod agent_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "agent-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub use agent_host::fleet::providers::agents;
+
 pub mod authentication {
     wasmtime::component::bindgen!({
         path: "wit",

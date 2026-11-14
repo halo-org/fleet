@@ -127,6 +127,17 @@ impl TryFrom<types::ModelInput> for ModelInput {
     }
 }
 
+impl From<&ModelResponse> for types::ModelResponse {
+    fn from(value: &ModelResponse) -> Self {
+        Self {
+            output: value.output.iter().map(Into::into).collect(),
+            usage: (&value.usage).into(),
+            provenance: (&value.provenance).into(),
+            continuation_token: value.continuation_token.clone(),
+        }
+    }
+}
+
 impl TryFrom<types::ModelResponse> for ModelResponse {
     type Error = WasmError;
 
@@ -273,6 +284,17 @@ impl From<types::ModelCompaction> for ModelCompaction {
             content: value.content,
             redacted_content: value.redacted_content,
             attestation: value.attestation,
+        }
+    }
+}
+
+impl From<&ModelUsage> for types::ModelUsage {
+    fn from(value: &ModelUsage) -> Self {
+        Self {
+            input: value.input,
+            output: value.output,
+            cache_read: value.cache_read,
+            cache_write: value.cache_write,
         }
     }
 }

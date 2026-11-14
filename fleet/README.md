@@ -242,6 +242,24 @@ Agents look up their role on every turn. Write access lets an agent change its o
 tools and system prompt from its next turn, and those of every agent sharing a writable role.
 Give it only to agents trusted with the access of any role they can write.
 
+## Subagents
+
+Approve `"agents": true` in a plugin's `capabilities` and have its component import
+`fleet:providers/agents@0.0.0`. Every call can read any agent and its events and wait for its
+turns. Reads are not restricted to related agents. Tool calls can also create agents, such as
+those made by [`fleet-plugin-agents`](../fleet-plugin-agents).
+
+An agent created by a tool call records the calling agent and call in its `fleet.parent`
+extension. The API returns it as `parent`, with the agent as a decimal string, and does not let
+clients set or change it. Creation derives the agent and message IDs from the provider, agent
+and call, so retries return the same agent. Images in the initial message must already be
+attached to the calling agent.
+
+Children do not appear in the inbox and do not send notifications. `GET /agents?parent=1`
+scans the children of agent `1`, and the collection update stream includes them. Interrupting
+an agent also interrupts busy children created by its pending calls, recursively. A child
+created after its call was interrupted or resolved is interrupted at once.
+
 ## Images and blobs
 
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside
