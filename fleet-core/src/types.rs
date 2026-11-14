@@ -130,6 +130,8 @@ pub struct ModelName(String);
 pub struct ModelContext {
     /// The model name and config.
     pub model: Configured<ModelName>,
+    /// The ID of the agent using the model.
+    pub agent_id: AgentId,
     /// The system prompt to use.
     pub system_prompt: String,
     /// The tools available to the model.

@@ -1052,6 +1052,7 @@ where
 
         Ok(ModelContext {
             model: agent_role.role.model.clone(),
+            agent_id: agent_role.agent.id,
             system_prompt: agent_role.role.system_prompt.clone(),
             tools,
             role_extensions: agent_role.role.extensions.clone(),
