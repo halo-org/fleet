@@ -1,0 +1,11 @@
+package fleet:plugin-agents@0.0.0;
+
+/// Tools that delegate to new agents, and a workspace shared with the parent agent.
+world plugin {
+    import fleet:providers/agents@0.0.0;
+    import fleet:providers/configuration@0.0.0;
+    import fleet:providers/roles@0.0.0;
+    import fleet:providers/workspaces@0.0.0;
+    export fleet:providers/tools@0.0.0;
+    export fleet:providers/workspaces@0.0.0;
+}

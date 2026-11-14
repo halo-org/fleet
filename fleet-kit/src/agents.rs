@@ -4,13 +4,15 @@
 //! read revisions. Merge summaries by their version; keep deletion versions while
 //! older reads can still arrive. A later page never advances the subscription's
 //! applied revision. Persist applied state and the subscription revision together.
-//! Scans have no effect on the change stream, which always covers all agents.
+//! Scans have no effect on the change stream, which always covers all agents,
+//! including agents created by tool calls.
 
 use alloc::{string::String, vec::Vec};
 use core::{fmt, num::NonZeroUsize};
-use fleet_core::{AgentId, JsonObject, RoleName};
+use fleet_core::{AgentId, Configured, ContentBlock, JsonObject, MessageId, RoleName, ToolCallId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
-use crate::{EventDirection, Revision};
+use crate::{EventDirection, Extension, Revision};
 
 /// Returns the application title stored in an agent's extensions.
 #[must_use]
@@ -22,6 +24,23 @@ pub fn agent_title(extensions: &JsonObject) -> Option<&str> {
 #[must_use]
 pub fn agent_pinned(extensions: &JsonObject) -> Option<u64> {
     extensions.get("fleet.pinned")?.as_u64()
+}
+
+/// The tool call that created an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentParent {
+    /// The agent that made the call.
+    #[serde(
+        serialize_with = "serialize_agent_id",
+        deserialize_with = "deserialize_agent_id"
+    )]
+    pub agent: AgentId,
+    /// The call that created the agent.
+    #[serde(
+        serialize_with = "serialize_call_id",
+        deserialize_with = "deserialize_call_id"
+    )]
+    pub call: ToolCallId,
 }
 
 /// A durable collection revision. Comparable only within the same store.
@@ -83,6 +102,8 @@ pub struct AgentSummary {
     pub id: AgentId,
     /// Its configured role.
     pub role: RoleName,
+    /// The tool call that created the agent, if any.
+    pub parent: Option<AgentParent>,
     /// The optional display title.
     pub title: Option<String>,
     /// When the agent was pinned, in Unix milliseconds.
@@ -110,6 +131,8 @@ pub struct AgentSummary {
 /// for those transitions. A page's revision covers only its scanned range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentsQuery {
+    /// Scans the children of this agent, or agents without a parent when `None`.
+    pub parent: Option<AgentId>,
     /// Sections to scan.
     pub inbox: InboxFilter,
     /// Exclusive starting position.
@@ -127,6 +150,7 @@ pub struct AgentsQuery {
 impl Default for AgentsQuery {
     fn default() -> Self {
         Self {
+            parent: None,
             inbox: InboxFilter::All,
             from: None,
             until: None,
@@ -228,4 +252,47 @@ pub trait AgentCollection {
         expected: CollectionRevision,
         action: InboxAction,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+/// Creates agents on behalf of one tool call.
+pub trait Subagents {
+    /// Provider error.
+    type Error: core::error::Error + Send + 'static;
+
+    /// Creates an agent with a queued initial message.
+    ///
+    /// The agent records the call as its [`AgentParent`]. Retries with the same arguments
+    /// return the same agent and message.
+    fn create(
+        &self,
+        role: &Configured<RoleName>,
+        extensions: &JsonObject,
+        content: &[ContentBlock],
+    ) -> impl Future<Output = Result<(AgentId, MessageId), Self::Error>> + Send;
+}
+
+impl Extension for AgentParent {
+    const KEY: &'static str = "fleet.parent";
+}
+
+fn serialize_agent_id<S: Serializer>(id: &AgentId, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+fn deserialize_agent_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<AgentId, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    id.bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| id.parse::<u128>().ok())
+        .flatten()
+        .map(AgentId::from)
+        .ok_or_else(|| D::Error::custom("agent ID must be a decimal number"))
+}
+
+fn serialize_call_id<S: Serializer>(id: &ToolCallId, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(id.as_ref())
+}
+
+fn deserialize_call_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ToolCallId, D::Error> {
+    String::deserialize(deserializer).map(ToolCallId::from)
 }

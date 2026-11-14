@@ -595,6 +595,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-agents"
+version = "0.0.0"
+dependencies = [
+ "fleet-kit",
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-plugin-host"
 version = "0.0.0"
 dependencies = [

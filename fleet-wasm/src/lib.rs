@@ -21,6 +21,8 @@
 //! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
 //! Metadata lookups receive no blob capability. Role imports delegate to an agent-scoped
 //! [`fleet_kit::RoleStore`] through [`WasmRoles`] and are available only to tool calls.
+//! Agent imports read agents through [`WasmAgents`] in every call. Only tool calls can create
+//! agents, and each created agent records the calling agent and tool call as its parent.
 //!
 //! # Private workers
 //!
@@ -87,6 +89,7 @@
 mod bindings;
 mod convert;
 mod wasm;
+mod wasm_agents;
 mod wasm_blobs;
 mod wasm_capabilities;
 mod wasm_credentials;
@@ -108,6 +111,7 @@ mod wasm_workspaces;
 
 pub use self::{
     wasm::{Wasm, WasmComponent},
+    wasm_agents::WasmAgents,
     wasm_blobs::WasmBlobs,
     wasm_capabilities::{WasmCapabilities, WasmMount},
     wasm_credentials::WasmCredentials,

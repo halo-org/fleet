@@ -5,9 +5,9 @@ use fleet_core::{
 };
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
-    AgentsUpdates, CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord,
-    Preview, Queries as _, QueryResponse, QueryUpdate, Revision, RoleStore as _, RoleVersion,
-    StoredRole, ToolCallRecord, TurnEndEvent,
+    AgentsUpdates, CollectionRevision, EventQuery, EventRecord, InboxAction, InboxFilter,
+    InboxState, MessageRecord, Preview, Queries as _, QueryResponse, QueryUpdate, Revision,
+    RoleStore as _, RoleVersion, StoredRole, ToolCallRecord, TurnEndEvent,
 };
 use fleet_store::{Store, StoreError};
 use futures_util::{Stream, TryStreamExt as _, future};
@@ -563,6 +563,8 @@ impl Fleet {
 
     /// Interrupts an agent with an optional message.
     ///
+    /// Busy agents created by the calls this interrupt resolves are interrupted too.
+    ///
     /// # Errors
     ///
     /// Returns an error if shutdown has begun or the mutation fails.
@@ -573,11 +575,47 @@ impl Fleet {
         message: Option<Message>,
     ) -> Result<(), FleetError> {
         self.mutate(async move |fleet| {
-            fleet
-                .state
-                .store
-                .interrupt_agent(&idempotency_key, agent_id, message.as_ref())
-                .await
+            let store = &fleet.state.store;
+            let mut interrupts = vec![(idempotency_key, agent_id, message)];
+            while let Some((key, agent_id, message)) = interrupts.pop() {
+                let calls: Vec<_> = store
+                    .tool_calls(agent_id, None)
+                    .await?
+                    .value
+                    .into_iter()
+                    .filter_map(|record| match record {
+                        ToolCallRecord::Pending { id, .. } => Some(id),
+                        ToolCallRecord::Resolved(_) => None,
+                    })
+                    .collect();
+                store
+                    .interrupt_agent(&key, agent_id, message.as_ref())
+                    .await?;
+                let mut query = AgentsQuery {
+                    parent: Some(agent_id),
+                    inbox: InboxFilter::State(InboxState::Busy),
+                    ..AgentsQuery::default()
+                };
+                loop {
+                    let page = store.agents(query).await?;
+                    interrupts.extend(
+                        page.agents
+                            .into_iter()
+                            .filter(|child| {
+                                child
+                                    .parent
+                                    .as_ref()
+                                    .is_some_and(|parent| calls.contains(&parent.call))
+                            })
+                            .map(|child| (format!("{key}:{}", child.id), child.id, None)),
+                    );
+                    let Some(next) = page.next else {
+                        break;
+                    };
+                    query.from = Some(next);
+                }
+            }
+            Ok(())
         })
         .await
     }

@@ -20,6 +20,7 @@ mod oauth;
 mod oauth_callback;
 mod oci;
 mod plugin_roles;
+mod plugin_subagents;
 mod plugins;
 mod roles;
 mod server;
@@ -45,6 +46,7 @@ pub(crate) use self::{
     idle_handler::IdleHandler,
     notifications::Notifications,
     plugin_roles::PluginRoles,
+    plugin_subagents::PluginSubagents,
     plugins::{PluginConfig, ProviderConfig},
     roles::RoleDefinition,
 };

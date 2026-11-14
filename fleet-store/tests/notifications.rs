@@ -131,6 +131,29 @@ fn turns_with_later_work_do_not_notify() {
 }
 
 #[test]
+fn children_do_not_notify() {
+    let store = Store::memory().unwrap();
+    let mut child = agent();
+    child.extensions.insert(
+        "fleet.parent".into(),
+        serde_json::json!({ "agent": "2", "call": "call" }),
+    );
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &child, Some(&message(1)))
+            .await
+            .unwrap();
+        store.consume_messages(child.id, None, true).await.unwrap();
+        store
+            .append_model_response(child.id, 0.into(), true, &response())
+            .await
+            .unwrap();
+        assert_eq!(store.next_notification().await.unwrap(), None);
+    });
+}
+
+#[test]
 fn replaced_devices_are_not_deleted_as_stale() {
     let store = Store::memory().unwrap();
     let old = serde_json::json!({ "endpoint": "old" })

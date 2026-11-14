@@ -89,6 +89,12 @@ impl WasmTools {
                 .as_ref()
                 .map(|roles| roles.for_agent(context.agent_id)),
         );
+        store.data_mut().set_agents(
+            self.environment
+                .agents
+                .as_ref()
+                .map(|agents| agents.for_call(context.agent_id, context.call_id.clone())),
+        );
         let output = store
             .run_concurrent(async |accessor| {
                 instance

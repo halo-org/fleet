@@ -111,6 +111,7 @@ impl WasmProvider {
             origins: WasmOrigins::new(capabilities.http),
             credentials: capabilities.credentials,
             workspace_host: capabilities.workspaces,
+            agents: capabilities.agents,
         };
         let blob_host = capabilities.blobs;
         let roles = capabilities.roles;

@@ -1,0 +1,20 @@
+[package]
+name = "fleet-plugin-agents"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+fleet-kit.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "std"] }

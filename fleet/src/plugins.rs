@@ -1,9 +1,9 @@
-use crate::{Authentication, Config, Fleet, PluginRoles};
+use crate::{Authentication, Config, Fleet, PluginRoles, PluginSubagents};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
-    Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmOrigin,
-    WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceHost,
+    Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount,
+    WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -73,6 +73,8 @@ pub struct PluginCapabilities {
     workspaces: Vec<String>,
     #[serde(default)]
     roles: bool,
+    #[serde(default)]
+    agents: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +196,7 @@ pub async fn load(
             workspaces: (!capabilities.workspaces.is_empty())
                 .then(|| WasmWorkspaceHost::new(workspaces)),
             roles: capabilities.roles.then(|| roles(fleet, name)),
+            agents: capabilities.agents.then(|| agents(fleet, name)),
         };
         let provider = wasm
             .provider(component, &provider.config, capabilities)
@@ -224,6 +227,13 @@ fn roles(fleet: &Fleet, provider: &str) -> WasmRoles {
     let fleet = fleet.clone();
     let provider = provider.to_owned();
     WasmRoles::new(move |id| PluginRoles::new(fleet.clone(), &provider, id))
+}
+
+fn agents(fleet: &Fleet, provider: &str) -> WasmAgents {
+    let fleet = fleet.clone();
+    let provider = provider.to_owned();
+    WasmAgents::new(fleet.blob_store().clone())
+        .with_calls(move |agent, call| PluginSubagents::new(fleet.clone(), &provider, agent, call))
 }
 
 fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
