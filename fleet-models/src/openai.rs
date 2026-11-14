@@ -50,6 +50,7 @@ impl Default for OpenAiConfig {
 ///
 /// Model config accepts optional `effort` and `speed` strings. These select the
 /// reasoning effort and service tier. Missing or null values leave them unset.
+/// Reasoning summaries are always requested.
 /// The optional `tools` array accepts `web_search` tool definitions.
 /// Missing, null or empty `tools` disables provider tools.
 ///
@@ -161,7 +162,10 @@ impl<H, C, B> OpenAiModels<H, C, B> {
                 .then(|| context.system_prompt.clone()),
             input,
             tools,
-            reasoning: config.effort.map(|effort| api::Reasoning { effort }),
+            reasoning: api::Reasoning {
+                effort: config.effort,
+                summary: "auto",
+            },
             service_tier: config.speed,
             previous_response_id,
             store: self.config.store,
@@ -312,8 +316,8 @@ mod tests {
     use fleet_core::{
         Configured, ContentBlock, Error as _, JsonObject, Model, ModelCompaction, ModelContext,
         ModelContinuation, ModelInput, ModelOutput, ModelProvenance, ModelProviderToolCall,
-        ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Models as _, ModelsErrorKind,
-        ToolCall, ToolOutput, ToolResult,
+        ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Models as _,
+        ModelsErrorKind, ToolCall, ToolOutput, ToolResult,
     };
     use futures_util::{StreamExt as _, TryStreamExt as _, stream};
     use http::{HeaderMap, Request, Response, StatusCode, header};
@@ -516,7 +520,12 @@ mod tests {
             context.model.config = serde_json::from_value(config).unwrap();
             let request = models.request(&context, None, &[]).unwrap();
             let request = serde_json::to_value(request).unwrap();
-            assert_eq!(request.get("reasoning"), None);
+            assert_eq!(
+                request["reasoning"],
+                json!({
+                    "summary": "auto",
+                })
+            );
             assert_eq!(request.get("service_tier"), None);
             assert_eq!(request.get("tools"), None);
         }
@@ -532,6 +541,7 @@ mod tests {
             request["reasoning"],
             json!({
                 "effort": "high",
+                "summary": "auto",
             })
         );
         assert_eq!(request["service_tier"], "priority");
@@ -825,6 +835,15 @@ mod tests {
         let ModelResponseChunk::ResponseEnd(response) = chunks.into_iter().last().unwrap() else {
             panic!("expected response end");
         };
+        assert_eq!(
+            response.output[0],
+            ModelOutput::Reasoning(ModelReasoning {
+                content: Some("Thinking.".into()),
+                redacted_content: Some("opaque-reasoning".into()),
+                attestation: Some("rs_test".into()),
+            })
+        );
+
         let input = [ModelInput::Assistant(response.provenance, response.output)];
         let request = models.request(&context, None, &input).unwrap();
         assert_eq!(request.input[0], reasoning);
