@@ -54,6 +54,7 @@ pub fn workspace(context: &ToolContext) -> Result<WorkspaceContext, ToolsError> 
             name: workspace.name.into(),
             config: serde_json::to_string(&workspace.config).map_err(error)?,
         },
+        agent_id: context.agent_id,
         id,
     })
 }
@@ -122,5 +123,7 @@ mod tests {
 
         assert_eq!(environment.id.high, 3);
         assert_eq!(environment.id.low, 4);
+        assert_eq!(environment.agent_id.high, 1);
+        assert_eq!(environment.agent_id.low, 2);
     }
 }

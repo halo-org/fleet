@@ -561,6 +561,7 @@ mod tests {
                     name: name.into(),
                     config: JsonObject::new(),
                 },
+                agent_id: 1.into(),
                 id: 1.into(),
             };
 
