@@ -64,6 +64,7 @@ impl types::ModelContext {
                 name: name.into(),
                 config: json(&value.model.config),
             },
+            agent_id: value.agent_id.into(),
             system_prompt: value.system_prompt.clone(),
             tools: value.tools.iter().map(Into::into).collect(),
             role_extensions: json(&value.role_extensions),

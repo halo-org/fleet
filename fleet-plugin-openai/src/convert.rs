@@ -1,9 +1,9 @@
 use crate::bindings::fleet::providers::types;
 use fleet_core::{
-    BlobId, Configured, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
-    ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance,
-    ModelProviderToolCall, ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool,
-    ModelUsage, ToolCall, ToolOutput, ToolResult,
+    AgentId, BlobId, Configured, ContentBlock, JsonObject, Model, ModelCompaction,
+    ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelOutput,
+    ModelProvenance, ModelProviderToolCall, ModelReasoning, ModelResponse, ModelResponseChunk,
+    ModelTool, ModelUsage, ToolCall, ToolOutput, ToolResult,
 };
 
 fn json(value: &JsonObject) -> String {
@@ -30,6 +30,7 @@ impl TryFrom<types::ModelContext> for ModelContext {
                 name: value.model.name.into(),
                 config: serde_json::from_str(&value.model.config)?,
             },
+            agent_id: value.agent_id.into(),
             system_prompt: value.system_prompt,
             tools: value
                 .tools
@@ -293,6 +294,12 @@ impl From<ModelCompactionResponse> for types::ModelCompactionResponse {
             input: value.input.into_iter().map(Into::into).collect(),
             usage: value.usage.into(),
         }
+    }
+}
+
+impl From<types::AgentId> for AgentId {
+    fn from(id: types::AgentId) -> Self {
+        ((u128::from(id.high) << 64) | u128::from(id.low)).into()
     }
 }
 

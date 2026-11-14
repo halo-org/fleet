@@ -367,6 +367,7 @@ mod tests {
                 name: "test-model".into(),
                 config: JsonObject::new(),
             },
+            agent_id: 1.into(),
             system_prompt: "Be helpful.".into(),
             tools: Vec::new(),
             role_extensions: JsonObject::new(),

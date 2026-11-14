@@ -36,6 +36,8 @@ interface types {
     record model-context {
         /// The model name and config.
         model: configured,
+        /// The ID of the agent using the model.
+        agent-id: agent-id,
         /// The system prompt to use.
         system-prompt: string,
         /// The tools available to the model.

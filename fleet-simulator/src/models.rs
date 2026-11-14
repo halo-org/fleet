@@ -829,6 +829,7 @@ mod tests {
                 name: "model-0".into(),
                 config: JsonObject::new(),
             },
+            agent_id: 1.into(),
             system_prompt: String::new(),
             tools: vec![ModelTool {
                 name: "unknown-tool".into(),
