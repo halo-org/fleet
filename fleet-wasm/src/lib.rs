@@ -21,6 +21,9 @@
 //! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
 //! Metadata lookups receive no blob capability. Role imports delegate to an agent-scoped
 //! [`fleet_kit::RoleStore`] through [`WasmRoles`] and are available only to tool calls.
+//! [`WasmAgents`] binds agent access to tool calls or metadata-only workspace resolution.
+//! [`WasmWorkspaceAccess`] binds role-driven workspace access to the acting agent. Workspace
+//! resolvers return references; the host resolves them through its authorized providers.
 //!
 //! # Private workers
 //!
@@ -87,6 +90,7 @@
 mod bindings;
 mod convert;
 mod wasm;
+mod wasm_agents;
 mod wasm_blobs;
 mod wasm_capabilities;
 mod wasm_credentials;
@@ -103,11 +107,14 @@ mod wasm_state;
 mod wasm_tools;
 mod wasm_worker_connection;
 mod wasm_workers;
+mod wasm_workspace_access;
 mod wasm_workspace_host;
+mod wasm_workspace_resolvers;
 mod wasm_workspaces;
 
 pub use self::{
     wasm::{Wasm, WasmComponent},
+    wasm_agents::WasmAgents,
     wasm_blobs::WasmBlobs,
     wasm_capabilities::{WasmCapabilities, WasmMount},
     wasm_credentials::WasmCredentials,
@@ -115,6 +122,7 @@ pub use self::{
     wasm_http::WasmOrigin,
     wasm_registry::{WasmProvider, WasmRegistry},
     wasm_roles::WasmRoles,
+    wasm_workspace_access::WasmWorkspaceAccess,
     wasm_workspace_host::WasmWorkspaceHost,
 };
 
@@ -125,5 +133,6 @@ pub(crate) use self::{
     wasm_state::{WasmEnvironment, WasmState},
     wasm_tools::WasmTools,
     wasm_workers::WasmWorkers,
+    wasm_workspace_resolvers::WasmWorkspaceResolvers,
     wasm_workspaces::WasmWorkspaces,
 };

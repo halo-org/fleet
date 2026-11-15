@@ -122,6 +122,7 @@ impl Worker {
             self.listeners.notify(Topic::Preview(agent_id));
         }
         self.listeners.notify(Topic::Agent(agent_id));
+        self.listeners.notify(Topic::AgentScopes);
         Ok(result)
     }
 

@@ -17,6 +17,7 @@
       certificates = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 
       pluginNames = [
+        "agents"
         "host"
         "openai"
         "roles"

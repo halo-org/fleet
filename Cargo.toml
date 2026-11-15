@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["fleet", "fleet-core", "fleet-kit", "fleet-models", "fleet-plugin-host", "fleet-plugin-openai", "fleet-plugin-roles", "fleet-plugin-sprites", "fleet-plugin-tools", "fleet-simulator", "fleet-store", "fleet-wasm", "fleet-wasm/tests/worker"]
+members = ["fleet", "fleet-core", "fleet-kit", "fleet-models", "fleet-plugin-agents", "fleet-plugin-host", "fleet-plugin-openai", "fleet-plugin-roles", "fleet-plugin-sprites", "fleet-plugin-tools", "fleet-simulator", "fleet-store", "fleet-workspaces", "fleet-wasm", "fleet-wasm/tests/worker"]
 
 [workspace.package]
 edition = "2024"
@@ -70,6 +70,7 @@ fleet-kit.path = "fleet-kit"
 fleet-models.path = "fleet-models"
 fleet-simulator.path = "fleet-simulator"
 fleet-store.path = "fleet-store"
+fleet-workspaces.path = "fleet-workspaces"
 fleet-wasm.path = "fleet-wasm"
 
 aws-lc-rs = { version = "1.18.2", default-features = false }

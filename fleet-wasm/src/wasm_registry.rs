@@ -1,19 +1,19 @@
 use crate::{
     WasmCapabilities, WasmEnvironment, WasmError, WasmModels, WasmOrigins, WasmPrompts, WasmState,
-    WasmTools, WasmWorkers, WasmWorkspaces,
+    WasmTools, WasmWorkers, WasmWorkspaceResolvers, WasmWorkspaces,
     bindings::authentication::{
         AuthenticationProviderPre, exports::fleet::providers::authentication as auth,
     },
 };
 use core::future;
 use fleet_core::{
-    AgentId, ContentBlock, JsonObject, Model, ModelCompactionResponse, ModelContext,
+    AgentId, Configured, ContentBlock, JsonObject, Model, ModelCompactionResponse, ModelContext,
     ModelContinuation, ModelInput, ModelName, ModelResponseChunk, Models, Prompt, PromptContext,
     PromptName, PromptResponse, Prompts, Tool, ToolCall, ToolContext, ToolName, ToolOutput, Tools,
 };
 use fleet_kit::{
-    Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceName, WorkspaceOutput, WorkspaceWrite,
-    Workspaces,
+    Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceName, WorkspaceOutput,
+    WorkspaceResolution, WorkspaceResolvers, WorkspaceWrite, Workspaces,
 };
 use futures_util::{Stream, future::Either, stream};
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -22,7 +22,7 @@ use wasmtime::component::{Component, InstancePre, Linker};
 /// Named WebAssembly providers.
 ///
 /// Names use `namespace:item`. Only the first colon separates the namespace.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WasmRegistry {
     providers: BTreeMap<String, WasmProvider>,
 }
@@ -36,6 +36,7 @@ pub struct WasmProvider {
     tools: Option<WasmTools>,
     prompts: Option<WasmPrompts>,
     workspaces: Option<WasmWorkspaces>,
+    workspace_resolvers: Option<WasmWorkspaceResolvers>,
     authentication: Option<AuthenticationProviderPre<WasmState>>,
     environment: WasmEnvironment,
     workers: Option<WasmWorkers>,
@@ -111,6 +112,8 @@ impl WasmProvider {
             origins: WasmOrigins::new(capabilities.http),
             credentials: capabilities.credentials,
             workspace_host: capabilities.workspaces,
+            agents: capabilities.agents,
+            workspace_access: capabilities.workspace_access,
         };
         let blob_host = capabilities.blobs;
         let roles = capabilities.roles;
@@ -141,12 +144,23 @@ impl WasmProvider {
             .get_export_index(None, "fleet:providers/workspaces@0.0.0")
             .map(|_| WasmWorkspaces::new(instance.clone(), environment.clone(), workers.clone()))
             .transpose()?;
+        let workspace_resolvers = component
+            .get_export_index(None, "fleet:providers/workspace-resolvers@0.0.0")
+            .map(|_| {
+                WasmWorkspaceResolvers::new(instance.clone(), environment.clone(), workers.clone())
+            })
+            .transpose()?;
         let authentication = component
             .get_export_index(None, "fleet:providers/authentication@0.0.0")
             .map(|_| AuthenticationProviderPre::new(instance).map_err(WasmError::runtime))
             .transpose()?;
 
-        if models.is_none() && tools.is_none() && prompts.is_none() && workspaces.is_none() {
+        if models.is_none()
+            && tools.is_none()
+            && prompts.is_none()
+            && workspaces.is_none()
+            && workspace_resolvers.is_none()
+        {
             return Err(WasmError::no_provider_interfaces());
         }
 
@@ -155,6 +169,7 @@ impl WasmProvider {
             tools,
             prompts,
             workspaces,
+            workspace_resolvers,
             authentication,
             environment,
             workers,
@@ -386,6 +401,38 @@ impl Prompts for WasmRegistry {
     }
 }
 
+impl WorkspaceResolvers for WasmRegistry {
+    type Error = WasmError;
+
+    async fn get(&self, name: &WorkspaceName) -> Result<Option<Workspace>, WasmError> {
+        if let Some((namespace, name, provider)) = self.provider(name.as_ref())
+            && let Some(resolvers) = &provider.workspace_resolvers
+        {
+            let mut workspace = resolvers.get(name).await?;
+            if let Some(workspace) = &mut workspace {
+                workspace.name = format!("{namespace}:{}", workspace.name).into();
+            }
+            Ok(workspace)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn resolve(
+        &self,
+        subject: AgentId,
+        workspace: &Configured<WorkspaceName>,
+    ) -> Result<WorkspaceResolution, WasmError> {
+        if let Some((_, name, provider)) = self.provider(workspace.name.as_ref())
+            && let Some(resolvers) = &provider.workspace_resolvers
+        {
+            resolvers.resolve(name, subject, workspace).await
+        } else {
+            Err(WasmError::workspace_not_found(&workspace.name))
+        }
+    }
+}
+
 impl Workspaces for WasmRegistry {
     type Error = WasmError;
 
@@ -472,6 +519,7 @@ mod tests {
             tools: None,
             prompts: None,
             workspaces: None,
+            workspace_resolvers: None,
             authentication: None,
             environment: WasmEnvironment::default(),
             workers: None,

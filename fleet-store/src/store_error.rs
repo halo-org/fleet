@@ -26,6 +26,10 @@ pub enum StoreError {
     IdempotencyConflict,
     /// The agent does not exist.
     AgentNotFound,
+    /// The caller cannot access the agent.
+    AgentDenied,
+    /// The driving tool call is absent or closing.
+    ScopeClosed,
     /// The message does not exist.
     MessageNotFound,
     /// The requested revision is ahead of the agent.
@@ -56,6 +60,8 @@ impl fmt::Display for StoreError {
             Self::Conflict(message) => f.write_str(message),
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::AgentNotFound => f.write_str("agent not found"),
+            Self::AgentDenied => f.write_str("agent access denied"),
+            Self::ScopeClosed => f.write_str("agent scope closed"),
             Self::MessageNotFound => f.write_str("message not found"),
             Self::InvalidRevision => f.write_str("invalid revision"),
             Self::UnsupportedFormat => f.write_str("unsupported database format"),

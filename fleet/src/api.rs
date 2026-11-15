@@ -730,6 +730,10 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "HTTP status mappings are kept together"
+    )]
     fn details(&self) -> (StatusCode, &'static str, &str) {
         match self {
             Self::Authentication(error) => crate::authentication_api::error_details(error),
@@ -768,6 +772,11 @@ impl ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "shutting_down",
                 "Server is shutting down",
+            ),
+            Self::Fleet(FleetError::Store(fleet_store::StoreError::AgentDenied)) => (
+                StatusCode::FORBIDDEN,
+                "agent_denied",
+                "Managed agents require a driving tool call",
             ),
             Self::Fleet(FleetError::Store(fleet_store::StoreError::PreconditionFailed)) => (
                 StatusCode::PRECONDITION_FAILED,

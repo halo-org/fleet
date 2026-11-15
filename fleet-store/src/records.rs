@@ -51,6 +51,8 @@ pub struct MessageRecord {
     pub message: Option<data::Message>,
     pub position: u128,
     pub input_cursor: Option<u128>,
+    #[serde(default)]
+    pub deleted: bool,
     pub revision: u128,
 }
 
@@ -170,6 +172,7 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
                 message: Some(message.clone()),
                 position,
                 input_cursor: None,
+                deleted: false,
                 revision: agent.revision,
             },
         )?;

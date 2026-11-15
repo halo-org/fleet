@@ -537,6 +537,7 @@ dependencies = [
  "fleet-kit",
  "fleet-store",
  "fleet-wasm",
+ "fleet-workspaces",
  "form_urlencoded",
  "futures-util",
  "getrandom 0.4.3",
@@ -595,6 +596,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-plugin-agents"
+version = "0.0.0"
+dependencies = [
+ "fleet-kit",
+ "serde",
+ "serde_json",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fleet-plugin-host"
 version = "0.0.0"
 dependencies = [
@@ -644,7 +655,6 @@ dependencies = [
 name = "fleet-plugin-tools"
 version = "0.0.0"
 dependencies = [
- "fleet-kit",
  "serde",
  "serde_json",
  "sha2",
@@ -685,6 +695,7 @@ dependencies = [
  "fleet-core",
  "fleet-kit",
  "fleet-store",
+ "fleet-workspaces",
  "futures-channel",
  "futures-util",
  "http",
@@ -703,6 +714,17 @@ version = "0.0.0"
 dependencies = [
  "futures-util",
  "wit-bindgen",
+]
+
+[[package]]
+name = "fleet-workspaces"
+version = "0.0.0"
+dependencies = [
+ "fleet-core",
+ "fleet-kit",
+ "fleet-store",
+ "futures-executor",
+ "serde_json",
 ]
 
 [[package]]

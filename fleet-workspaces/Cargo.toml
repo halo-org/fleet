@@ -1,0 +1,20 @@
+[package]
+name = "fleet-workspaces"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fleet-core.workspace = true
+fleet-kit.workspace = true
+
+[dev-dependencies]
+fleet-store = { workspace = true, features = ["roles", "subagents"] }
+futures-executor = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }

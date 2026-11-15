@@ -1,5 +1,5 @@
 use crate::{
-    AgentId, BlobId, Config, ContentBlock, Error, Tool, ToolContext, ToolOutput, WorkspaceContext,
+    AgentId, BlobId, Config, ContentBlock, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding,
     WorkspacesError, WorkspacesErrorKind, blobs, workspaces,
 };
 use serde::Deserialize;
@@ -117,13 +117,15 @@ pub fn metadata(name: &str) -> Option<Tool> {
 pub async fn read(
     context: &ToolContext,
     config: &Config,
-    workspace: WorkspaceContext,
+    workspace: WorkspaceBinding,
     input: &str,
 ) -> Result<ToolOutput, Error> {
     let input: Read = serde_json::from_str(input)?;
     validate_path(&input.path)?;
     let limit = config.read_limit.unwrap_or(65_536);
-    let bytes = workspaces::read(workspace, input.path.clone(), limit.max(IMAGE_LIMIT)).await?;
+    let bytes =
+        crate::workspace_access::read(workspace, input.path.clone(), limit.max(IMAGE_LIMIT))
+            .await?;
     if let Some(media_type) = image_type(&bytes) {
         let id = blob_id(context.agent_id, media_type, &bytes);
         let info = blobs::put(id, media_type.into(), bytes).await?;
@@ -151,7 +153,7 @@ pub async fn read(
 }
 
 pub async fn write(
-    workspace: WorkspaceContext,
+    workspace: WorkspaceBinding,
     is_retry: bool,
     input: &str,
 ) -> Result<ToolOutput, Error> {
@@ -161,7 +163,7 @@ pub async fn write(
         return Err(unsafe_retry());
     }
     let length = input.content.len();
-    workspaces::write(
+    crate::workspace_access::write(
         workspace,
         workspaces::WorkspaceWrite {
             path: input.path.clone(),
@@ -179,7 +181,7 @@ pub async fn write(
 
 pub async fn edit(
     config: &Config,
-    workspace: WorkspaceContext,
+    workspace: WorkspaceBinding,
     is_retry: bool,
     input: &str,
 ) -> Result<ToolOutput, Error> {
@@ -188,7 +190,7 @@ pub async fn edit(
     if is_retry {
         return Err(unsafe_retry());
     }
-    let original = workspaces::read(
+    let original = crate::workspace_access::read(
         workspace.clone(),
         input.path.clone(),
         config.read_limit.unwrap_or(65_536),
@@ -197,7 +199,7 @@ pub async fn edit(
     let text = core::str::from_utf8(&original)
         .map_err(|_| Error::Input("The file is not valid UTF-8.".into()))?;
     let updated = apply_edits(text, &input.edits)?;
-    workspaces::write(
+    crate::workspace_access::write(
         workspace,
         workspaces::WorkspaceWrite {
             path: input.path.clone(),

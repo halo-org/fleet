@@ -6,11 +6,11 @@ use fleet_core::{
     ModelReasoning, ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput,
     ToolResult, TurnEnd,
 };
-use fleet_kit::StoredRole;
 use fleet_kit::{
     AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
     MessageRecord, Preview, PreviewContent, QueryUpdate, ToolCallRecord, TurnStatus,
 };
+use fleet_kit::{Extension as _, StoredRole};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{DeserializeOwned, value::MapDeserializer},
@@ -159,6 +159,8 @@ pub struct EventsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentsReadQuery {
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    parent: Option<u128>,
     #[serde(default)]
     inbox: ApiInboxFilter,
     #[serde(default, deserialize_with = "deserialize_agent_position")]
@@ -201,6 +203,7 @@ impl From<AgentsReadQuery> for fleet_kit::AgentsQuery {
     fn from(value: AgentsReadQuery) -> Self {
         use fleet_kit::{InboxFilter, InboxState};
         Self {
+            parent: value.parent.map(Into::into),
             inbox: match value.inbox {
                 ApiInboxFilter::All => InboxFilter::All,
                 ApiInboxFilter::Unsettled => InboxFilter::Unsettled,
@@ -301,6 +304,8 @@ pub struct ApiAgentSummary {
     #[serde(serialize_with = "serialize_id")]
     id: u128,
     role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<ApiAgentParent>,
     title: Option<String>,
     pinned: Option<u64>,
     #[serde(serialize_with = "serialize_id")]
@@ -320,6 +325,7 @@ impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
         Self {
             id: value.id.into(),
             role: value.role.to_string(),
+            parent: value.parent.map(Into::into),
             title: value.title,
             pinned: value.pinned,
             metadata_version: value.metadata_version.into(),
@@ -329,6 +335,25 @@ impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
             until: value.until,
             interrupt_pending: value.interrupt_pending,
             position: agent_position(value.position),
+        }
+    }
+}
+
+/// The tool call that created an agent.
+#[derive(Debug, Serialize)]
+pub struct ApiAgentParent {
+    /// The agent that made the call.
+    #[serde(serialize_with = "serialize_id")]
+    pub agent: u128,
+    /// The call that created the agent.
+    pub call: String,
+}
+
+impl From<fleet_kit::AgentParent> for ApiAgentParent {
+    fn from(value: fleet_kit::AgentParent) -> Self {
+        Self {
+            agent: value.agent.into(),
+            call: value.call.into(),
         }
     }
 }
@@ -397,6 +422,9 @@ pub struct ApiAgent {
     pub role: String,
     /// The role parameters.
     pub parameters: JsonObject,
+    /// The tool call that created the agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ApiAgentParent>,
     /// The optional display title.
     pub title: Option<String>,
     /// When the agent was pinned, in Unix milliseconds.
@@ -1313,10 +1341,15 @@ impl From<AgentMetadata> for ApiAgent {
         let agent = metadata.agent;
         let title = fleet_kit::agent_title(&agent.extensions).map(str::to_owned);
         let pinned = fleet_kit::agent_pinned(&agent.extensions);
+        let parent = fleet_kit::AgentParent::get(&agent.extensions)
+            .ok()
+            .flatten()
+            .map(Into::into);
         Self {
             id: agent.id.into(),
             role: agent.role.name.into(),
             parameters: agent.role.config,
+            parent,
             title,
             pinned,
             metadata_version: metadata.version.into(),

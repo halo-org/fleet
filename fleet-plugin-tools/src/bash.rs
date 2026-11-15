@@ -1,4 +1,4 @@
-use crate::{Config, Error, Tool, ToolContext, ToolOutput, WorkspaceContext, workspaces};
+use crate::{Config, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding, workspaces};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -41,7 +41,7 @@ pub fn metadata() -> Tool {
 pub async fn execute(
     context: &ToolContext,
     config: &Config,
-    workspace: WorkspaceContext,
+    workspace: WorkspaceBinding,
     is_retry: bool,
     input: &str,
 ) -> Result<ToolOutput, Error> {
@@ -69,7 +69,7 @@ pub async fn execute(
         timeout_ms: timeout,
         output_limit: config.output_limit.unwrap_or(65_536),
     };
-    let result = workspaces::exec(workspace, is_retry, command).await?;
+    let result = crate::workspace_access::exec(workspace, is_retry, command).await?;
     Ok(render(&result))
 }
 

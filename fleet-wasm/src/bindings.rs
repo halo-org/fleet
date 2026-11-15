@@ -27,6 +27,16 @@ pub mod role_host {
 
 pub use role_host::fleet::providers::roles;
 
+pub mod agent_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "agent-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub use agent_host::fleet::providers::agents;
+
 pub mod authentication {
     wasmtime::component::bindgen!({
         path: "wit",
@@ -87,6 +97,32 @@ pub mod workspace_host {
         path: "wit",
         world: "workspace-host",
         with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub mod workspace_access_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "workspace-access-host",
+        with: {
+            "fleet:providers/types": super::types,
+            "fleet:providers/workspaces": super::workspace_host::fleet::providers::workspaces,
+        },
+    });
+}
+
+pub use workspace_access_host::fleet::providers::workspace_access;
+
+pub mod workspace_resolvers {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "workspace-resolver-provider",
+        require_store_data_send: true,
+        with: {
+            "fleet:providers/configuration": super::configuration,
+            "fleet:providers/types": super::types,
+            "fleet:providers/workspaces": super::workspace_host::fleet::providers::workspaces,
+        },
     });
 }
 

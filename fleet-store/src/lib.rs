@@ -19,7 +19,13 @@
 //! The `notifications` feature claims notifications for completed turns and stores the devices
 //! that receive them. A notification is recorded in the transaction that completes a turn with no
 //! queued messages, with all feature sets.
+//!
+//! The `subagents` feature provides scoped `fleet_kit::Agents` access. Hosts must run
+//! `Store::reconcile_agent_scopes` on startup and after `Store::agent_scopes_changed` to stop
+//! execution whose driving call has ended. Scope records are preserved with all feature sets.
 
+#[cfg(feature = "subagents")]
+mod agent_access;
 mod agents;
 mod blob_records;
 #[cfg(feature = "blobs")]
@@ -35,6 +41,7 @@ mod records;
 mod role_records;
 #[cfg(feature = "roles")]
 mod roles;
+mod scope_records;
 mod store;
 mod store_error;
 mod worker;
@@ -42,6 +49,8 @@ mod worker;
 #[cfg(feature = "queries")]
 mod queries;
 
+#[cfg(feature = "subagents")]
+pub use self::agent_access::AgentAccess;
 #[cfg(feature = "blobs")]
 pub use self::blobs::{AgentBlobs, MAX_BLOB_BYTES, MAX_UPLOAD_CHUNK_BYTES, Upload};
 #[cfg(feature = "notifications")]
