@@ -69,6 +69,8 @@ impl Store {
         transaction.open_table(crate::blob_records::UPLOADS)?;
         transaction.open_table(crate::blob_records::CHUNKS)?;
         transaction.open_table(crate::role_records::ROLES)?;
+        transaction.open_table(crate::scope_records::SCOPES)?;
+        transaction.open_table(crate::scope_records::REQUESTS)?;
         transaction.commit()?;
         let listeners = Listeners::default();
         let worker = Arc::new(WorkerHandle::new(database, listeners.clone())?);
@@ -121,6 +123,13 @@ impl Store {
                         }
                         return Ok(());
                     }
+                    if let Request::SendMessage(id, _) | Request::InterruptAgent(id, Some(_)) =
+                        &request
+                        && crate::metadata::agent_parent(&records.agent(*id)?.agent.extensions)
+                            .is_some()
+                    {
+                        return Err(StoreError::AgentDenied);
+                    }
                     let (agent, wake) = apply_agent_request(&mut records, &request)?;
                     let id = agent.agent.id;
                     let summary_changed = crate::agents::sync_agent(
@@ -137,6 +146,7 @@ impl Store {
                     worker.listeners.notify(Topic::Snoozes);
                 }
                 worker.listeners.notify(Topic::Agent(agent_id));
+                worker.listeners.notify(Topic::AgentScopes);
                 if interrupt {
                     if let Some(preview) = worker.previews.get_mut(&agent_id) {
                         preview.invalidate();
@@ -206,7 +216,7 @@ fn apply_collection_request(
     Ok(Some((id, changed, summary_changed)))
 }
 
-fn apply_agent_request(
+pub fn apply_agent_request(
     records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
     request: &Request,
 ) -> Result<(AgentRecord, bool), StoreError> {
@@ -718,7 +728,9 @@ impl RuntimeStore for Store {
                             agent,
                             data::EventPayload::TurnEnd(data::TurnEnd::Completed),
                         )?;
-                        if agent.pending_messages == 0 {
+                        if agent.pending_messages == 0
+                            && crate::metadata::agent_parent(&agent.agent.extensions).is_none()
+                        {
                             crate::notification_records::record(records, agent.agent.id, cursor)?;
                             return Ok(true);
                         }

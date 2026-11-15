@@ -2,8 +2,8 @@ use crate::{Authentication, Config, Fleet, PluginRoles};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
-    Wasm, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount, WasmOrigin,
-    WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceHost,
+    Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount,
+    WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceAccess, WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -72,7 +72,28 @@ pub struct PluginCapabilities {
     #[serde(default)]
     workspaces: Vec<String>,
     #[serde(default)]
-    roles: bool,
+    roles: RoleCapability,
+    #[serde(default)]
+    agents: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RoleCapability {
+    Enabled(bool),
+    Permission(RolePermission),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RolePermission {
+    Read,
+}
+
+impl Default for RoleCapability {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,15 +176,6 @@ pub async fn load(
             io::Error::other(format!("plugin was not loaded: {}", provider.plugin))
         })?;
         let capabilities = plugin.capabilities();
-        let http = capabilities
-            .http
-            .iter()
-            .map(|origin| origin.parse::<WasmOrigin>())
-            .collect::<Result<_, _>>()
-            .map_err(|source| LoadError {
-                target: format!("plugin {}", provider.plugin),
-                source,
-            })?;
         let mut workspaces = WasmRegistry::new();
         for dependency in &capabilities.workspaces {
             let provider = loaded
@@ -171,30 +183,18 @@ pub async fn load(
                 .expect("dependency is loaded");
             workspaces.insert(dependency, provider.clone())?;
         }
-        let blob_store = fleet.blob_store().clone();
-        let capabilities = WasmCapabilities {
-            blobs: capabilities.blobs.then(|| {
-                WasmBlobs::new(blob_store.clone()).with_agents(move |id| blob_store.agent_blobs(id))
-            }),
-            http,
-            filesystem: capabilities
-                .filesystem
-                .iter()
-                .map(|mount| WasmMount {
-                    host_path: directory.join(&mount.host_path),
-                    guest_path: mount.guest_path.clone(),
-                    read_only: mount.read_only,
-                })
-                .collect(),
-            process: capabilities.process,
-            workers: capabilities.workers,
-            credentials: capabilities
-                .credentials
-                .then(|| WasmCredentials::new(authentication.scope(name))),
-            workspaces: (!capabilities.workspaces.is_empty())
-                .then(|| WasmWorkspaceHost::new(workspaces)),
-            roles: capabilities.roles.then(|| roles(fleet, name)),
-        };
+        let capabilities = capabilities_for(
+            capabilities,
+            workspaces,
+            fleet,
+            name,
+            directory,
+            authentication,
+        )
+        .map_err(|source| LoadError {
+            target: format!("plugin {}", provider.plugin),
+            source,
+        })?;
         let provider = wasm
             .provider(component, &provider.config, capabilities)
             .map_err(|source| LoadError {
@@ -212,6 +212,65 @@ pub async fn load(
     Ok(providers)
 }
 
+fn capabilities_for(
+    capabilities: &PluginCapabilities,
+    workspaces: WasmRegistry,
+    fleet: &Fleet,
+    name: &str,
+    directory: &Path,
+    authentication: &Authentication,
+) -> Result<WasmCapabilities, WasmError> {
+    let http = capabilities
+        .http
+        .iter()
+        .map(|origin| origin.parse::<WasmOrigin>())
+        .collect::<Result<_, _>>()?;
+    let workspace_access = (!capabilities.workspaces.is_empty()).then(|| {
+        let store = fleet.blob_store().clone();
+        let workspaces = workspaces.clone();
+        WasmWorkspaceAccess::new(move |agent| {
+            fleet_workspaces::AgentWorkspaces::new(
+                agent,
+                store.agent_access(agent),
+                store.clone(),
+                workspaces.clone(),
+            )
+        })
+    });
+    let blob_store = fleet.blob_store().clone();
+    Ok(WasmCapabilities {
+        blobs: capabilities.blobs.then(|| {
+            WasmBlobs::new(blob_store.clone()).with_agents(move |id| blob_store.agent_blobs(id))
+        }),
+        http,
+        filesystem: capabilities
+            .filesystem
+            .iter()
+            .map(|mount| WasmMount {
+                host_path: directory.join(&mount.host_path),
+                guest_path: mount.guest_path.clone(),
+                read_only: mount.read_only,
+            })
+            .collect(),
+        process: capabilities.process,
+        workers: capabilities.workers,
+        credentials: capabilities
+            .credentials
+            .then(|| WasmCredentials::new(authentication.scope(name))),
+        workspaces: (!capabilities.workspaces.is_empty())
+            .then(|| WasmWorkspaceHost::new(workspaces)),
+        workspace_access,
+        roles: match capabilities.roles {
+            RoleCapability::Enabled(false) => None,
+            RoleCapability::Enabled(true) => Some(roles(fleet, name)),
+            RoleCapability::Permission(RolePermission::Read) => {
+                Some(roles(fleet, name).read_only())
+            }
+        },
+        agents: capabilities.agents.then(|| agents(fleet)),
+    })
+}
+
 impl PluginConfig {
     const fn capabilities(&self) -> &PluginCapabilities {
         match self {
@@ -224,6 +283,17 @@ fn roles(fleet: &Fleet, provider: &str) -> WasmRoles {
     let fleet = fleet.clone();
     let provider = provider.to_owned();
     WasmRoles::new(move |id| PluginRoles::new(fleet.clone(), &provider, id))
+}
+
+fn agents(fleet: &Fleet) -> WasmAgents {
+    let store = fleet.blob_store().clone();
+    WasmAgents::new(move |agent, call| {
+        let access = store.agent_access(agent);
+        match call {
+            Some(call) => access.for_call(call),
+            None => access,
+        }
+    })
 }
 
 fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
@@ -454,6 +524,25 @@ mod tests {
 
             assert_eq!(error.kind(), io::ErrorKind::Other);
         }
+    }
+
+    #[test]
+    fn roles_can_be_read_only() {
+        let plugin: PluginConfig = serde_json::from_value(json!({
+            "path": "agents.wasm",
+            "capabilities": { "roles": "read", "agents": true },
+        }))
+        .unwrap();
+        assert!(matches!(
+            plugin.capabilities().roles,
+            RoleCapability::Permission(RolePermission::Read)
+        ));
+        let error = serde_json::from_value::<PluginConfig>(json!({
+            "path": "agents.wasm",
+            "capabilities": { "roles": "write" },
+        }))
+        .unwrap_err();
+        assert!(error.is_data());
     }
 
     #[test]

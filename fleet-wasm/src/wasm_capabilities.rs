@@ -1,4 +1,7 @@
-use crate::{WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmRoles, WasmWorkspaceHost};
+use crate::{
+    WasmAgents, WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmRoles, WasmWorkspaceAccess,
+    WasmWorkspaceHost,
+};
 use core::mem;
 use std::path::PathBuf;
 use wasmtime_wasi::{FsPerms, WasiCtx, filesystem::WasiFilesystemCtx};
@@ -24,6 +27,10 @@ pub struct WasmCapabilities {
     pub workspaces: Option<WasmWorkspaceHost>,
     /// Roles available to tool calls.
     pub roles: Option<WasmRoles>,
+    /// Role-driven workspaces available to tool calls.
+    pub workspace_access: Option<WasmWorkspaceAccess>,
+    /// Agents available within tool calls and workspace resolution.
+    pub agents: Option<WasmAgents>,
 }
 
 /// A host directory exposed to a WebAssembly provider.

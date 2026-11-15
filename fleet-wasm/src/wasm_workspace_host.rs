@@ -203,7 +203,7 @@ fn host(
         })
 }
 
-fn convert_context(
+pub fn convert_context(
     context: workspaces::WorkspaceContext,
 ) -> Result<WorkspaceContext, workspaces::WorkspacesError> {
     Ok(WorkspaceContext {
@@ -224,7 +224,7 @@ fn json_error(error: &serde_json::Error) -> workspaces::WorkspacesError {
     }
 }
 
-fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> workspaces::WorkspacesError {
+pub fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> workspaces::WorkspacesError {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(error) = source {

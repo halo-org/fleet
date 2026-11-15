@@ -10,8 +10,9 @@ use crate::{
 use fleet_core::AgentId;
 #[cfg(feature = "queries")]
 use fleet_kit::{
-    AgentCollection, AgentPosition, AgentSummary, AgentsPage, AgentsQuery, AgentsUpdates,
-    CollectionRevision, EventDirection, InboxAction, InboxFilter, InboxState, Revision,
+    AgentCollection, AgentParent, AgentPosition, AgentSummary, AgentsPage, AgentsQuery,
+    AgentsUpdates, CollectionRevision, EventDirection, InboxAction, InboxFilter, InboxState,
+    Revision,
 };
 #[cfg(feature = "queries")]
 use redb::ReadableDatabase as _;
@@ -24,6 +25,7 @@ const SUMMARY: u8 = 14;
 const INBOX: u8 = 15;
 const CHANGE: u8 = 16;
 const SNOOZE: u8 = 17;
+const CHILDREN: u8 = 20;
 
 const PENDING: u8 = 0;
 const BUSY: u8 = 1;
@@ -33,6 +35,8 @@ const SETTLED: u8 = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Summary {
     role: String,
+    #[serde(default)]
+    parent: Option<Parent>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -44,6 +48,12 @@ struct Summary {
     until: Option<u64>,
     interrupt_pending: bool,
     order: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Parent {
+    agent: u128,
+    call: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +72,10 @@ impl SummaryRecord {
         Some(AgentSummary {
             id: self.id.into(),
             role: value.role.into(),
+            parent: value.parent.map(|parent| AgentParent {
+                agent: parent.agent.into(),
+                call: parent.call.into(),
+            }),
             title: value.title,
             pinned: value.pinned,
             metadata_version: value.metadata_version.into(),
@@ -100,9 +114,17 @@ const fn state_key(value: InboxState) -> u8 {
     }
 }
 
-fn position_key(inbox: u8, order: u128, id: u128) -> Vec<u8> {
+fn index_key(parent: Option<u128>) -> Vec<u8> {
+    parent.map_or_else(
+        || vec![INBOX],
+        |parent| [&[CHILDREN], parent.to_be_bytes().as_slice()].concat(),
+    )
+}
+
+fn position_key(index: &[u8], inbox: u8, order: u128, id: u128) -> Vec<u8> {
     [
-        &[INBOX, inbox],
+        index,
+        &[inbox],
         order.to_be_bytes().as_slice(),
         id.to_be_bytes().as_slice(),
     ]
@@ -110,7 +132,8 @@ fn position_key(inbox: u8, order: u128, id: u128) -> Vec<u8> {
 }
 
 fn inbox_key(id: u128, value: &Summary) -> Vec<u8> {
-    position_key(value.inbox, value.order, id)
+    let index = index_key(value.parent.as_ref().map(|parent| parent.agent));
+    position_key(&index, value.inbox, value.order, id)
 }
 
 fn change_key(revision: u128, id: u128) -> Vec<u8> {
@@ -217,6 +240,7 @@ pub fn sync_agent(
         .and_then(|row| row.value.clone())
         .unwrap_or_else(|| Summary {
             role: agent.agent.role.name.clone(),
+            parent: None,
             title: None,
             pinned: None,
             metadata_version: agent.metadata_revision,
@@ -239,6 +263,11 @@ pub fn sync_agent(
         value.until = None;
     }
     value.role.clone_from(&agent.agent.role.name);
+    value.parent =
+        crate::metadata::agent_parent(&agent.agent.extensions).map(|(agent, call)| Parent {
+            agent,
+            call: call.to_owned(),
+        });
     value.title = crate::metadata::agent_title(&agent.agent.extensions).map(str::to_owned);
     value.pinned = crate::metadata::agent_pinned(&agent.agent.extensions);
     value.metadata_version = agent.metadata_revision;
@@ -346,16 +375,18 @@ impl AgentCollection for Store {
                     EventDirection::Forward => (query.from, query.until),
                     EventDirection::Backward => (query.until, query.from),
                 };
-                let mut start = vec![INBOX, low];
-                let mut end = vec![INBOX, high];
+                let index = index_key(query.parent.map(Into::into));
+                let mut start = [index.as_slice(), &[low]].concat();
+                let mut end = [index.as_slice(), &[high]].concat();
                 if let Some(lower) = lower {
                     let mut key =
-                        position_key(state_key(lower.inbox), lower.order, lower.id.into());
+                        position_key(&index, state_key(lower.inbox), lower.order, lower.id.into());
                     key.push(0);
                     start = start.max(key);
                 }
                 if let Some(upper) = upper {
                     end = end.min(position_key(
+                        &index,
                         state_key(upper.inbox),
                         upper.order,
                         upper.id.into(),

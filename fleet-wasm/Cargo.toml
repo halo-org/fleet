@@ -28,6 +28,7 @@ rustix = { workspace = true, features = ["process", "std"] }
 tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
-fleet-store = { workspace = true, features = ["blobs", "roles"] }
+fleet-store = { workspace = true, features = ["blobs", "roles", "subagents"] }
+fleet-workspaces.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 wit-component = { version = "0.262.0", default-features = false }

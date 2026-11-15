@@ -319,6 +319,9 @@ impl Queries for Store {
                             &u128::from(message_id).to_be_bytes(),
                         ))?
                         .ok_or(StoreError::MessageNotFound)?;
+                    if message.deleted {
+                        return Err(StoreError::MessageNotFound);
+                    }
                     let Some(cursor) = message.input_cursor else {
                         return Ok(None);
                     };
@@ -400,6 +403,9 @@ const fn activity(agent: &AgentRecord) -> AgentActivity {
 
 impl From<records::MessageRecord> for MessageRecord {
     fn from(record: records::MessageRecord) -> Self {
+        if record.deleted {
+            return Self::Deleted(record.id.into());
+        }
         match record.message {
             Some(message) => Self::Pending {
                 position: record.position,

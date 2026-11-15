@@ -232,6 +232,7 @@ They do not add validation to core.
 
 Approve `"roles": true` in a plugin's `capabilities` and have its component import
 `fleet:providers/roles@0.0.0`. Tool calls can then list, read and write every stored role.
+Use `"roles": "read"` to allow discovery without writes.
 Model calls and metadata lookups receive no role access. Fleet accepts only valid names and
 roles that the API can represent as definitions. Idempotency keys are scoped to the provider
 and agent. The capability grants no deletion and applies no further policy. Plugins such as
@@ -241,6 +242,33 @@ only administrators control.
 Agents look up their role on every turn. Write access lets an agent change its own model,
 tools and system prompt from its next turn, and those of every agent sharing a writable role.
 Give it only to agents trusted with the access of any role they can write.
+
+## Subagents
+
+Approve `"agents": true` in a plugin's capabilities and import
+`fleet:providers/agents@0.0.0`. Tool calls can create agents, queue messages, read
+permitted history and wait for the first turn end after a message is consumed.
+Metadata access covers relatives; history access covers the caller and its descendants.
+Workspace resolvers receive metadata access only. See [the agents plugin](../fleet-plugin-agents)
+for the simple delegation tools and parent workspace configuration.
+
+The driving call owns execution, including queued input and background work.
+Durable resolution or interruption closes that scope recursively; a response or
+parent turn end does not. Cleanup survives restarts and retains ownership until
+execution settles. Conversations persist and can be resumed by ID in a later call.
+There is no explicit close operation. Managed children cannot receive unscoped
+HTTP messages, including messages attached to interrupts.
+
+Creation records `fleet.parent`, exposed as `parent` by the API. Clients cannot
+set or change it. Provenance stays fixed when a later call resumes the agent.
+Operation keys are scoped to the calling agent and call, not provider names.
+Images sent to a child must already be readable by its caller.
+
+Children do not appear in the root inbox or notifications. `GET /agents?parent=1`
+scans agent `1`'s children; collection updates include them. Subagent execution and
+workspace resolution live above core, using kit contracts, the store's scope
+reconciler and `fleet-workspaces`. Plugins select workspace sources; the host
+loads current role instances and enforces its approved provider list.
 
 ## Images and blobs
 

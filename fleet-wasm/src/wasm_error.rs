@@ -125,6 +125,27 @@ impl WasmError {
             message: error.message,
         })
     }
+
+    pub(crate) fn from_workspace_host(
+        error: crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesError,
+    ) -> Self {
+        Self(Kind::Workspace {
+            kind: match error.kind {
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::NotFound => WorkspacesErrorKind::NotFound,
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::InvalidConfiguration => {
+                    WorkspacesErrorKind::InvalidConfiguration
+                }
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::FileNotFound => WorkspacesErrorKind::FileNotFound,
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::FileTooLarge => WorkspacesErrorKind::FileTooLarge,
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::FileChanged => WorkspacesErrorKind::FileChanged,
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::UnsafeToRetry => {
+                    WorkspacesErrorKind::UnsafeToRetry
+                }
+                crate::bindings::workspace_host::fleet::providers::workspaces::WorkspacesErrorKind::Other => WorkspacesErrorKind::Other,
+            },
+            message: error.message,
+        })
+    }
 }
 
 impl fmt::Display for WasmError {

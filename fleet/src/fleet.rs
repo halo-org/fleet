@@ -191,8 +191,45 @@ impl Fleet {
             state.idle_handler.wait_for_mutations().await;
         };
 
-        let work = future::join3(self.run_snoozes(), self.run_notifications(), agents);
+        let work = future::join(
+            future::join3(
+                self.run_snoozes(),
+                self.run_notifications(),
+                self.run_agent_scopes(),
+            ),
+            agents,
+        );
         future::select(pin!(shutdown), pin!(work)).await;
+    }
+
+    async fn run_agent_scopes(&self) {
+        loop {
+            let changed = self.state.store.agent_scopes_changed();
+            let Some(guard) = self.state.idle_handler.track_mutation() else {
+                return;
+            };
+            let remaining = match self.state.store.reconcile_agent_scopes().await {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    eprintln!("Could not settle agent scopes: {}", ErrorChain(&error));
+                    future::select(
+                        pin!(self.wait_for_shutdown()),
+                        pin!(tokio::time::sleep(Duration::from_secs(1))),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let guard = (remaining != 0).then_some(guard);
+            let stopped = matches!(
+                future::select(pin!(self.wait_for_shutdown()), pin!(changed)).await,
+                future::Either::Left(_)
+            );
+            drop(guard);
+            if stopped {
+                return;
+            }
+        }
     }
 
     async fn run_snoozes(&self) {
@@ -1190,6 +1227,67 @@ mod tests {
                 .unwrap();
             assert!(next_frame(&mut stream).await.contains("\"inbox\":\"busy\""));
         });
+    }
+
+    #[test]
+    fn scopes_settle_without_clients_and_release_idle_shutdown() {
+        use fleet_kit::Agents as _;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let fleet = fleet().await;
+                    let store = &fleet.state.store;
+                    store.consume_messages(1.into(), None, true).await.unwrap();
+                    let mut response = model_response("Working");
+                    response.output.push(ModelOutput::ToolCall(ToolCall {
+                        id: "drive".into(),
+                        tool: "delegate".into(),
+                        is_async: true,
+                        input: JsonObject::new(),
+                    }));
+                    store
+                        .append_model_response(1.into(), 0.into(), true, &response)
+                        .await
+                        .unwrap();
+
+                    future::join(fleet.run_agent_scopes(), async {
+                        let access = store.agent_access(1.into()).for_call("drive".into());
+                        let role = Configured {
+                            name: "child".into(),
+                            config: JsonObject::new(),
+                        };
+                        let child = access
+                            .create("child", &role, &JsonObject::new())
+                            .await
+                            .unwrap();
+                        let message = access.send("message", child, &[]).await.unwrap();
+                        store
+                            .append_tool_result(
+                                1.into(),
+                                &ToolResult {
+                                    call_id: "drive".into(),
+                                    output: ToolOutput {
+                                        content: vec![],
+                                        structured_content: None,
+                                        is_error: false,
+                                    },
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        let error = access.wait_for_turn_end(child, message).await.unwrap_err();
+                        assert!(matches!(error, StoreError::MessageNotFound));
+                        fleet.idle_handler().wait_for_mutations().await;
+                        fleet.shutdown();
+                    })
+                    .await;
+                })
+                .await
+                .unwrap();
+            });
     }
 
     #[test]

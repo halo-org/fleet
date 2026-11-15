@@ -11,7 +11,8 @@ pub(crate) use self::{
         fleet::providers::{
             blobs::{self, BlobsError, BlobsErrorKind},
             types::{AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput},
-            workspaces::{self, WorkspaceContext, WorkspacesError, WorkspacesErrorKind},
+            workspace_access::{self, WorkspaceBinding},
+            workspaces::{self, WorkspacesError, WorkspacesErrorKind},
         },
     },
     config::Config,
@@ -48,10 +49,7 @@ impl Guest for Tools {
             return Ok(error_output("The tool is not available."));
         }
         let config = Config::load(&context)?;
-        let workspace = crate::config::workspace(&context)?;
-        workspaces::open(workspace.clone())
-            .await
-            .map_err(service_error)?;
+        let workspace = workspace_access::open().await.map_err(service_error)?;
         let result = match context.tool.name.as_str() {
             "bash" => bash::execute(&context, &config, workspace, is_retry, &input).await,
             "read" => files::read(&context, &config, workspace, &input).await,

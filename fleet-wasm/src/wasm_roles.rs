@@ -17,7 +17,10 @@ pub struct WasmRoles(Arc<dyn Fn(AgentId) -> WasmAgentRoles + Send + Sync>);
 
 /// Role access for a single agent's tool call.
 #[derive(Clone)]
-pub struct WasmAgentRoles(Arc<dyn RolesObject>);
+pub struct WasmAgentRoles {
+    provider: Arc<dyn RolesObject>,
+    writable: bool,
+}
 
 trait RolesObject: Send + Sync {
     fn list(&self) -> BoxFuture<'_, Result<Vec<roles::StoredRole>, roles::RolesError>>;
@@ -38,7 +41,20 @@ impl WasmRoles {
     pub fn new<R: RoleStore + Send + Sync + 'static>(
         factory: impl Fn(AgentId) -> R + Send + Sync + 'static,
     ) -> Self {
-        Self(Arc::new(move |id| WasmAgentRoles(Arc::new(factory(id)))))
+        Self(Arc::new(move |id| WasmAgentRoles {
+            provider: Arc::new(factory(id)),
+            writable: true,
+        }))
+    }
+
+    /// Restricts the capability to reading roles.
+    #[must_use]
+    pub fn read_only(self) -> Self {
+        Self(Arc::new(move |id| {
+            let mut roles = (self.0)(id);
+            roles.writable = false;
+            roles
+        }))
     }
 
     pub(crate) fn for_agent(&self, id: AgentId) -> WasmAgentRoles {
@@ -97,14 +113,14 @@ impl roles::HostWithStore<WasmState> for HasSelf<WasmState> {
     async fn list(
         store: &Accessor<WasmState, Self>,
     ) -> Result<Vec<roles::StoredRole>, roles::RolesError> {
-        host(store)?.0.list().await
+        host(store)?.provider.list().await
     }
 
     async fn get(
         store: &Accessor<WasmState, Self>,
         name: String,
     ) -> Result<Option<roles::StoredRole>, roles::RolesError> {
-        host(store)?.0.get(name).await
+        host(store)?.provider.get(name).await
     }
 
     async fn put(
@@ -113,7 +129,14 @@ impl roles::HostWithStore<WasmState> for HasSelf<WasmState> {
         role: roles::Role,
         expected: Option<roles::RoleVersion>,
     ) -> Result<(), roles::RolesError> {
-        host(store)?.0.put(idempotency_key, role, expected).await
+        let host = host(store)?;
+        if !host.writable {
+            return Err(roles::RolesError {
+                kind: roles::RolesErrorKind::Other,
+                message: "role writes are not allowed".into(),
+            });
+        }
+        host.provider.put(idempotency_key, role, expected).await
     }
 }
 
@@ -396,6 +419,48 @@ mod tests {
                         .await
                         .unwrap_err();
                         assert_matches!(error.kind, roles::RolesErrorKind::PreconditionFailed);
+                    })
+                    .await
+                    .unwrap();
+            });
+    }
+
+    #[test]
+    fn read_only_access_rejects_writes() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let roles = Arc::new(fleet_store::Store::memory().unwrap());
+                roles.put_role("seed", &role(), None).await.unwrap();
+                let mut state = WasmState::new(WasmEnvironment::default(), None);
+                state.set_roles(Some(
+                    WasmRoles::new(move |_| roles.clone())
+                        .read_only()
+                        .for_agent(1.into()),
+                ));
+                let mut config = Config::new();
+                config.wasm_component_model_async(true);
+                let mut store = Store::new(&Engine::new(&config).unwrap(), state);
+                store
+                    .run_concurrent(async |accessor| {
+                        let stored = <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::get(
+                            accessor,
+                            "reviewer".into(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        let error = <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::put(
+                            accessor,
+                            "write".into(),
+                            stored.role,
+                            Some(stored.version),
+                        )
+                        .await
+                        .unwrap_err();
+                        assert_eq!(error.message, "role writes are not allowed");
                     })
                     .await
                     .unwrap();
