@@ -1,16 +1,15 @@
 # Agents plugin
 
-`oneshot_agent` and `oneshot_agent_async` queue a task in a new or existing child
-agent and return its response. `parent` resolves a workspace from the parent
+`oneshot_agent` and `oneshot_agent_async` run a task in a new child agent and
+return its response. `parent` resolves a workspace from the parent
 agent's current role. The plugin needs agent access and read-only role access;
 it does not need workspace I/O, process, filesystem or HTTP access.
 
 ## Calls and responses
 
-Supply `role`, `prompt`, optional `parameters` and `title` to create an agent.
-Supply `agent` (a decimal ID) and `prompt` to resume its conversation instead.
-The structured result contains the agent ID. Only the creating parent can drive
-that agent, and only one driving call can own it at a time.
+Supply `role`, `prompt` and optional `parameters` and `title`. The result is the
+agent's response text. The agent finishes when the call ends, and only that call
+can message it.
 
 Both tools wait for the first turn end **after the queued message is consumed**.
 An earlier unsolicited response does not satisfy the wait. An interruption is
@@ -23,9 +22,9 @@ The driving tool call owns execution until its result is durably committed or
 it is interrupted. Ending a parent turn, retrying a call or dropping an attempt
 is not scope closure. When the scope closes, Fleet withdraws unconsumed input
 and interrupts remaining work, including nested agent calls. The conversation
-remains; a later call can acquire it after cleanup settles. Scope state and
-operation receipts survive restarts. Children do not appear in the root inbox
-or notifications, but remain available in collection updates and `?parent=` scans.
+remains readable. Scope state and operation receipts survive restarts. Children
+do not appear in the root inbox or notifications, but remain available in
+collection updates and `?parent=` scans.
 
 The host capability also supports keyed creation and queued sends within a
 single driving call. An orchestration plugin can send several messages and keep

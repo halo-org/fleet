@@ -226,7 +226,7 @@ fn closure_withdraws_input_and_fences_late_nested_work() {
 }
 
 #[test]
-fn execution_can_be_reacquired_only_after_cleanup() {
+fn only_the_creating_call_can_send() {
     futures_executor::block_on(async {
         let store = Store::memory().unwrap();
         root(&store).await;
@@ -236,36 +236,22 @@ fn execution_can_be_reacquired_only_after_cleanup() {
             .create("child", &role(), &JsonObject::new())
             .await
             .unwrap();
-        first.send("start", child, &[]).await.unwrap();
-        answer(&store, child, vec![call("server")]).await;
+        let message = first.send("start", child, &[]).await.unwrap();
+        let error = second.send("start", child, &[]).await.unwrap_err();
+        assert_matches!(error, StoreError::AgentDenied);
+
+        answer(&store, child, vec![ModelOutput::Text("Done".into())]).await;
         store
             .append_tool_result(1.into(), &result("drive"))
             .await
             .unwrap();
-        store.reconcile_agent_scopes().await.unwrap();
-        let error = second.send("start", child, &[]).await.unwrap_err();
-        assert_matches!(error, StoreError::Conflict(_));
-
-        let state = store.agent_state(child).await.unwrap().unwrap();
-        store
-            .settle_interrupt(child, state.latest_event, &[result("server")])
-            .await
-            .unwrap();
-        store.reconcile_agent_scopes().await.unwrap();
-        let message = second.send("start", child, &[]).await.unwrap();
-        store.reconcile_agent_scopes().await.unwrap();
-        let state = store.agent_state(child).await.unwrap().unwrap();
-        assert!(!state.interrupt_intent);
-        answer(&store, child, vec![ModelOutput::Text("Resumed".into())]).await;
-        let end = second.wait_for_turn_end(child, message).await.unwrap();
-        assert_eq!(end.payload, TurnEnd::Completed);
-        let repeated = first
-            .create("child", &role(), &JsonObject::new())
-            .await
-            .unwrap();
-        assert_eq!(repeated, child);
+        assert_eq!(store.reconcile_agent_scopes().await.unwrap(), 0);
+        let repeated = first.send("start", child, &[]).await.unwrap();
+        assert_eq!(repeated, message);
         let error = first.send("late", child, &[]).await.unwrap_err();
         assert_matches!(error, StoreError::ScopeClosed);
+        let error = second.send("late", child, &[]).await.unwrap_err();
+        assert_matches!(error, StoreError::AgentDenied);
     });
 }
 

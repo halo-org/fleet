@@ -50,7 +50,7 @@ impl Store {
     /// Stops execution whose driving call has ended. Returns the number of remaining scopes.
     ///
     /// Run after changes and on startup. Pending input is withdrawn before interruption. A scope
-    /// remains closed until its agent settles, preventing stale cleanup from reaching a new owner.
+    /// remains closed until its agent settles.
     ///
     /// # Errors
     ///
@@ -198,23 +198,9 @@ impl AgentAccess {
                     if let Request::SendMessage(_, message) = &request {
                         let agent = records.agent(id)?;
                         if crate::metadata::agent_parent(&agent.agent.extensions)
-                            .map(|parent| parent.0)
-                            != Some(owner)
+                            != Some((owner, call.as_str()))
                         {
                             return Err(StoreError::AgentDenied);
-                        }
-                        if let Some(value) = scopes.get(id)? {
-                            let scope: Scope = serde_json::from_slice(value.value())?;
-                            if scope.agent != owner || scope.call != call {
-                                return Err(StoreError::Conflict(
-                                    "agent is owned by another tool call",
-                                ));
-                            }
-                            if scope.closing {
-                                return Err(StoreError::ScopeClosed);
-                            }
-                        } else if !idle(&agent) {
-                            return Err(StoreError::Conflict("agent execution has not settled"));
                         }
                         for blob in crate::blob_records::content_ids(&message.content) {
                             if records.get::<bool>(&records::key(

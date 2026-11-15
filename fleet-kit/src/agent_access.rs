@@ -9,10 +9,10 @@ use crate::{EventQuery, TurnEndEvent};
 /// Agent access granted to a caller, optionally within a tool call.
 ///
 /// Metadata reads may include ancestors. History reads require permission to inspect the agent's
-/// conversation. Mutations require a tool call. An agent's execution belongs to one call at a time;
-/// its conversation remains after that call ends. A durable result or accepted interruption closes
-/// the scope, stopping owned execution, pending input and nested calls. Dropping an execution
-/// attempt does not close it. Retries recover the same operations after restarts.
+/// conversation. Mutations require a tool call. An agent runs only within the call that created it;
+/// its conversation remains readable after that call ends. A durable result or accepted
+/// interruption closes the scope, stopping owned execution, pending input and nested calls.
+/// Dropping an execution attempt does not close it. Retries recover the same operations after restarts.
 ///
 /// Keys identify operations within the calling agent and tool call, independently of the provider.
 /// A successful retry never repeats an operation. Reusing a key with different arguments conflicts.
@@ -50,11 +50,11 @@ pub trait Agents {
         extensions: &JsonObject,
     ) -> impl Future<Output = Result<AgentId, Self::Error>> + Send;
 
-    /// Queues a message, acquiring the agent for this call if it is idle and unowned.
+    /// Queues a message to an agent created by this call.
     ///
-    /// Ownership lasts until the driving call ends, not until a response or parent turn ends.
-    /// Images must already be readable by the caller. Another call's active or closing execution
-    /// returns [`Conflict`](AgentsErrorKind::Conflict).
+    /// Execution lasts until the driving call ends, not until a response or parent turn ends.
+    /// Images must already be readable by the caller. Another call's agent returns
+    /// [`AccessDenied`](AgentsErrorKind::AccessDenied).
     fn send(
         &self,
         key: &str,
@@ -74,7 +74,7 @@ pub enum AgentsErrorKind {
     AccessDenied,
     /// The driving call is absent or closing.
     ScopeClosed,
-    /// Ownership, state or operation arguments conflict.
+    /// State or operation arguments conflict.
     Conflict,
     /// An error not covered by another kind.
     Other,

@@ -252,15 +252,14 @@ Metadata access covers relatives; history access covers the caller and its desce
 Workspace resolvers receive metadata access only. See [the agents plugin](../fleet-plugin-agents)
 for the simple delegation tools and parent workspace configuration.
 
-The driving call owns execution, including queued input and background work.
-Durable resolution or interruption closes that scope recursively; a response or
-parent turn end does not. Cleanup survives restarts and retains ownership until
-execution settles. Conversations persist and can be resumed by ID in a later call.
-There is no explicit close operation. Managed children cannot receive unscoped
+An agent runs only within the call that created it, including queued input and
+background work. Durable resolution or interruption closes that scope recursively;
+a response or parent turn end does not. Cleanup survives restarts. Conversations
+remain readable afterwards. There is no explicit close operation. Managed children cannot receive unscoped
 HTTP messages, including messages attached to interrupts.
 
 Creation records `fleet.parent`, exposed as `parent` by the API. Clients cannot
-set or change it. Provenance stays fixed when a later call resumes the agent.
+set or change it.
 Operation keys are scoped to the calling agent and call, not provider names.
 Images sent to a child must already be readable by its caller.
 
