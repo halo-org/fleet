@@ -7,9 +7,9 @@ use crate::{
     Agent, AgentId, Backoff, Compaction, Error as _, ErrorHandler, Event, EventCursor, EventLog,
     EventPayload, IdleHandler, Model, ModelCompactionResponse, ModelContext, ModelContinuation,
     ModelInput, ModelOutput, ModelRequest, ModelResponse, ModelResponseChunk, ModelTool, Models,
-    OperationError, ParametersError, PrioritySignal, Role, Roles, RuntimeError, RuntimeStore,
-    RuntimeStoreErrorKind, Signal, SignalReceiver, SignalSender, ToolCall, ToolCallId, ToolContext,
-    ToolResult, Tools, ToolsErrorKind, Wake,
+    OperationError, ParametersError, PrioritySignal, Role, RoleInstance, Roles, RuntimeError,
+    RuntimeStore, RuntimeStoreErrorKind, Signal, SignalReceiver, SignalSender, ToolCall,
+    ToolCallId, ToolContext, ToolResult, Tools, ToolsErrorKind, Wake,
 };
 use alloc::{
     boxed::Box,
@@ -565,15 +565,13 @@ where
                 return Ok(ReconcileAction::Stop);
             };
 
-            agent_role.role.model.config = crate::apply_model_parameters(
-                agent_role.role.model.config,
-                &agent_role.role.parameters,
-                &agent_role.agent.role.config,
-            )
-            .map_err(|source| OperationError::ApplyModelParameters {
-                role: agent_role.agent.role.name.clone(),
-                source,
-            })?;
+            agent_role.role.model =
+                RoleInstance::new(&agent_role.role, &agent_role.agent.role.config)
+                    .model()
+                    .map_err(|source| OperationError::ApplyModelParameters {
+                        role: agent_role.agent.role.name.clone(),
+                        source,
+                    })?;
 
             let model = self.model(&agent_role).await?;
 
@@ -991,15 +989,12 @@ where
                 role: agent.role.name.clone(),
             })?;
 
-        role.extensions = crate::apply_extension_parameters(
-            role.extensions,
-            &role.parameters,
-            &agent.role.config,
-        )
-        .map_err(|source| OperationError::ApplyExtensionParameters {
-            role: agent.role.name.clone(),
-            source,
-        })?;
+        role.extensions = RoleInstance::new(&role, &agent.role.config)
+            .extensions()
+            .map_err(|source| OperationError::ApplyExtensionParameters {
+                role: agent.role.name.clone(),
+                source,
+            })?;
 
         Ok(Outcome::Completed(AgentRole { agent, role }))
     }
@@ -1203,18 +1198,10 @@ impl ReconcileState {
 
 impl AgentRole {
     fn tool_context(&self, call: &ToolCall) -> Result<Option<ToolContext>, ParametersError> {
-        let Some(tool) = self.role.tools.get(&call.tool) else {
+        let Some(tool) = RoleInstance::new(&self.role, &self.agent.role.config).tool(&call.tool)?
+        else {
             return Ok(None);
         };
-
-        let mut tool = tool.clone();
-
-        tool.config = crate::apply_tool_parameters(
-            &call.tool,
-            tool.config,
-            &self.role.parameters,
-            &self.agent.role.config,
-        )?;
 
         Ok(Some(ToolContext {
             tool,

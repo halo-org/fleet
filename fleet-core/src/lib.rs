@@ -11,6 +11,7 @@ mod model_request;
 mod operation_error;
 mod parameters;
 mod ports;
+mod role_instance;
 mod runtime;
 mod runtime_error;
 mod signal;
@@ -21,18 +22,18 @@ pub(crate) use self::{
     event_log::EventLog,
     model_request::ModelRequest,
     operation_error::OperationError,
-    parameters::{
-        ParametersError, apply_extension_parameters, apply_model_parameters, apply_tool_parameters,
-    },
+    parameters::{apply_extension_parameters, apply_model_parameters, apply_tool_parameters},
     runtime_error::RuntimeError,
     signal::{PrioritySignal, Signal, SignalReceiver, SignalSender, signal_channel},
 };
 pub use self::{
     error::Error,
+    parameters::ParametersError,
     ports::{
         ClientStore, ClientStoreErrorKind, ErrorHandler, IdleHandler, Models, ModelsErrorKind,
         Prompts, Roles, RuntimeStore, RuntimeStoreErrorKind, Tools, ToolsErrorKind,
     },
+    role_instance::RoleInstance,
     runtime::run,
     types::{
         Agent, AgentId, AgentState, BlobId, Compaction, Configured, ContentBlock, Event,
