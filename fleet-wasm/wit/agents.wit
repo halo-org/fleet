@@ -111,7 +111,7 @@ interface agents {
         access-denied,
         /// The driving call is absent or closing.
         scope-closed,
-        /// Ownership, state or operation arguments conflict.
+        /// State or operation arguments conflict.
         conflict,
         /// An error not covered by any other kind.
         other,
@@ -144,11 +144,11 @@ interface agents {
     create: async func(key: string, role: configured, extensions: json-object)
         -> result<agent-id, agents-error>;
 
-    /// Queues a message, acquiring the agent if it is idle and unowned.
+    /// Queues a message to an agent created by the driving tool call.
     ///
     /// Execution lasts until the driving call ends, not until a response or parent turn ends.
     /// Closing the driving call withdraws pending input and interrupts its agents' remaining work.
-    /// The conversation remains available for a later call. Images must be readable by the caller.
+    /// Images must be readable by the caller.
     send: async func(key: string, id: agent-id, content: list<content-block>)
         -> result<message-id, agents-error>;
 }

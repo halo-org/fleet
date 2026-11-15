@@ -364,6 +364,7 @@ fn delegation_retries_and_parent_resolution_ignore_provider_names() {
                     .await;
                 let output = output.unwrap();
                 assert_eq!(output.content, [ContentBlock::Text("Done".into())]);
+                assert_eq!(output.structured_content, None);
                 let retry = registry
                     .execute(
                         &ToolContext {
