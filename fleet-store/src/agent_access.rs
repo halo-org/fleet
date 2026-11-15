@@ -79,9 +79,7 @@ impl Store {
                         scope.closing = true;
                         let mut agent = records.agent(id)?;
                         let interrupt = !agent.interrupt_intent
-                            && (agent.turn_active
-                                || agent.pending_tool_calls != 0
-                                || agent.latest_event != agent.parked_at);
+                            && (agent.turn_active || agent.pending_tool_calls != 0);
                         if interrupt || agent.pending_messages != 0 {
                             agent.revision = agent
                                 .revision
@@ -388,12 +386,11 @@ fn identity(key: &str, kind: u8) -> u128 {
     u128::from_be_bytes(*digest.first_chunk().expect("digest contains 16 bytes"))
 }
 
-fn idle(agent: &AgentRecord) -> bool {
+const fn idle(agent: &AgentRecord) -> bool {
     !agent.turn_active
         && !agent.interrupt_intent
         && agent.pending_messages == 0
         && agent.pending_tool_calls == 0
-        && agent.latest_event == agent.parked_at
 }
 
 fn ancestor<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(
