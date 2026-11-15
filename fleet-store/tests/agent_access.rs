@@ -153,6 +153,39 @@ fn responses_keep_background_work_until_the_driving_call_ends() {
 }
 
 #[test]
+fn closure_after_a_completed_turn_does_not_interrupt() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        root(&store).await;
+        let access = store.agent_access(1.into()).for_call("drive".into());
+        let child = access
+            .create("child", &role(), &JsonObject::new())
+            .await
+            .unwrap();
+        access.send("start", child, &[]).await.unwrap();
+        store.consume_messages(child, None, true).await.unwrap();
+        store
+            .append_model_response(
+                child,
+                0.into(),
+                true,
+                &response(vec![ModelOutput::Text("Done".into())]),
+            )
+            .await
+            .unwrap();
+
+        store
+            .append_tool_result(1.into(), &result("drive"))
+            .await
+            .unwrap();
+        let remaining = store.reconcile_agent_scopes().await.unwrap();
+        let state = store.agent_state(child).await.unwrap().unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!state.interrupt_intent);
+    });
+}
+
+#[test]
 fn closure_withdraws_input_and_fences_late_nested_work() {
     futures_executor::block_on(async {
         let store = Store::memory().unwrap();
