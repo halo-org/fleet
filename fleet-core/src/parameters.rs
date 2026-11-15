@@ -4,8 +4,12 @@ use crate::{
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::fmt;
 
+/// An error applying role parameters.
 #[derive(Debug)]
-pub enum ParametersError {
+pub struct ParametersError(Kind);
+
+#[derive(Debug)]
+enum Kind {
     OverlappingTargets {
         first: RoleParameterName,
         second: RoleParameterName,
@@ -83,10 +87,10 @@ fn apply_parameters(
 
     for [first, second] in bindings.array_windows() {
         if second.path.starts_with(first.path) {
-            return Err(ParametersError::OverlappingTargets {
+            return Err(ParametersError(Kind::OverlappingTargets {
                 first: first.name.clone(),
                 second: second.name.clone(),
-            });
+            }));
         }
     }
 
@@ -115,9 +119,9 @@ fn apply_parameters(
             }
             (None, JsonValue::Object(value)) => merge_object(&mut object, value),
             (None, _) => {
-                return Err(ParametersError::NonObjectRoot {
+                return Err(ParametersError(Kind::NonObjectRoot {
                     parameter: binding.name.clone(),
-                });
+                }));
             }
         }
     }
@@ -140,12 +144,12 @@ fn merge_object(target: &mut JsonObject, value: &JsonObject) {
 
 impl fmt::Display for ParametersError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OverlappingTargets { first, second } => write!(
+        match &self.0 {
+            Kind::OverlappingTargets { first, second } => write!(
                 f,
                 "parameters {first} and {second} have overlapping targets",
             ),
-            Self::NonObjectRoot { parameter } => write!(
+            Kind::NonObjectRoot { parameter } => write!(
                 f,
                 "parameter {parameter} must be an object when targeting the root",
             ),
@@ -444,8 +448,8 @@ mod tests {
 
             let error = apply_model_parameters(config, &parameters, &values).unwrap_err();
             assert_matches!(
-                error,
-                ParametersError::OverlappingTargets { first, second } if matches!(
+                error.0,
+                Kind::OverlappingTargets { first, second } if matches!(
                     (first.as_ref(), second.as_ref()),
                     ("setting_a", "setting_b") | ("setting_b", "setting_a")
                 ),
@@ -470,8 +474,8 @@ mod tests {
 
         let error = apply_model_parameters(config, &parameters, &values).unwrap_err();
         assert_matches!(
-            error,
-            ParametersError::NonObjectRoot { parameter } if parameter.as_ref() == "settings",
+            error.0,
+            Kind::NonObjectRoot { parameter } if parameter.as_ref() == "settings",
         );
     }
 }
