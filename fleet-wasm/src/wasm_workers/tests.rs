@@ -32,6 +32,8 @@ fn component(wasm: &Wasm) -> crate::WasmComponent {
                 "fleet-wasm-test-worker",
                 "--target",
                 "wasm32-unknown-unknown",
+                "--config",
+                "profile.dev.opt-level=1",
             ])
             .arg("--target-dir")
             .arg(&target)
