@@ -39,7 +39,8 @@ pub use self::{
         WorkspaceAccess, WorkspaceBinding, WorkspaceResolution, WorkspaceResolvers, WorkspaceSource,
     },
     workspaces::{
-        RoleWorkspace, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId,
-        WorkspaceName, WorkspaceOutput, WorkspaceWrite, Workspaces, WorkspacesErrorKind,
+        CapturedOutput, RoleWorkspace, Workspace, WorkspaceCommand, WorkspaceContext,
+        WorkspaceExit, WorkspaceId, WorkspaceName, WorkspaceOutput, WorkspaceWrite, Workspaces,
+        WorkspacesErrorKind,
     },
 };

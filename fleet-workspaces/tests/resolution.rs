@@ -113,10 +113,8 @@ impl Workspaces for Providers {
             .push((context.clone(), command.cwd.clone().unwrap_or_default()));
         ready(Ok(WorkspaceOutput {
             exit: fleet_kit::WorkspaceExit::Code(0),
-            stdout: vec![],
-            stderr: vec![],
-            stdout_truncated: false,
-            stderr_truncated: false,
+            stdout: fleet_kit::CapturedOutput::default(),
+            stderr: fleet_kit::CapturedOutput::default(),
         }))
     }
 }

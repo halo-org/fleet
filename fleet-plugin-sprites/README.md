@@ -74,8 +74,8 @@ File writes go to a temporary sibling that is then renamed over the destination.
 A failed rename may leave the temporary file behind.
 
 Commands run through a bash wrapper that reads the command from standard input.
-Output is spooled to files on the sprite, and up to the output limit from each
-stream is returned when the command ends. Timeouts kill the command's process
+Output is spooled to files on the sprite, and the start and end of each stream
+within the output limit are returned when the command ends. Timeouts kill the command's process
 group. Exits caused by signals are reported as codes above 128.
 
 ## Limitations

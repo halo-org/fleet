@@ -211,11 +211,16 @@ async fn provision(sprite: &Sprite, name: &str, args: Vec<String>) -> Result<(),
         WorkspaceExit::Terminated => "was terminated".to_owned(),
         WorkspaceExit::TimedOut => "timed out".to_owned(),
     };
+    let mut stderr = output.stderr.head;
+    if output.stderr.omitted > 0 {
+        stderr.extend_from_slice(" … ".as_bytes());
+        stderr.extend(output.stderr.tail);
+    }
     Err(crate::error(
         WorkspacesErrorKind::Other,
         format!(
             "{name} {failure}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&stderr).trim(),
         ),
     ))
 }
@@ -245,10 +250,9 @@ async fn run(
     command: WorkspaceCommand,
 ) -> Result<WorkspaceOutput, WorkspacesError> {
     let cwd = crate::config::path(directory, command.cwd.as_deref().unwrap_or(""))?;
-    let limit = command.output_limit;
     let timeout_ms = command.timeout_ms;
     let response = sprite
         .exec(crate::exec::body(command, &cwd)?, timeout_ms)
         .await?;
-    crate::exec::parse(&response, limit)
+    crate::exec::parse(&response)
 }

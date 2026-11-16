@@ -9,8 +9,8 @@ mod workspaces;
 
 pub(crate) use self::{
     bindings::exports::fleet::providers::workspaces::{
-        Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceOutput,
-        WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
+        CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId,
+        WorkspaceOutput, WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
     },
     config::Config,
     sprites::Sprite,
