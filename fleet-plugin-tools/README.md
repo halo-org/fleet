@@ -15,8 +15,9 @@ or HTTP access.
 
 Relative paths start in the workspace directory. Absolute paths and `..` are
 passed to the workspace provider, which controls access. Exit codes, timeouts
-and file errors are returned to the model as tool output. Failed workspace
-setup remains retryable.
+and file errors are returned to the model as tool output. Missing or invalid
+workspaces also return tool errors, including a parent workspace used by a root
+agent. Other workspace setup failures remain retryable.
 Retried Bash calls pass the retry flag to the workspace. File mutations refuse
 retries because the original write may have succeeded.
 

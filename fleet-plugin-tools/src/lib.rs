@@ -49,7 +49,18 @@ impl Guest for Tools {
             return Ok(error_output("The tool is not available."));
         }
         let config = Config::load(&context)?;
-        let workspace = workspace_access::open().await.map_err(service_error)?;
+        let workspace = match workspace_access::open().await {
+            Ok(workspace) => workspace,
+            Err(error) => match error.kind {
+                WorkspacesErrorKind::NotFound | WorkspacesErrorKind::InvalidConfiguration => {
+                    return Ok(error_output(format!(
+                        "No workspace is available for this agent, so tools that require a workspace cannot run.\n\nDetails: {}",
+                        error.message
+                    )));
+                }
+                _ => return Err(service_error(error)),
+            },
+        };
         let result = match context.tool.name.as_str() {
             "bash" => bash::execute(&context, &config, workspace, is_retry, &input).await,
             "read" => files::read(&context, &config, workspace, &input).await,

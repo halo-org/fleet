@@ -8,9 +8,9 @@
 
 use core::{convert::Infallible, future::ready, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
-    ModelOutput, ModelProvenance, ModelResponse, ModelUsage, Role, RuntimeStore as _, ToolCall,
-    ToolContext, ToolResult, Tools as _,
+    Agent, AgentId, ClientStore as _, Configured, ContentBlock, Error as _, JsonObject, Message,
+    MessageMode, ModelOutput, ModelProvenance, ModelResponse, ModelUsage, Role, RuntimeStore as _,
+    ToolCall, ToolContext, ToolResult, Tools as _, ToolsErrorKind,
 };
 use fleet_kit::{
     AgentCollection as _, AgentsQuery, Queries as _, RoleStore as _, Workspace, WorkspaceCommand,
@@ -311,6 +311,102 @@ async fn queued_child(store: &Store) -> AgentId {
         }
         changed.await;
     }
+}
+
+#[test]
+fn parent_workspace_on_root_returns_tool_errors() {
+    let wasm = Wasm::new().unwrap();
+    let (agents_component, tools_component) = components(&wasm);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::memory().unwrap();
+            start(&store).await;
+            store
+                .create_agent(
+                    "create-root",
+                    &Agent {
+                        id: 2.into(),
+                        role: configured("child"),
+                        extensions: JsonObject::new(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            let reads = Arc::new(Mutex::new(Vec::new()));
+            let (_, tools) = providers(&wasm, &agents_component, &tools_component, &store, &reads);
+
+            for (name, input) in [
+                ("tools:bash", json!({ "command": "pwd" })),
+                ("tools:read", json!({ "path": "file" })),
+                ("tools:write", json!({ "path": "file", "content": "hello" })),
+                (
+                    "tools:edit",
+                    json!({
+                        "path": "file",
+                        "edits": [{ "old": "hello", "new": "world" }],
+                    }),
+                ),
+            ] {
+                let context = ToolContext {
+                    tool: configured(name),
+                    agent_id: 2.into(),
+                    call_id: name.into(),
+                    role_extensions: JsonObject::new(),
+                };
+                let output = tools
+                    .execute(&context, false, &object(input))
+                    .await
+                    .unwrap();
+
+                assert!(output.is_error);
+                assert_eq!(
+                    output.content,
+                    [ContentBlock::Text(
+                        concat!(
+                            "No workspace is available for this agent, so tools that require a workspace cannot run.\n\n",
+                            "Details: could not resolve workspace: agent has no parent"
+                        )
+                        .into()
+                    )]
+                );
+            }
+            assert!(reads.lock().unwrap().is_empty());
+        });
+}
+
+#[test]
+fn workspace_agent_lookup_failures_remain_provider_errors() {
+    let wasm = Wasm::new().unwrap();
+    let (agents_component, tools_component) = components(&wasm);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::memory().unwrap();
+            let reads = Arc::new(Mutex::new(Vec::new()));
+            let (_, tools) = providers(&wasm, &agents_component, &tools_component, &store, &reads);
+            let context = ToolContext {
+                tool: configured("tools:read"),
+                agent_id: 1.into(),
+                call_id: "read".into(),
+                role_extensions: JsonObject::new(),
+            };
+
+            let error = tools
+                .execute(&context, false, &object(json!({ "path": "file" })))
+                .await
+                .unwrap_err();
+            let kind: ToolsErrorKind = error.kind();
+
+            assert_eq!(kind, ToolsErrorKind::Other);
+            assert!(error.to_string().contains("could not read workspace agent"));
+            assert!(reads.lock().unwrap().is_empty());
+        });
 }
 
 #[test]
