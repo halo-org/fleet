@@ -10,8 +10,8 @@ use fleet_core::{
     ToolOutput, ToolResult,
 };
 use fleet_kit::{
-    Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId, WorkspaceOutput,
-    WorkspaceWrite,
+    CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId,
+    WorkspaceOutput, WorkspaceWrite,
 };
 
 pub fn json(object: &JsonObject) -> String {
@@ -575,10 +575,18 @@ impl From<workspaces::WorkspaceOutput> for WorkspaceOutput {
                 workspaces::WorkspaceExit::Terminated => WorkspaceExit::Terminated,
                 workspaces::WorkspaceExit::TimedOut => WorkspaceExit::TimedOut,
             },
-            stdout: value.stdout,
-            stderr: value.stderr,
-            stdout_truncated: value.stdout_truncated,
-            stderr_truncated: value.stderr_truncated,
+            stdout: value.stdout.into(),
+            stderr: value.stderr.into(),
+        }
+    }
+}
+
+impl From<workspaces::CapturedOutput> for CapturedOutput {
+    fn from(value: workspaces::CapturedOutput) -> Self {
+        Self {
+            head: value.head,
+            omitted: value.omitted,
+            tail: value.tail,
         }
     }
 }

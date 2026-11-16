@@ -2,6 +2,8 @@ use crate::{Config, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding, work
 use serde::Deserialize;
 use serde_json::json;
 
+const MERGE_STDERR: &str = "exec 2>&1; exec \"$0\" \"$@\"";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -56,13 +58,20 @@ pub async fn execute(
             "timeout_ms must be between 1 and {maximum}."
         )));
     }
+    let shell = config.shell.as_deref().unwrap_or("bash");
     let command = workspaces::WorkspaceCommand {
         id: format!(
             "{:016x}{:016x}:{}",
             context.agent_id.high, context.agent_id.low, context.call_id,
         ),
-        program: config.shell.as_deref().unwrap_or("bash").into(),
-        args: vec!["-c".into(), input.command],
+        program: shell.into(),
+        args: vec![
+            "-c".into(),
+            MERGE_STDERR.into(),
+            shell.into(),
+            "-c".into(),
+            input.command,
+        ],
         env: Vec::new(),
         cwd: input.cwd,
         stdin: Vec::new(),
@@ -74,17 +83,9 @@ pub async fn execute(
 }
 
 fn render(result: &workspaces::WorkspaceOutput) -> ToolOutput {
-    let mut text = String::from_utf8_lossy(&result.stdout).into_owned();
-    if result.stdout_truncated {
-        push_line(&mut text, "[stdout truncated]");
-    }
-    if !result.stderr.is_empty() || result.stderr_truncated {
-        push_line(&mut text, "[stderr]");
-        text.push_str(&String::from_utf8_lossy(&result.stderr));
-    }
-    if result.stderr_truncated {
-        push_line(&mut text, "[stderr truncated]");
-    }
+    let mut text = String::new();
+    push_output(&mut text, &result.stdout);
+    push_output(&mut text, &result.stderr);
     match result.exit {
         workspaces::WorkspaceExit::Code(0) => {}
         workspaces::WorkspaceExit::Code(code) => {
@@ -102,6 +103,37 @@ fn render(result: &workspaces::WorkspaceOutput) -> ToolOutput {
     }
 }
 
+fn push_output(text: &mut String, output: &workspaces::CapturedOutput) {
+    if output.omitted == 0 {
+        text.push_str(&String::from_utf8_lossy(&output.head));
+        return;
+    }
+    let partial_end = output.head.utf8_chunks().last().map_or(0, |chunk| {
+        let invalid = chunk.invalid();
+        if str::from_utf8(invalid).is_err_and(|error| error.error_len().is_none()) {
+            invalid.len()
+        } else {
+            0
+        }
+    });
+    let partial_start = output
+        .tail
+        .iter()
+        .take(3)
+        .take_while(|byte| matches!(byte, 0x80..=0xBF))
+        .count();
+    let (head, _) = output
+        .head
+        .split_at(output.head.len().saturating_sub(partial_end));
+    let (_, tail) = output.tail.split_at(partial_start);
+    let omitted = output.omitted.saturating_add(
+        u64::try_from(partial_end.saturating_add(partial_start)).unwrap_or(u64::MAX),
+    );
+    text.push_str(&String::from_utf8_lossy(head));
+    push_line(text, &format!("[Omitted {omitted} bytes of tool output]"));
+    text.push_str(&String::from_utf8_lossy(tail));
+}
+
 fn push_line(text: &mut String, line: &str) {
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -116,13 +148,19 @@ mod tests {
     use crate::ContentBlock;
 
     #[test]
-    fn render_preserves_output_and_reports_failure() {
+    fn render_marks_omitted_output_and_reports_failure() {
         let result = workspaces::WorkspaceOutput {
             exit: workspaces::WorkspaceExit::Code(1),
-            stdout: b"out".to_vec(),
-            stderr: b"err".to_vec(),
-            stdout_truncated: true,
-            stderr_truncated: false,
+            stdout: workspaces::CapturedOutput {
+                head: "start é".as_bytes()[..7].to_vec(),
+                omitted: 1024,
+                tail: "é end\n".as_bytes()[1..].to_vec(),
+            },
+            stderr: workspaces::CapturedOutput {
+                head: b"err".to_vec(),
+                omitted: 0,
+                tail: Vec::new(),
+            },
         };
 
         let output = render(&result);
@@ -133,7 +171,7 @@ mod tests {
         assert!(output.is_error);
         assert_eq!(
             text,
-            "out\n[stdout truncated]\n[stderr]\nerr\n[exit status 1]\n"
+            "start \n[Omitted 1026 bytes of tool output]\n end\nerr\n[exit status 1]\n"
         );
     }
 }

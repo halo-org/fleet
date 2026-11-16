@@ -4,7 +4,7 @@ use crate::{
 };
 use core::fmt;
 use fleet_core::AgentId;
-use fleet_kit::{WorkspaceAccess, WorkspaceBinding, WorkspaceExit};
+use fleet_kit::{WorkspaceAccess, WorkspaceBinding};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use wasmtime::component::{Accessor, HasSelf};
@@ -144,17 +144,7 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
                 WorkspaceAccess::exec(self, &convert_binding(binding)?, is_retry, &command)
                     .await
                     .map_err(|source| crate::wasm_workspace_host::error(&source))?;
-            Ok(workspaces::WorkspaceOutput {
-                exit: match output.exit {
-                    WorkspaceExit::Code(code) => workspaces::WorkspaceExit::Code(code),
-                    WorkspaceExit::Terminated => workspaces::WorkspaceExit::Terminated,
-                    WorkspaceExit::TimedOut => workspaces::WorkspaceExit::TimedOut,
-                },
-                stdout: output.stdout,
-                stderr: output.stderr,
-                stdout_truncated: output.stdout_truncated,
-                stderr_truncated: output.stderr_truncated,
-            })
+            Ok(crate::wasm_workspace_host::convert_output(output))
         })
     }
 }

@@ -11,8 +11,8 @@ use self::workspaces::Host;
 
 pub(crate) use self::{
     bindings::exports::fleet::providers::workspaces::{
-        Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceOutput,
-        WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
+        CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
+        WorkspaceOutput, WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
     },
     config::Config,
     filesystem::Directory,

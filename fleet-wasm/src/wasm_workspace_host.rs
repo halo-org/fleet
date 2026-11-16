@@ -1,7 +1,10 @@
 use crate::{WasmState, bindings::workspace_host::fleet::providers::workspaces};
 use core::fmt;
 use fleet_core::Configured;
-use fleet_kit::{WorkspaceContext, WorkspaceExit, Workspaces, WorkspacesErrorKind};
+use fleet_kit::{
+    CapturedOutput, WorkspaceContext, WorkspaceExit, WorkspaceOutput, Workspaces,
+    WorkspacesErrorKind,
+};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use wasmtime::component::{Accessor, HasSelf};
@@ -133,17 +136,7 @@ impl<W: Workspaces + Send + Sync> WorkspacesObject for W {
             let output = Workspaces::exec(self, &convert_context(context)?, is_retry, &command)
                 .await
                 .map_err(|source| error(&source))?;
-            Ok(workspaces::WorkspaceOutput {
-                exit: match output.exit {
-                    WorkspaceExit::Code(code) => workspaces::WorkspaceExit::Code(code),
-                    WorkspaceExit::Terminated => workspaces::WorkspaceExit::Terminated,
-                    WorkspaceExit::TimedOut => workspaces::WorkspaceExit::TimedOut,
-                },
-                stdout: output.stdout,
-                stderr: output.stderr,
-                stdout_truncated: output.stdout_truncated,
-                stderr_truncated: output.stderr_truncated,
-            })
+            Ok(convert_output(output))
         })
     }
 }
@@ -215,6 +208,23 @@ pub fn convert_context(
         agent_id: context.agent_id.into(),
         id: ((u128::from(context.id.high) << 64) | u128::from(context.id.low)).into(),
     })
+}
+
+pub fn convert_output(output: WorkspaceOutput) -> workspaces::WorkspaceOutput {
+    let captured = |output: CapturedOutput| workspaces::CapturedOutput {
+        head: output.head,
+        omitted: output.omitted,
+        tail: output.tail,
+    };
+    workspaces::WorkspaceOutput {
+        exit: match output.exit {
+            WorkspaceExit::Code(code) => workspaces::WorkspaceExit::Code(code),
+            WorkspaceExit::Terminated => workspaces::WorkspaceExit::Terminated,
+            WorkspaceExit::TimedOut => workspaces::WorkspaceExit::TimedOut,
+        },
+        stdout: captured(output.stdout),
+        stderr: captured(output.stderr),
+    }
 }
 
 fn json_error(error: &serde_json::Error) -> workspaces::WorkspacesError {

@@ -87,6 +87,8 @@ pub struct WorkspaceCommand {
     /// The maximum execution time in milliseconds.
     pub timeout_ms: u64,
     /// The maximum bytes to retain from each output stream.
+    ///
+    /// Longer streams retain their first and last halves of the limit.
     pub output_limit: u64,
 }
 
@@ -96,13 +98,22 @@ pub struct WorkspaceOutput {
     /// How the program ended.
     pub exit: WorkspaceExit,
     /// The captured standard output.
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     /// The captured standard error.
-    pub stderr: Vec<u8>,
-    /// Whether standard output exceeded the limit.
-    pub stdout_truncated: bool,
-    /// Whether standard error exceeded the limit.
-    pub stderr_truncated: bool,
+    pub stderr: CapturedOutput,
+}
+
+/// Output captured from a stream.
+///
+/// The stream consists of `head`, then `omitted` bytes, then `tail`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CapturedOutput {
+    /// The first bytes of the stream.
+    pub head: Vec<u8>,
+    /// The number of bytes left out between the head and tail.
+    pub omitted: u64,
+    /// The last bytes of the stream. This is empty when no bytes were omitted.
+    pub tail: Vec<u8>,
 }
 
 /// How a workspace command ended.

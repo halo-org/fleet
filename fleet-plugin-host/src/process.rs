@@ -1,27 +1,55 @@
 use crate::{
-    WorkspaceCommand, WorkspaceExit, WorkspaceOutput, WorkspacesError, WorkspacesErrorKind,
-    bindings,
+    CapturedOutput, WorkspaceCommand, WorkspaceExit, WorkspaceOutput, WorkspacesError,
+    WorkspacesErrorKind, bindings,
 };
 use bindings::{fleet::providers::process, wasi::clocks::monotonic_clock};
 use futures_util::future::{self, Either};
+use std::collections::VecDeque;
 use wit_bindgen::{StreamReader, StreamResult};
 
 #[derive(Default)]
 struct Capture {
-    bytes: Vec<u8>,
-    truncated: bool,
+    head: Vec<u8>,
+    omitted: u64,
+    tail: VecDeque<u8>,
 }
 
 impl Capture {
     async fn read(&mut self, mut stream: StreamReader<u8>, limit: usize) {
         loop {
             let (status, bytes) = stream.read(Vec::with_capacity(16 * 1024)).await;
-            let keep = bytes.len().min(limit.saturating_sub(self.bytes.len()));
-            self.truncated |= keep < bytes.len();
-            self.bytes.extend(bytes.into_iter().take(keep));
+            self.push(&bytes, limit);
             if matches!(status, StreamResult::Dropped) {
                 return;
             }
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], limit: usize) {
+        let head = limit
+            .div_ceil(2)
+            .saturating_sub(self.head.len())
+            .min(bytes.len());
+        let (head, tail) = bytes.split_at(head);
+        self.head.extend_from_slice(head);
+        self.tail.extend(tail);
+        let excess = self.tail.len().saturating_sub(limit.div_euclid(2));
+        self.tail.drain(..excess);
+        self.omitted = self
+            .omitted
+            .saturating_add(u64::try_from(excess).unwrap_or(u64::MAX));
+    }
+
+    fn finish(self) -> CapturedOutput {
+        let mut head = self.head;
+        let mut tail = Vec::from(self.tail);
+        if self.omitted == 0 {
+            head.append(&mut tail);
+        }
+        CapturedOutput {
+            head,
+            omitted: self.omitted,
+            tail,
         }
     }
 }
@@ -94,13 +122,42 @@ pub async fn run(
     };
     Ok(WorkspaceOutput {
         exit,
-        stdout: stdout.bytes,
-        stderr: stderr.bytes,
-        stdout_truncated: stdout.truncated,
-        stderr_truncated: stderr.truncated,
+        stdout: stdout.finish(),
+        stderr: stderr.finish(),
     })
 }
 
 fn error(message: String) -> WorkspacesError {
     crate::error(WorkspacesErrorKind::Other, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_keeps_head_and_tail() {
+        let mut capture = Capture::default();
+        for chunk in [b"abc".as_slice(), b"defg", b"hij"] {
+            capture.push(chunk, 5);
+        }
+
+        let output = capture.finish();
+
+        assert_eq!(output.head, b"abc");
+        assert_eq!(output.omitted, 5);
+        assert_eq!(output.tail, b"ij");
+    }
+
+    #[test]
+    fn capture_keeps_short_output_in_head() {
+        let mut capture = Capture::default();
+        capture.push(b"abcd", 5);
+
+        let output = capture.finish();
+
+        assert_eq!(output.head, b"abcd");
+        assert_eq!(output.omitted, 0);
+        assert_eq!(output.tail, b"");
+    }
 }

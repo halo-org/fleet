@@ -1,5 +1,6 @@
 use crate::{
-    WorkspaceCommand, WorkspaceExit, WorkspaceOutput, WorkspacesError, WorkspacesErrorKind,
+    CapturedOutput, WorkspaceCommand, WorkspaceExit, WorkspaceOutput, WorkspacesError,
+    WorkspacesErrorKind,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -19,9 +20,11 @@ env -- "${e[@]}" "${a[@]}" <&0 >"$d/1" 2>"$d/2" & p=$!
 wait "$p"; s=$?
 kill -- -"$w" -"$k" 2>/dev/null; wait
 if [ -e "$d/t" ]; then echo timeout; else echo "exit $s"; fi
-stat -c %s -- "$d/1" "$d/2"
-head -c "$l" -- "$d/1" | base64 -w0; echo
-head -c "$l" -- "$d/2" | base64 -w0; echo
+for f in "$d/1" "$d/2"; do
+z=$(stat -c %s -- "$f"); echo "$z"; h=$((z>l?l-l/2:z)); r=$((z>l?l/2:0))
+head -c "$h" -- "$f" | base64 -w0; echo
+tail -c +$((z-r+1)) -- "$f" | head -c "$r" | base64 -w0; echo
+done
 "#;
 
 pub fn query() -> String {
@@ -53,7 +56,10 @@ pub fn body(command: WorkspaceCommand, cwd: &str) -> Result<Vec<u8>, WorkspacesE
     );
     let mut fields = vec![
         timeout,
-        command.output_limit.to_string(),
+        command
+            .output_limit
+            .min(i64::MAX.unsigned_abs())
+            .to_string(),
         cwd.to_owned(),
         command.env.len().to_string(),
     ];
@@ -81,9 +87,9 @@ pub fn body(command: WorkspaceCommand, cwd: &str) -> Result<Vec<u8>, WorkspacesE
     Ok(body)
 }
 
-pub fn parse(response: &[u8], limit: u64) -> Result<WorkspaceOutput, WorkspacesError> {
+pub fn parse(response: &[u8]) -> Result<WorkspaceOutput, WorkspacesError> {
     let (stdout, stderr) = demultiplex(response);
-    output(&stdout, limit).ok_or_else(|| {
+    output(&stdout).ok_or_else(|| {
         crate::error(
             WorkspacesErrorKind::Other,
             format!(
@@ -113,23 +119,28 @@ fn demultiplex(response: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (stdout, stderr)
 }
 
-fn output(stdout: &[u8], limit: u64) -> Option<WorkspaceOutput> {
+fn output(stdout: &[u8]) -> Option<WorkspaceOutput> {
     let stdout = str::from_utf8(stdout).ok()?;
     let mut lines = stdout.split('\n').skip_while(|line| *line == ".");
     let exit = match lines.next()? {
         "timeout" => WorkspaceExit::TimedOut,
         line => WorkspaceExit::Code(line.strip_prefix("exit ")?.parse().ok()?),
     };
-    let stdout_size: u64 = lines.next()?.parse().ok()?;
-    let stderr_size: u64 = lines.next()?.parse().ok()?;
-    let stdout = STANDARD.decode(lines.next()?).ok()?;
-    let stderr = STANDARD.decode(lines.next()?).ok()?;
+    let mut captured = || {
+        let size: u64 = lines.next()?.parse().ok()?;
+        let head = STANDARD.decode(lines.next()?).ok()?;
+        let tail = STANDARD.decode(lines.next()?).ok()?;
+        let retained = u64::try_from(head.len().saturating_add(tail.len())).ok()?;
+        Some(CapturedOutput {
+            head,
+            omitted: size.saturating_sub(retained),
+            tail,
+        })
+    };
     Some(WorkspaceOutput {
         exit,
-        stdout,
-        stderr,
-        stdout_truncated: stdout_size > limit,
-        stderr_truncated: stderr_size > limit,
+        stdout: captured()?,
+        stderr: captured()?,
     })
 }
 
@@ -169,6 +180,16 @@ mod tests {
     }
 
     #[test]
+    fn body_limits_output_to_shell_integers() {
+        let mut command = command();
+        command.output_limit = u64::MAX;
+
+        let body = body(command, "/home/sprite").unwrap();
+
+        assert!(body.starts_with(b"1.500\x009223372036854775807\x00"));
+    }
+
+    #[test]
     fn body_rejects_ambiguous_commands() {
         let mut nul = command();
         nul.args.push("\0".into());
@@ -186,32 +207,33 @@ mod tests {
 
     #[test]
     fn parse_reads_buffered_output() {
-        let response = b"\x01.\n\x01.\nexit 2\n6\n\x014\naGVsbG8=\nb29wcw==\n\x02noise\x03\x00";
+        let response = b"\x01.\n\x01.\nexit 2\n9\n\x01aGVs\nbG8=\n4\nb29wcw==\n\n\x02noise\x03\x00";
 
-        let output = parse(response, 5).unwrap();
+        let output = parse(response).unwrap();
 
         assert!(matches!(output.exit, WorkspaceExit::Code(2)));
-        assert_eq!(output.stdout, b"hello");
-        assert_eq!(output.stderr, b"oops");
-        assert!(output.stdout_truncated);
-        assert!(!output.stderr_truncated);
+        assert_eq!(output.stdout.head, b"hel");
+        assert_eq!(output.stdout.omitted, 4);
+        assert_eq!(output.stdout.tail, b"lo");
+        assert_eq!(output.stderr.head, b"oops");
+        assert_eq!(output.stderr.omitted, 0);
     }
 
     #[test]
     fn parse_reports_timeouts() {
-        let response = b"\x01timeout\n0\n0\n\n\n\x03\x00";
+        let response = b"\x01timeout\n0\n\n\n0\n\n\n\x03\x00";
 
-        let output = parse(response, 5).unwrap();
+        let output = parse(response).unwrap();
 
         assert!(matches!(output.exit, WorkspaceExit::TimedOut));
-        assert_eq!(output.stdout, b"");
+        assert_eq!(output.stdout.head, b"");
     }
 
     #[test]
     fn parse_reports_wrapper_errors() {
         let response = b"\x02bash: cd: /missing: No such file or directory\n\x03\x01";
 
-        let error = parse(response, 5).unwrap_err();
+        let error = parse(response).unwrap_err();
 
         assert!(matches!(error.kind, WorkspacesErrorKind::Other));
         assert_eq!(

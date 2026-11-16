@@ -62,7 +62,7 @@ Absolute paths and `..` are supported within the granted filesystem mounts.
 WASI resolves file paths and rejects symlinks with absolute targets.
 Commands run with the host process's permissions.
 File writes replace the destination atomically. Commands enforce the requested
-timeout and retain up to the output limit from each stream while draining the
-rest. Retried commands return `UnsafeToRetry` because an earlier attempt may
+timeout and retain the start and end of each stream within the output limit
+while draining the rest. Retried commands return `UnsafeToRetry` because an earlier attempt may
 have taken effect. Cancellation and timeouts terminate the direct child, not
 its descendants.

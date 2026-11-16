@@ -65,6 +65,8 @@ interface workspaces {
         /// The maximum execution time in milliseconds.
         timeout-ms: u64,
         /// The maximum bytes to retain from each output stream.
+        ///
+        /// Longer streams retain their first and last halves of the limit.
         output-limit: u64,
     }
 
@@ -83,13 +85,21 @@ interface workspaces {
         /// How the program ended.
         exit: workspace-exit,
         /// The captured standard output.
-        stdout: list<u8>,
+        stdout: captured-output,
         /// The captured standard error.
-        stderr: list<u8>,
-        /// Whether standard output exceeded the limit.
-        stdout-truncated: bool,
-        /// Whether standard error exceeded the limit.
-        stderr-truncated: bool,
+        stderr: captured-output,
+    }
+
+    /// Output captured from a stream.
+    ///
+    /// The stream consists of head, then omitted bytes, then tail.
+    record captured-output {
+        /// The first bytes of the stream.
+        head: list<u8>,
+        /// The number of bytes left out between the head and tail.
+        omitted: u64,
+        /// The last bytes of the stream. This is empty when no bytes were omitted.
+        tail: list<u8>,
     }
 
     /// The kind of error returned by a workspace provider.
