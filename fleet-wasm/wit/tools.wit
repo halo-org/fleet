@@ -1,4 +1,8 @@
 /// Provides access to tools.
+///
+/// Tools should keep their output to a sensible size for a model's context. For outputs from
+/// execute and interrupted-output, the host keeps the start and end of text content over
+/// 128 KiB across all blocks. It drops structured content over 128 KiB of JSON.
 interface tools {
     use types.{json-object, tool, tool-name, tool-context, tool-output};
 
