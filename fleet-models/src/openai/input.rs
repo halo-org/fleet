@@ -23,25 +23,7 @@ pub fn encode(
                 items.extend(encode_output(output, source == provenance)?);
             }
             ModelInput::ToolResult(result) => {
-                let mut content = encode_content(&result.output.content);
-                if let Some(structured) = &result.output.structured_content {
-                    let text = serde_json::to_string(structured).map_err(|error| {
-                        OpenAiError::source("failed to encode tool output", error)
-                    })?;
-                    content.push(json!({
-                        "type": "input_text",
-                        "text": text,
-                    }));
-                }
-                if result.output.is_error {
-                    content.insert(
-                        0,
-                        json!({
-                            "type": "input_text",
-                            "text": "Tool returned an error:",
-                        }),
-                    );
-                }
+                let content = encode_content(&result.output.content);
                 items.push(json!({
                     "type": "function_call_output",
                     "call_id": result.call_id.as_ref(),

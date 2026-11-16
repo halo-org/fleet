@@ -1697,12 +1697,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_images_preserve_structured_output_and_error_status() {
-        use fleet_kit::Blobs as _;
-
-        let http = TestHttp::new([response(&[message("Seen.", None)], false)]);
-        let blobs = fleet_store::Store::memory().unwrap();
-        let models = models(http.clone()).with_blobs(blobs.clone());
+    fn request_sends_tool_output_content_as_is() {
+        let models = models(TestHttp::default());
         let context = context();
         let input = [ModelInput::ToolResult(ToolResult {
             call_id: "read-image".into(),
@@ -1716,29 +1712,28 @@ mod tests {
             },
         })];
 
-        futures_executor::block_on(async {
-            blobs
-                .put(
-                    1.into(),
-                    "image/png",
-                    include_bytes!("../../fleet-store/tests/fixtures/image.png"),
-                )
-                .await
-                .unwrap();
-            models
-                .generate(&context, None, &input)
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-        });
-
-        let requests = http.requests();
-        let request: Value = serde_json::from_slice(requests[0].body()).unwrap();
-        let output = &request["input"][0];
-        assert_eq!(output["call_id"], "read-image");
-        assert_eq!(output["output"][0]["text"], "Tool returned an error:");
-        assert_eq!(output["output"][3]["type"], "input_image");
-        assert_eq!(output["output"][4]["text"], "{\"ok\":false}");
+        let request = models.request(&context, None, &input).unwrap();
+        assert_eq!(
+            Value::from(request.input),
+            json!([{
+                "type": "function_call_output",
+                "call_id": "read-image",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Screenshot",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "Image reference: 1",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": "fleet-blob:1",
+                    },
+                ],
+            }])
+        );
     }
 
     struct RefreshingCredentials(AtomicBool);
