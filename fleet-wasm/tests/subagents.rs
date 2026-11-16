@@ -48,6 +48,8 @@ fn components(wasm: &Wasm) -> (WasmComponent, WasmComponent) {
                 "fleet-plugin-tools",
                 "--target",
                 "wasm32-unknown-unknown",
+                "--config",
+                "profile.dev.opt-level=1",
             ])
             .arg("--target-dir")
             .arg(&target)
