@@ -19,7 +19,7 @@ futures-util = { workspace = true, features = ["std", "sink"] }
 http = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
-wasmtime = { workspace = true, features = ["async", "component-model", "component-model-async", "cranelift", "pooling-allocator", "runtime", "std"] }
+wasmtime = { workspace = true, features = ["async", "component-model", "component-model-async", "cranelift", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
 wasmtime-wasi = { workspace = true, features = ["p3"] }
 wasmtime-wasi-http = { workspace = true, features = ["default-send-request", "p3"] }
 
