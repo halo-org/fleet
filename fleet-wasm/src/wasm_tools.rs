@@ -2,8 +2,13 @@ use crate::{
     WasmEnvironment, WasmError, WasmState, WasmWorkers,
     bindings::{tools::ToolProviderPre, types},
 };
-use fleet_core::{JsonObject, Tool, ToolContext, ToolOutput};
+use fleet_core::{ContentBlock, JsonObject, Tool, ToolContext, ToolOutput};
 use wasmtime::{Store, component::InstancePre};
+
+const OUTPUT_LIMIT: usize = 128 * 1024;
+const MARKER_LIMIT: usize = 64;
+const HEAD_LIMIT: usize = (OUTPUT_LIMIT - MARKER_LIMIT).div_ceil(2);
+const TAIL_LIMIT: usize = (OUTPUT_LIMIT - MARKER_LIMIT).div_euclid(2);
 
 /// A WebAssembly tool provider.
 #[derive(Clone)]
@@ -118,7 +123,8 @@ impl WasmTools {
             .map_err(WasmError::runtime)?
             .map_err(WasmError::from_tool)?;
 
-        self.validate_output(context, output.try_into()?).await
+        self.validate_output(context, limit_output(output.try_into()?))
+            .await
     }
 
     pub(crate) async fn interrupted_output(
@@ -155,7 +161,8 @@ impl WasmTools {
             .map_err(WasmError::runtime)?
             .map_err(WasmError::from_tool)?;
 
-        self.validate_output(context, output.try_into()?).await
+        self.validate_output(context, limit_output(output.try_into()?))
+            .await
     }
 
     async fn validate_output(
@@ -166,7 +173,7 @@ impl WasmTools {
         if !output
             .content
             .iter()
-            .any(|block| matches!(block, fleet_core::ContentBlock::Image(_)))
+            .any(|block| matches!(block, ContentBlock::Image(_)))
         {
             return Ok(output);
         }
@@ -187,7 +194,7 @@ impl WasmTools {
                 Err(WasmError::provider(error.message))
             }
             Err(error) => Ok(ToolOutput {
-                content: vec![fleet_core::ContentBlock::Text(format!(
+                content: vec![ContentBlock::Text(format!(
                     "Tool returned an unavailable image: {}",
                     error.message
                 ))],
@@ -195,5 +202,117 @@ impl WasmTools {
                 is_error: true,
             }),
         }
+    }
+}
+
+fn limit_output(output: ToolOutput) -> ToolOutput {
+    let structured_content = output.structured_content.filter(|content| {
+        serde_json::to_string(content).is_ok_and(|json| json.len() <= OUTPUT_LIMIT)
+    });
+    let size = output
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) => text.len(),
+            ContentBlock::Image(_) => 0,
+        })
+        .fold(0, usize::saturating_add);
+    if size <= OUTPUT_LIMIT {
+        return ToolOutput {
+            structured_content,
+            ..output
+        };
+    }
+    let tail_start = size.saturating_sub(TAIL_LIMIT);
+    let mut content = Vec::new();
+    let mut marker = None;
+    let mut retained = 0_usize;
+    let mut start = 0_usize;
+    for block in output.content {
+        let ContentBlock::Text(mut head) = block else {
+            content.push(block);
+            continue;
+        };
+        let end = start.saturating_add(head.len());
+        let tail = if end > tail_start {
+            head.split_off(head.ceil_char_boundary(tail_start.saturating_sub(start)))
+        } else {
+            String::new()
+        };
+        head.truncate(head.floor_char_boundary(HEAD_LIMIT.saturating_sub(start)));
+        retained = retained
+            .saturating_add(head.len())
+            .saturating_add(tail.len());
+        if !head.is_empty() {
+            content.push(ContentBlock::Text(head));
+        }
+        if start <= HEAD_LIMIT && end > HEAD_LIMIT {
+            marker = Some(content.len());
+            content.push(ContentBlock::Text(String::new()));
+        }
+        if !tail.is_empty() {
+            content.push(ContentBlock::Text(tail));
+        }
+        start = end;
+    }
+    if let Some(block) = marker.and_then(|index| content.get_mut(index)) {
+        *block = ContentBlock::Text(format!(
+            "[Omitted {} bytes of tool output]",
+            size.saturating_sub(retained),
+        ));
+    }
+    ToolOutput {
+        content,
+        structured_content,
+        is_error: output.is_error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(output: &ToolOutput) -> Vec<&str> {
+        output
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text(text) => text.as_str(),
+                ContentBlock::Image(_) => "image",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn limit_output_keeps_head_and_tail() {
+        let output = ToolOutput {
+            content: vec![
+                ContentBlock::Text("a".repeat(HEAD_LIMIT - 1)),
+                ContentBlock::Text("bc".into()),
+                ContentBlock::Image(1.into()),
+                ContentBlock::Text(format!("{}d", "é".repeat(OUTPUT_LIMIT))),
+            ],
+            structured_content: Some(JsonObject::from_iter([(
+                "text".into(),
+                "x".repeat(OUTPUT_LIMIT).into(),
+            )])),
+            is_error: true,
+        };
+
+        let output = limit_output(output);
+        let text = text(&output);
+
+        assert_eq!(text.len(), 5);
+        assert_eq!(text[0].len(), HEAD_LIMIT - 1);
+        assert_eq!(text[1], "b");
+        assert_eq!(text[2], "[Omitted 196643 bytes of tool output]");
+        assert_eq!(text[3], "image");
+        assert_eq!(
+            text[4],
+            format!("{}d", "é".repeat((TAIL_LIMIT - 1).div_euclid(2)))
+        );
+        assert_eq!(output.structured_content, None);
+        assert!(output.is_error);
+        assert_eq!(limit_output(output.clone()), output);
     }
 }
