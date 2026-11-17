@@ -36,6 +36,8 @@ pub enum AuthenticationKind {
 }
 
 /// Settings for OAuth authorization with PKCE.
+///
+/// Endpoints should use HTTPS unless the network is trusted.
 #[derive(Clone, Debug)]
 pub struct OAuthConfig {
     /// The authorization endpoint.

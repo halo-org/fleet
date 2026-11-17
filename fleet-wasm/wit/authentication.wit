@@ -9,6 +9,8 @@ interface authentication {
     }
 
     /// Settings for OAuth authorization with PKCE.
+    ///
+    /// Endpoints should use HTTPS unless the network is trusted.
     record oauth-config {
         /// The authorization endpoint.
         authorization-url: string,

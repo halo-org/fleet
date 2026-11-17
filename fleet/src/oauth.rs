@@ -430,14 +430,14 @@ fn tokens(
 fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
     let url =
         Url::parse(value).map_err(|_| AuthenticationError::Invalid("invalid OAuth endpoint"))?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
     {
         return Err(AuthenticationError::Invalid(
-            "OAuth endpoints must use HTTPS without credentials",
+            "OAuth endpoints must use HTTP or HTTPS without credentials",
         ));
     }
     Ok(url)
@@ -535,6 +535,23 @@ mod tests {
 
         assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
         assert_eq!(tokens.scopes, ["openid"]);
+    }
+
+    #[test]
+    fn endpoints_accept_http_and_https_without_credentials() {
+        for url in ["https://example.com/token", "http://example.com:8080/token"] {
+            assert_eq!(endpoint(url).unwrap().as_str(), url);
+        }
+
+        for url in [
+            "/token",
+            "ftp://example.com/token",
+            "https://user@example.com/token",
+            "https://example.com/token#fragment",
+        ] {
+            let error = endpoint(url).unwrap_err();
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+        }
     }
 
     #[test]
