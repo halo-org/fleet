@@ -44,14 +44,7 @@ fn component(wasm: &Wasm) -> crate::WasmComponent {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let module =
-            std::fs::read(target.join("wasm32-unknown-unknown/debug/fleet_wasm_test_worker.wasm"))
-                .unwrap();
-        wit_component::ComponentEncoder::default()
-            .module(&module)
-            .unwrap()
-            .validate(true)
-            .encode()
+        std::fs::read(target.join("wasm32-unknown-unknown/debug/fleet_wasm_test_worker.wasm"))
             .unwrap()
     });
     wasm.compile(bytes).unwrap()

@@ -46,13 +46,26 @@ impl Wasm {
 
     /// Compiles a WebAssembly component and its worker variant, if exported.
     ///
+    /// A core module is first encoded as a component from its embedded component type,
+    /// such as the output of a `wit-bindgen` guest build.
+    ///
     /// Only the worker variant uses fuel instrumentation. Both variants are shared
     /// by providers configured from this component.
     ///
     /// # Errors
     ///
-    /// Returns an error if the bytes are not a supported component.
+    /// Returns an error if the bytes are not a supported component or encodable module.
     pub fn compile(&self, bytes: &[u8]) -> Result<WasmComponent, WasmError> {
+        let encoded;
+        let bytes = if bytes.starts_with(b"\0asm\x01\0\0\0") {
+            encoded = wit_component::ComponentEncoder::default()
+                .module(bytes)
+                .and_then(|encoder| encoder.validate(true).encode())
+                .map_err(|error| WasmError::runtime(wasmtime::Error::from_anyhow(error)))?;
+            encoded.as_slice()
+        } else {
+            bytes
+        };
         let component = Component::new(&self.engine, bytes).map_err(WasmError::runtime)?;
         let worker = if component
             .get_export_index(None, "fleet:providers/worker@0.0.0")

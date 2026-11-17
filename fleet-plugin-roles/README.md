@@ -56,16 +56,16 @@ and an empty `compaction`. They read back without them.
 
 ## Build
 
-From the repository root, with `wasm32-unknown-unknown` and `wasm-tools` installed:
+From the repository root, with `wasm32-unknown-unknown` installed:
 
 ```sh
 cargo build -p fleet-plugin-roles --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_roles.wasm -o roles.wasm
 ```
 
 ## Configure
 
-Copy `roles.wasm` into Fleet's config directory under `plugins/` and add:
+Copy `target/wasm32-unknown-unknown/release/fleet_plugin_roles.wasm` into Fleet's
+config directory as `plugins/roles.wasm` and add:
 
 ```json
 {

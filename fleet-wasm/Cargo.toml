@@ -19,9 +19,10 @@ futures-util = { workspace = true, features = ["std", "sink"] }
 http = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
-wasmtime = { workspace = true, features = ["async", "component-model", "component-model-async", "cranelift", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
+wasmtime = { workspace = true, features = ["anyhow", "async", "component-model", "component-model-async", "cranelift", "parallel-compilation", "pooling-allocator", "runtime", "std"] }
 wasmtime-wasi = { workspace = true, features = ["p3"] }
 wasmtime-wasi-http = { workspace = true, features = ["default-send-request", "p3"] }
+wit-component.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { workspace = true, features = ["process", "std"] }
@@ -31,4 +32,3 @@ tokio = { workspace = true, features = ["signal"] }
 fleet-store = { workspace = true, features = ["blobs", "roles", "subagents"] }
 fleet-workspaces.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
-wit-component = { version = "0.262.0", default-features = false }

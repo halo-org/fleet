@@ -24,17 +24,17 @@ retries because the original write may have succeeded.
 
 ## Build
 
-From the repository root, with `wasm32-unknown-unknown` and `wasm-tools` installed:
+From the repository root, with `wasm32-unknown-unknown` installed:
 
 ```sh
 cargo build -p fleet-plugin-tools --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_tools.wasm -o tools.wasm
 ```
 
 ## Configure
 
-Copy `tools.wasm` into Fleet's config directory under `plugins/`. With a `host`
-workspace provider already configured, add:
+Copy `target/wasm32-unknown-unknown/release/fleet_plugin_tools.wasm` into Fleet's
+config directory as `plugins/tools.wasm`. With a `host` workspace provider already
+configured, add:
 
 ```json
 {
