@@ -21,6 +21,7 @@
         "host"
         "openai"
         "roles"
+        "sandbox"
         "sprites"
         "tools"
       ];
