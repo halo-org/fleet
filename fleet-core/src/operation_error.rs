@@ -79,6 +79,11 @@ pub enum OperationError<S, R, M, T> {
         call_id: ToolCallId,
         source: T,
     },
+    ProduceUnknownToolOutput {
+        alias: ToolAlias,
+        call_id: ToolCallId,
+        source: T,
+    },
     RoleNotFound {
         role: RoleName,
     },
@@ -175,6 +180,14 @@ impl<S, R, M, T> fmt::Display for OperationError<S, R, M, T> {
                 f,
                 r#"could not produce interrupted output from tool "{tool}" for tool call "{call_id}""#,
             ),
+            Self::ProduceUnknownToolOutput {
+                alias,
+                call_id,
+                source: _,
+            } => write!(
+                f,
+                r#"could not produce output for unknown tool "{alias}" for tool call "{call_id}""#,
+            ),
             Self::RoleNotFound { role } => write!(f, r#"could not find role "{role}""#),
             Self::ModelNotFound { role, model } => {
                 write!(f, r#"could not find model "{model}" used by role "{role}""#)
@@ -222,7 +235,8 @@ where
             | Self::CompactModelInput { source, .. } => Some(source),
             Self::LoadTool { source, .. }
             | Self::ExecuteTool { source, .. }
-            | Self::ProduceInterruptedToolOutput { source, .. } => Some(source),
+            | Self::ProduceInterruptedToolOutput { source, .. }
+            | Self::ProduceUnknownToolOutput { source, .. } => Some(source),
             Self::ApplyModelParameters { source, .. }
             | Self::ApplyToolParameters { source, .. }
             | Self::ApplyExtensionParameters { source, .. } => Some(source),

@@ -687,7 +687,14 @@ where
                     }
                 }
             } else {
-                self.tools.unknown_tool_output(agent_id, &tool_call)
+                self.tools
+                    .unknown_tool_output(agent_id, &tool_call)
+                    .await
+                    .map_err(|source| OperationError::ProduceUnknownToolOutput {
+                        alias: tool_call.tool.clone(),
+                        call_id: tool_call.id.clone(),
+                        source,
+                    })?
             };
 
             Ok(Outcome::Completed(ToolResult {
@@ -737,7 +744,14 @@ where
                         source,
                     })?
             } else {
-                self.tools.unknown_tool_output(agent_id, call)
+                self.tools
+                    .unknown_tool_output(agent_id, call)
+                    .await
+                    .map_err(|source| OperationError::ProduceUnknownToolOutput {
+                        alias: call.tool.clone(),
+                        call_id: call.id.clone(),
+                        source,
+                    })?
             };
 
             results.push(ToolResult {

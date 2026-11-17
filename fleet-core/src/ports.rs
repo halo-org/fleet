@@ -165,7 +165,15 @@ pub trait Tools {
     ) -> impl Future<Output = Result<ToolOutput, Self::Error>> + Send;
 
     /// Returns the output for an unknown tool.
-    fn unknown_tool_output(&self, agent_id: AgentId, call: &ToolCall) -> ToolOutput;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider fails to build the tool output.
+    fn unknown_tool_output(
+        &self,
+        agent_id: AgentId,
+        call: &ToolCall,
+    ) -> impl Future<Output = Result<ToolOutput, Self::Error>> + Send;
 }
 
 /// The kind of error returned by a tools provider.
@@ -706,7 +714,11 @@ macro_rules! impl_tools_for_pointer {
                 (**self).interrupted_output(context, input)
             }
 
-            fn unknown_tool_output(&self, agent_id: AgentId, call: &ToolCall) -> ToolOutput {
+            fn unknown_tool_output(
+                &self,
+                agent_id: AgentId,
+                call: &ToolCall,
+            ) -> impl Future<Output = Result<ToolOutput, Self::Error>> + Send {
                 (**self).unknown_tool_output(agent_id, call)
             }
         }
