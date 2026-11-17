@@ -235,26 +235,30 @@ impl Fleet {
     async fn run_snoozes(&self) {
         loop {
             let changed = self.state.store.snooze_changed();
-            // Keep a pending deadline alive through idle shutdown, and protect the
-            // initial deadline read from racing the runtime's idle decision.
-            let Some(guard) = self.state.idle_handler.track_mutation() else {
-                return;
-            };
+            // Pending deadlines allow idle shutdown since opening the store expires them.
             let deadline = match self.state.store.next_snooze().await {
                 Ok(deadline) => deadline,
                 Err(error) => {
                     eprintln!("Could not read snooze deadlines: {}", ErrorChain(&error));
-                    drop(guard);
-                    future::select(
-                        pin!(self.wait_for_shutdown()),
-                        pin!(tokio::time::sleep(Duration::from_secs(1))),
-                    )
-                    .await;
+                    let stopped = matches!(
+                        future::select(
+                            pin!(self.wait_for_shutdown()),
+                            pin!(tokio::time::sleep(Duration::from_secs(1))),
+                        )
+                        .await,
+                        future::Either::Left(_)
+                    );
+                    if stopped {
+                        return;
+                    }
                     continue;
                 }
             };
             let now = crate::fleet::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
+                let Some(_guard) = self.state.idle_handler.track_mutation() else {
+                    return;
+                };
                 if let Err(error) = self.state.store.expire_snoozes(now).await {
                     eprintln!("Could not expire snoozes: {}", ErrorChain(&error));
                     future::select(
@@ -265,7 +269,6 @@ impl Fleet {
                 }
                 continue;
             }
-            let guard = deadline.map(|_| guard);
             let wait = async {
                 match deadline {
                     Some(deadline) => {
@@ -281,7 +284,6 @@ impl Fleet {
                 future::select(pin!(self.wait_for_shutdown()), pin!(wait)).await,
                 future::Either::Left(_)
             );
-            drop(guard);
             if stopped {
                 return;
             }
@@ -1358,6 +1360,36 @@ mod tests {
                 .unwrap()
                 .unwrap();
             fleet.state.idle_handler.wait_for_mutations().await;
+        });
+    }
+
+    #[test]
+    fn pending_snoozes_allow_idle_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let store = idle_fleet().await.state.store.clone();
+            let fleet = Fleet::new(store, Some(Duration::from_secs(120)));
+            let version = fleet.collection_revision().await.unwrap();
+            fleet
+                .set_inbox(
+                    "later".into(),
+                    1.into(),
+                    version,
+                    InboxAction::Snooze(crate::fleet::now() + 86_400_000),
+                )
+                .await
+                .unwrap();
+            let worker = pin!(fleet.run_snoozes());
+            let idle = pin!(fleet_core::IdleHandler::on_idle(fleet.idle_handler()));
+            let output =
+                tokio::time::timeout(Duration::from_secs(3600), future::select(worker, idle))
+                    .await
+                    .unwrap();
+            assert!(matches!(output, future::Either::Right(_)));
         });
     }
 
