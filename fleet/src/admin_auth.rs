@@ -67,6 +67,11 @@ where
     B::Error: Into<Box<dyn Error + Send + Sync>>,
 {
     let (parts, body) = request.into_parts();
+    if let Some(sandbox) = fleet.sandbox()
+        && parts.uri.path().starts_with("/sandbox/")
+    {
+        return Ok(sandbox.handle(&parts.method, &parts.uri));
+    }
     let result = match parts.uri.path() {
         "/health" => health(&parts.method),
         "/session" => session(&token, &parts, body).await,

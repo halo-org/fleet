@@ -1,5 +1,5 @@
 use crate::{
-    AuthenticationError, CredentialStore, IdleHandler,
+    AuthenticationError, CredentialStore, IdleHandler, SandboxOAuth,
     oauth::{Authorization, OAuth, Registration, Tokens},
 };
 use core::{pin::pin, time::Duration};
@@ -121,7 +121,32 @@ impl Authentication {
         directory: &Path,
         idle_handler: IdleHandler,
     ) -> Result<Self, AuthenticationError> {
-        let store = CredentialStore::open(directory)?;
+        Self::new(
+            CredentialStore::open(directory)?,
+            OAuth::new()?,
+            idle_handler,
+        )
+        .await
+    }
+
+    /// Keeps credentials in memory and signs in only through the sandbox's OAuth provider.
+    pub async fn sandbox(
+        provider: SandboxOAuth,
+        idle_handler: IdleHandler,
+    ) -> Result<Self, AuthenticationError> {
+        Self::new(
+            CredentialStore::memory()?,
+            OAuth::sandbox(provider),
+            idle_handler,
+        )
+        .await
+    }
+
+    async fn new(
+        store: CredentialStore,
+        oauth: OAuth,
+        idle_handler: IdleHandler,
+    ) -> Result<Self, AuthenticationError> {
         let host_id = if let Some(id) = store.get("host_id")? {
             id
         } else {
@@ -143,7 +168,7 @@ impl Authentication {
         Ok(Self {
             state: Arc::new(State {
                 store,
-                oauth: OAuth::new()?,
+                oauth,
                 host_id,
                 connections: RwLock::new(BTreeMap::new()),
                 idle_handler,
@@ -299,7 +324,7 @@ impl Authentication {
         } else {
             None
         };
-        let authorization = crate::oauth::authorize(
+        let authorization = self.state.oauth.authorize(
             config,
             session.record.registrations.get(method),
             redirect_uri,

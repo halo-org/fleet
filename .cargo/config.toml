@@ -1,0 +1,3 @@
+[alias]
+# Builds the plugins in this repository for Fleet to load.
+plugins = "build --release --target wasm32-unknown-unknown -p fleet-plugin-agents -p fleet-plugin-host -p fleet-plugin-openai -p fleet-plugin-roles -p fleet-plugin-sandbox -p fleet-plugin-sprites -p fleet-plugin-tools"

@@ -82,6 +82,39 @@ also terminates remaining group members before returning. Other platforms return
 an error rather than falling back to child-only cleanup. Descendants must not
 daemonize or leave the group. Existing `process.spawn` remains child-only.
 
+## Sandbox
+
+`fleet sandbox <directory>` runs Fleet without effects outside its process, for
+testing clients and changes. It reads `config.json` from the directory in the usual
+format and keeps every store in memory, so each start is fresh. Plugins must be
+local and may use only capabilities provided by Fleet: blobs, credentials, workers,
+roles, agents and workspace providers. HTTP, filesystem and process access are
+rejected. Push notifications are unavailable.
+
+JSON files in the directory's `roles` subdirectory are stored as roles on startup,
+each named after its file. Without `FLEET_ADMIN_TOKEN`, Fleet generates an admin
+token and prints it.
+
+Sign-in reaches only the sandbox's OAuth provider, under `/sandbox/oauth` on Fleet's
+own address; authorizations with other endpoints are rejected. Its `authorize`
+endpoint approves every request and redirects back immediately to a callback on
+127.0.0.1. Browsers reach it without the admin token. Fleet's requests to its
+`token` endpoint stay in process: codes are exchanged with PKCE, and refresh tokens
+rotate. Clients can pass their own redirect URI as usual, or Fleet listens for the
+callback on a loopback port.
+
+[`fleet/sandbox`](sandbox) configures the agents, roles, tools and
+[sandbox](../fleet-plugin-sandbox) plugins with two roles that follow scripts
+sent as messages. From the repository root:
+
+```sh
+cargo plugins
+cargo run -p fleet -- sandbox fleet/sandbox
+```
+
+`cargo plugins` builds this repository's plugins into
+`target/wasm32-unknown-unknown/release`.
+
 ## Remote plugins
 
 Replace a plugin's `path` with an HTTP or HTTPS `url`, or an OCI reference such as

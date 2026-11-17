@@ -29,6 +29,19 @@ impl CredentialStore {
         let database = redb::Database::create(path).map_err(|error| {
             AuthenticationError::source("could not open credential database", error)
         })?;
+        Self::new(database)
+    }
+
+    pub fn memory() -> Result<Self, AuthenticationError> {
+        let database = redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(|error| {
+                AuthenticationError::source("could not create credential database", error)
+            })?;
+        Self::new(database)
+    }
+
+    fn new(database: redb::Database) -> Result<Self, AuthenticationError> {
         let transaction = database.begin_write().map_err(|error| {
             AuthenticationError::source("could not initialize credential database", error)
         })?;

@@ -1,0 +1,19 @@
+{
+  "title": "Assistant",
+  "description": "Follows the script in each message.",
+  "model": {
+    "name": "sandbox:scripted"
+  },
+  "tools": {
+    "bash": { "name": "tools:bash" },
+    "read": { "name": "tools:read" },
+    "write": { "name": "tools:write" },
+    "edit": { "name": "tools:edit" },
+    "delegate": { "name": "agents:oneshot_agent" },
+    "read_role": { "name": "roles:read_role" }
+  },
+  "workspace": {
+    "name": "sandbox:default"
+  },
+  "system_prompt": "Follow the script in the latest message."
+}

@@ -129,7 +129,7 @@ struct LoadError {
 pub async fn load(
     config: &Config,
     directory: &Path,
-    cache: &Path,
+    cache: Option<&Path>,
     authentication: &Authentication,
     fleet: &Fleet,
 ) -> Result<WasmRegistry, Box<dyn Error + Send + Sync>> {
@@ -140,8 +140,20 @@ pub async fn load(
 
     for (name, plugin) in &config.plugins {
         let bytes = match plugin {
-            PluginConfig::Local { path, .. } => fs::read(directory.join(path))?,
+            PluginConfig::Local { path, .. } => {
+                let path = directory.join(path);
+                fs::read(&path).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "could not read plugin {name} from {}: {error}",
+                            path.display()
+                        ),
+                    )
+                })?
+            }
             PluginConfig::Remote { url, .. } => {
+                let cache = cache.ok_or("remote plugins need a cache directory")?;
                 let locked = lockfile.plugin(name, url)?;
                 let path = cache.join(format!("{}.wasm", locked.sha256));
                 let bytes = match fs::read(&path) {
@@ -272,6 +284,24 @@ fn capabilities_for(
 }
 
 impl PluginConfig {
+    /// Returns access beyond Fleet that the plugin requires, if any.
+    pub const fn outside_access(&self) -> Option<&'static str> {
+        match self {
+            Self::Remote { .. } => Some("a remote URL"),
+            Self::Local { capabilities, .. } => {
+                if !capabilities.http.is_empty() {
+                    Some("HTTP")
+                } else if !capabilities.filesystem.is_empty() {
+                    Some("filesystem")
+                } else if capabilities.process {
+                    Some("process")
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     const fn capabilities(&self) -> &PluginCapabilities {
         match self {
             Self::Local { capabilities, .. } | Self::Remote { capabilities, .. } => capabilities,

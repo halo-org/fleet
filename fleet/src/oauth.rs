@@ -1,4 +1,4 @@
-use crate::AuthenticationError;
+use crate::{AuthenticationError, SandboxOAuth};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use core::time::Duration;
 use fleet_kit::OAuthConfig;
@@ -16,7 +16,19 @@ use url::Url;
 
 #[derive(Clone)]
 pub struct OAuth {
-    client: reqwest::Client,
+    transport: Transport,
+}
+
+#[derive(Clone)]
+enum Transport {
+    Network(reqwest::Client),
+    Sandbox(SandboxOAuth),
+}
+
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    pub body: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -73,6 +85,12 @@ struct Identity {
     iat: u64,
 }
 
+impl Response {
+    pub const fn is_success(&self) -> bool {
+        matches!(self.status, 200..=299)
+    }
+}
+
 impl OAuth {
     pub fn new() -> Result<Self, AuthenticationError> {
         let client = reqwest::Client::builder()
@@ -80,7 +98,28 @@ impl OAuth {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(transport_error)?;
-        Ok(Self { client })
+        Ok(Self {
+            transport: Transport::Network(client),
+        })
+    }
+
+    /// Sends every request to the sandbox's provider instead of the network.
+    pub const fn sandbox(provider: SandboxOAuth) -> Self {
+        Self {
+            transport: Transport::Sandbox(provider),
+        }
+    }
+
+    /// Starts an authorization through endpoints this client can reach.
+    pub fn authorize(
+        &self,
+        config: &OAuthConfig,
+        registration: Option<&Registration>,
+        redirect_uri: Url,
+    ) -> Result<Authorization, AuthenticationError> {
+        self.endpoint(&config.authorization_url)?;
+        self.endpoint(&config.token_url)?;
+        authorization(config, registration, redirect_uri)
     }
 
     pub async fn exchange(
@@ -149,18 +188,12 @@ impl OAuth {
         let Some(url) = self.discovery(issuer).await?.revocation_endpoint else {
             return Ok(false);
         };
-        let response = self
-            .client
-            .post(endpoint(&url)?)
-            .form(&[
-                ("token", token.as_str()),
-                ("token_type_hint", "refresh_token"),
-                ("client_id", &registration.client_id),
-            ])
-            .send()
-            .await
-            .map_err(transport_error)?;
-        Ok(response.status().is_success())
+        let form = [
+            ("token", token.as_str()),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", &registration.client_id),
+        ];
+        Ok(self.send(&url, Some(&form)).await?.is_success())
     }
 
     async fn token(
@@ -168,14 +201,7 @@ impl OAuth {
         config: &OAuthConfig,
         form: &[(&str, &str)],
     ) -> Result<TokenResponse, AuthenticationError> {
-        let response = self
-            .client
-            .post(endpoint(&config.token_url)?)
-            .form(form)
-            .send()
-            .await
-            .map_err(transport_error)?;
-        read_json(response).await
+        read_json(&self.send(&config.token_url, Some(form)).await?)
     }
 
     pub async fn requires_issuer_parameter(
@@ -193,17 +219,53 @@ impl OAuth {
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let response = self
-            .client
-            .get(endpoint(&url)?)
-            .send()
-            .await
-            .map_err(transport_error)?;
-        let discovery: Discovery = read_json(response).await?;
+        let discovery: Discovery = read_json(&self.send(&url, None).await?)?;
         if discovery.issuer != issuer {
             return Err(AuthenticationError::Invalid("OpenID issuer does not match"));
         }
         Ok(discovery)
+    }
+
+    /// Posts the form, or gets the URL without one.
+    async fn send(
+        &self,
+        url: &str,
+        form: Option<&[(&str, &str)]>,
+    ) -> Result<Response, AuthenticationError> {
+        let url = self.endpoint(url)?;
+        let client = match &self.transport {
+            Transport::Network(client) => client,
+            Transport::Sandbox(provider) => return provider.send(&url, form),
+        };
+        let request = match form {
+            Some(form) => client.post(url).form(form),
+            None => client.get(url),
+        };
+        let mut response = request.send().await.map_err(transport_error)?;
+        let status = response.status();
+        let mut body = Vec::new();
+        if status.is_success() {
+            while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+                if body.len().saturating_add(chunk.len()) > 1_048_576 {
+                    return Err(AuthenticationError::Invalid(
+                        "OAuth response exceeds the size limit",
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+        }
+        Ok(Response {
+            status: status.as_u16(),
+            body,
+        })
+    }
+
+    fn endpoint(&self, value: &str) -> Result<Url, AuthenticationError> {
+        let url = endpoint(value)?;
+        if let Transport::Sandbox(provider) = &self.transport {
+            provider.endpoint(&url)?;
+        }
+        Ok(url)
     }
 
     async fn verify(
@@ -214,13 +276,7 @@ impl OAuth {
         nonce: Option<&str>,
     ) -> Result<(), AuthenticationError> {
         let discovery = self.discovery(issuer).await?;
-        let response = self
-            .client
-            .get(endpoint(&discovery.jwks_uri)?)
-            .send()
-            .await
-            .map_err(transport_error)?;
-        let keys: JwkSet = read_json(response).await?;
+        let keys: JwkSet = read_json(&self.send(&discovery.jwks_uri, None).await?)?;
         let header = jsonwebtoken::decode_header(token).map_err(identity_error)?;
         if !discovery
             .id_token_signing_alg_values_supported
@@ -299,7 +355,7 @@ impl OAuth {
     }
 }
 
-pub fn authorize(
+fn authorization(
     config: &OAuthConfig,
     registration: Option<&Registration>,
     redirect_uri: Url,
@@ -382,7 +438,8 @@ pub fn redirect_uri(registered: &str, requested: Option<&str>) -> Result<Url, Au
     Ok(requested)
 }
 
-fn loopback(value: &str) -> Result<Url, AuthenticationError> {
+/// Parses a redirect URI that uses HTTP on 127.0.0.1.
+pub fn loopback(value: &str) -> Result<Url, AuthenticationError> {
     let url = Url::parse(value)
         .map_err(|_| AuthenticationError::Invalid("invalid OAuth redirect URI"))?;
     if url.scheme() != "http"
@@ -443,22 +500,11 @@ fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
     Ok(url)
 }
 
-async fn read_json<T: DeserializeOwned>(
-    mut response: reqwest::Response,
-) -> Result<T, AuthenticationError> {
-    if !response.status().is_success() {
-        return Err(AuthenticationError::Rejected(response.status().as_u16()));
+fn read_json<T: DeserializeOwned>(response: &Response) -> Result<T, AuthenticationError> {
+    if !response.is_success() {
+        return Err(AuthenticationError::Rejected(response.status));
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-        if bytes.len().saturating_add(chunk.len()) > 1_048_576 {
-            return Err(AuthenticationError::Invalid(
-                "OAuth response exceeds the size limit",
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes)
+    serde_json::from_slice(&response.body)
         .map_err(|_| AuthenticationError::Invalid("invalid OAuth response"))
 }
 
