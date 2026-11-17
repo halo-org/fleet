@@ -1,0 +1,17 @@
+{
+  "title": "Helper",
+  "description": "Shares its parent's workspace.",
+  "model": {
+    "name": "sandbox:scripted"
+  },
+  "tools": {
+    "bash": { "name": "tools:bash" },
+    "read": { "name": "tools:read" },
+    "write": { "name": "tools:write" },
+    "edit": { "name": "tools:edit" }
+  },
+  "workspace": {
+    "name": "agents:parent"
+  },
+  "system_prompt": "Follow the script in the latest message."
+}

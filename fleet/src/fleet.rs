@@ -1,4 +1,6 @@
-use crate::{Authentication, Config, ErrorChain, ErrorHandler, IdleHandler, Notifications};
+use crate::{
+    Authentication, Config, ErrorChain, ErrorHandler, IdleHandler, Notifications, SandboxOAuth,
+};
 use core::{fmt, pin::pin, time::Duration};
 use fleet_core::{
     Agent, AgentId, ClientStore as _, JsonObject, Message, MessageId, Models, Role, RoleName, Tools,
@@ -25,6 +27,7 @@ pub struct Fleet {
     authentication: Option<Authentication>,
     notifications: Option<Notifications>,
     configuration: Option<Arc<Configuration>>,
+    sandbox: Option<SandboxOAuth>,
 }
 
 /// An error returned by [`Fleet`].
@@ -55,6 +58,7 @@ impl Fleet {
             authentication: None,
             notifications: None,
             configuration: None,
+            sandbox: None,
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
                 store,
@@ -86,6 +90,17 @@ impl Fleet {
     /// Returns notifications when configured.
     pub const fn notifications(&self) -> Option<&Notifications> {
         self.notifications.as_ref()
+    }
+
+    /// Serves the sandbox's OAuth provider.
+    pub fn with_sandbox(mut self, provider: SandboxOAuth) -> Self {
+        self.sandbox = Some(provider);
+        self
+    }
+
+    /// Returns the sandbox's OAuth provider when running in the sandbox.
+    pub const fn sandbox(&self) -> Option<&SandboxOAuth> {
+        self.sandbox.as_ref()
     }
 
     /// Creates or replaces a device that receives notifications.
@@ -647,7 +662,10 @@ impl Fleet {
     /// # Errors
     ///
     /// Returns an error if the agent or message is missing, or the store fails.
-    #[expect(dead_code, reason = "turn queries are not implemented yet")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "turn queries are not implemented yet")
+    )]
     pub async fn wait_for_turn_end(
         &self,
         agent_id: AgentId,
