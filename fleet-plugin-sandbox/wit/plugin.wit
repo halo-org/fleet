@@ -1,0 +1,14 @@
+package fleet:plugin-sandbox@0.0.0;
+
+/// A scripted model, an in-memory workspace and a sign-in connection.
+world plugin {
+    import fleet:providers/configuration@0.0.0;
+    import fleet:providers/credentials@0.0.0;
+    import fleet:providers/workers@0.0.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:random/random@0.3.0;
+    export fleet:providers/models@0.0.0;
+    export fleet:providers/workspaces@0.0.0;
+    export fleet:providers/authentication@0.0.0;
+    export fleet:providers/worker@0.0.0;
+}
