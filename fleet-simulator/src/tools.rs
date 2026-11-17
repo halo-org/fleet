@@ -49,6 +49,7 @@ struct ToolsSimulatorConfig {
     get: WrapConfig,
     execute: WrapConfig,
     interrupted_output: TrySuspendConfig,
+    unknown_tool_output: TrySuspendConfig,
     tool_count: usize,
     description: Probability,
     is_async: Probability,
@@ -198,12 +199,23 @@ impl Tools for ToolsSimulator<'_> {
         })
     }
 
-    fn unknown_tool_output(&self, _agent_id: AgentId, call: &ToolCall) -> ToolOutput {
-        ToolOutput {
+    async fn unknown_tool_output(
+        &self,
+        _agent_id: AgentId,
+        call: &ToolCall,
+    ) -> Result<ToolOutput, Self::Error> {
+        self.scheduler
+            .try_suspend(
+                &self.config.unknown_tool_output,
+                ToolsSimulatorError::random,
+            )
+            .await?;
+
+        Ok(ToolOutput {
             content: Vec::from([ContentBlock::Text(format!("Unknown tool: {}", call.tool))]),
             structured_content: None,
             is_error: true,
-        }
+        })
     }
 }
 
@@ -271,6 +283,7 @@ impl ToolsSimulatorConfig {
             get: WrapConfig::generate(rng),
             execute: WrapConfig::generate(rng),
             interrupted_output: TrySuspendConfig::generate(rng),
+            unknown_tool_output: TrySuspendConfig::generate(rng),
             tool_count: rng.usize(0..=5),
             description: Probability::generate(rng),
             is_async: Probability::generate(rng),

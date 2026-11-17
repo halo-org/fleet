@@ -360,12 +360,16 @@ impl Tools for WasmRegistry {
         }
     }
 
-    fn unknown_tool_output(&self, _agent_id: AgentId, call: &ToolCall) -> ToolOutput {
-        ToolOutput {
+    fn unknown_tool_output(
+        &self,
+        _agent_id: AgentId,
+        call: &ToolCall,
+    ) -> impl Future<Output = Result<ToolOutput, Self::Error>> + Send {
+        future::ready(Ok(ToolOutput {
             content: vec![ContentBlock::Text(format!("Unknown tool: {}", call.tool))],
             structured_content: None,
             is_error: true,
-        }
+        }))
     }
 }
 
