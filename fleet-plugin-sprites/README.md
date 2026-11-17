@@ -3,15 +3,14 @@
 Provides a `default` workspace on [Sprites](https://sprites.dev). Each workspace
 ID gets its own sprite named `fleet-` followed by the ID in hex.
 
-Build from the repository root with the `wasm32-unknown-unknown` target and
-`wasm-tools` installed:
+Build from the repository root with the `wasm32-unknown-unknown` target installed:
 
 ```sh
 cargo build -p fleet-plugin-sprites --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_sprites.wasm -o sprites.wasm
 ```
 
-Copy `sprites.wasm` into Fleet's config directory under `plugins/`, then add:
+Copy `target/wasm32-unknown-unknown/release/fleet_plugin_sprites.wasm` into Fleet's
+config directory as `plugins/sprites.wasm`, then add:
 
 ```json
 {

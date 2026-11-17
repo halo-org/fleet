@@ -3,15 +3,14 @@
 Provides a `default` workspace on the machine running Fleet. Commands run with
 the host's permissions and environment. The working directory is not a sandbox.
 
-Build from the repository root with the `wasm32-unknown-unknown` target and
-`wasm-tools` installed:
+Build from the repository root with the `wasm32-unknown-unknown` target installed:
 
 ```sh
 cargo build -p fleet-plugin-host --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_host.wasm -o host.wasm
 ```
 
-Copy `host.wasm` into Fleet's config directory under `plugins/`, then add:
+Copy `target/wasm32-unknown-unknown/release/fleet_plugin_host.wasm` into Fleet's
+config directory as `plugins/host.wasm`, then add:
 
 ```json
 {

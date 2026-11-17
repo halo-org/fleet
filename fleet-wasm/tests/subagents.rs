@@ -61,16 +61,10 @@ fn components(wasm: &Wasm) -> (WasmComponent, WasmComponent) {
             String::from_utf8_lossy(&output.stderr)
         );
         ["agents", "tools"].map(|plugin| {
-            let module = std::fs::read(target.join(format!(
+            std::fs::read(target.join(format!(
                 "wasm32-unknown-unknown/debug/fleet_plugin_{plugin}.wasm"
             )))
-            .unwrap();
-            wit_component::ComponentEncoder::default()
-                .module(&module)
-                .unwrap()
-                .validate(true)
-                .encode()
-                .unwrap()
+            .unwrap()
         })
     });
     (

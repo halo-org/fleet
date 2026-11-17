@@ -10,6 +10,6 @@ Run the host tests from the repository root:
 cargo test -p fleet-wasm wasm_workers
 ```
 
-The tests build this fixture offline in `target/worker-fixture` and encode it as a
-component. Install the `wasm32-unknown-unknown` Rust target and ensure its linker
+The tests build this fixture offline in `target/worker-fixture` and load the module
+directly. Install the `wasm32-unknown-unknown` Rust target and ensure its linker
 is available. Fetch workspace dependencies before running offline.

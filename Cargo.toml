@@ -104,6 +104,7 @@ wasmtime-wasi = { version = "50.0.1", default-features = false }
 wasmtime-wasi-http = { version = "50.0.1", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 wit-bindgen = { version = "0.63.0", default-features = false }
+wit-component = { version = "0.262.0", default-features = false }
 
 # Optimize Wasmtime's compiler for fast dev startup and tests.
 [profile.dev.package.cranelift-codegen]

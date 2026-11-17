@@ -56,6 +56,8 @@ Filesystem access uses a `filesystem` array of mounts:
 ```
 
 Local component paths and host mount paths are relative to the config directory.
+A path can name a component or a core module with an embedded component type, such
+as a `wit-bindgen` plugin built by cargo for `wasm32-unknown-unknown`.
 The same compiled component is shared by providers using the same plugin.
 Restart Fleet after changing plugin or provider configuration.
 

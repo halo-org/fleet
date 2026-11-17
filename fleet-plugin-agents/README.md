@@ -38,11 +38,10 @@ contract: it is not a guarantee that an external process has stopped.
 
 ## Build
 
-From the repository root, with `wasm32-unknown-unknown` and `wasm-tools` installed:
+From the repository root, with `wasm32-unknown-unknown` installed:
 
 ```sh
 cargo build -p fleet-plugin-agents --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_agents.wasm -o agents.wasm
 ```
 
 ## Configure

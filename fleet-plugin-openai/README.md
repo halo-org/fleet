@@ -4,15 +4,14 @@ Provides models through the OpenAI Responses API, using `fleet-models`. The plug
 supplies WASI HTTP, host credentials and blob access. It declares a `chatgpt`
 connection for signing in with ChatGPT.
 
-Build from the repository root with the `wasm32-unknown-unknown` target and
-`wasm-tools` installed:
+Build from the repository root with the `wasm32-unknown-unknown` target installed:
 
 ```sh
 cargo build -p fleet-plugin-openai --release --target wasm32-unknown-unknown
-wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_openai.wasm -o openai.wasm
 ```
 
-Copy `openai.wasm` into Fleet's config directory under `plugins/`, then add:
+Copy `target/wasm32-unknown-unknown/release/fleet_plugin_openai.wasm` into Fleet's
+config directory as `plugins/openai.wasm`, then add:
 
 ```json
 {
