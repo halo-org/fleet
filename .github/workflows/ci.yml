@@ -11,25 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-        with:
-          extra-conf: |
-            extra-substituters = https://halo-cache.fly.dev/halo
-            extra-trusted-public-keys = halo:nXtBRLJRHoAQ/CoFmYkvJAiFzHJLTmqygmvhGNryigA=
-            fallback = true
       - run: |
-          nix profile install --inputs-from . nixpkgs#attic-client
-          attic login halo-cache https://halo-cache.fly.dev "$ATTIC_TOKEN"
-          attic watch-store halo-cache:halo &> /dev/null &
+          umask 077
+          mkdir -p ~/.ssh
+          printenv HALO_BUILDER_SSH_KEY > ~/.ssh/halo-builder
+          echo "halo-builder.fly.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+rL+Mybp7iCMdWGHZHBFTwmsmUaahwa8VLEjkFsjX6" >> ~/.ssh/known_hosts
+          printf 'Host halo-builder.fly.dev\n  IdentityFile ~/.ssh/halo-builder\n  ServerAliveInterval 30\n' >> ~/.ssh/config
         env:
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-      - run: nix flake check -L --keep-going
-      - if: ${{ !cancelled() }}
-        run: |
-          for attempt in 1 2 3; do
-            nix path-info --all | grep -v '\.drv$' | attic push --stdin halo-cache:halo && exit 0
-            sleep 20
-          done
-          exit 1
+          HALO_BUILDER_SSH_KEY: ${{ secrets.HALO_BUILDER_SSH_KEY }}
+      # nix flake check treats checks as built when their derivations are missing from the store.
+      - run: |
+          checks=$(nix eval --raw .#checks.x86_64-linux --apply 'checks: toString (map (c: c.drvPath) (builtins.attrValues checks))')
+          nix copy --to ssh-ng://ci@halo-builder.fly.dev $checks
+      - run: nix flake check -L --keep-going --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -41,17 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-        with:
-          extra-conf: |
-            extra-substituters = https://halo-cache.fly.dev/halo
-            extra-trusted-public-keys = halo:nXtBRLJRHoAQ/CoFmYkvJAiFzHJLTmqygmvhGNryigA=
-            fallback = true
       - run: |
-          nix profile install --inputs-from . nixpkgs#attic-client
-          attic login halo-cache https://halo-cache.fly.dev "$ATTIC_TOKEN"
-          attic watch-store halo-cache:halo &> /dev/null &
+          umask 077
+          mkdir -p ~/.ssh
+          printenv HALO_BUILDER_SSH_KEY > ~/.ssh/halo-builder
+          echo "halo-builder.fly.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+rL+Mybp7iCMdWGHZHBFTwmsmUaahwa8VLEjkFsjX6" >> ~/.ssh/known_hosts
+          printf 'Host halo-builder.fly.dev\n  IdentityFile ~/.ssh/halo-builder\n  ServerAliveInterval 30\n' >> ~/.ssh/config
         env:
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          HALO_BUILDER_SSH_KEY: ${{ secrets.HALO_BUILDER_SSH_KEY }}
+      - run: nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
+      - run: nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
       - run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
         env:
           REGISTRY_USER: ${{ github.actor }}
@@ -62,8 +55,6 @@ jobs:
           REGISTRY_PASSWORD: ${{ github.token }}
       - if: ${{ !cancelled() }}
         run: |
-          for attempt in 1 2 3; do
-            nix path-info --all | grep -v '\.drv$' | attic push --stdin halo-cache:halo && exit 0
-            sleep 20
-          done
-          exit 1
+          checks=$(nix eval --raw .#checks.x86_64-linux --apply 'checks: toString (map (c: c.drvPath) (builtins.attrValues checks))')
+          packages=$(nix path-info --derivation .#publish .#publish-plugins)
+          printf '%s\n' $checks $packages | ssh ci@halo-builder.fly.dev pin fleet
