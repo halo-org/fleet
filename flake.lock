@@ -1,5 +1,25 @@
 {
   "nodes": {
+    "ci": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795080899,
+        "narHash": "sha256-dHMwiiNywGSg2TAIEst0usrAw+XlAIOdyJ1Onnp5EhY=",
+        "owner": "halo-org",
+        "repo": "ci",
+        "rev": "5b426f4a36caa1f371aadf774e438ffccbb61e87",
+        "type": "github"
+      },
+      "original": {
+        "owner": "halo-org",
+        "repo": "ci",
+        "type": "github"
+      }
+    },
     "crane": {
       "locked": {
         "lastModified": 1793836618,
@@ -33,6 +53,7 @@
     },
     "root": {
       "inputs": {
+        "ci": "ci",
         "crane": "crane",
         "nixpkgs": "nixpkgs"
       }

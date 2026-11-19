@@ -4,10 +4,20 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
+    ci = {
+      url = "github:halo-org/ci";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, crane, ... }:
+    {
+      self,
+      nixpkgs,
+      crane,
+      ci,
+      ...
+    }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -82,20 +92,38 @@
 
       fleet = craneLib.buildPackage server;
 
-      plugins = craneLib.buildPackage (
-        guest
-        // {
-          pname = "fleet-plugins";
-          nativeBuildInputs = guest.nativeBuildInputs ++ [ pkgs.wasm-tools ];
-          installPhaseCommand = ''
-            mkdir -p $out/share/fleet/plugins
-            for name in ${toString pluginNames}; do
-              wasm-tools component new \
-                target/wasm32-unknown-unknown/release/fleet_plugin_$name.wasm \
-                -o $out/share/fleet/plugins/$name.wasm
-            done
-          '';
-        }
+      plugin =
+        name:
+        let
+          args = withDependencies (
+            common
+            // {
+              pname = "fleet-plugin-${name}";
+              cargoExtraArgs = "--locked --package fleet-plugin-${name}";
+              CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+              doCheck = false;
+            }
+          );
+        in
+        craneLib.buildPackage (
+          args
+          // {
+            nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.wasm-tools ];
+            installPhaseCommand = ''
+              wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_${name}.wasm -o $out
+            '';
+          }
+        );
+
+      wasmComponents = lib.genAttrs' pluginNames (
+        name: lib.nameValuePair "fleet-plugin-${name}" (plugin name)
+      );
+
+      plugins = pkgs.linkFarm "fleet-plugins" (
+        map (name: {
+          name = "${name}.wasm";
+          path = wasmComponents."fleet-plugin-${name}";
+        }) pluginNames
       );
 
       image = pkgs.dockerTools.streamLayeredImage {
@@ -128,7 +156,7 @@
         text = ''
           export WKG_OCI_USERNAME="$REGISTRY_USER" WKG_OCI_PASSWORD="$REGISTRY_PASSWORD"
           for name in ${toString pluginNames}; do
-            wkg oci push "$1/fleet-plugin-$name:$2" "${plugins}/share/fleet/plugins/$name.wasm"
+            wkg oci push "$1/fleet-plugin-$name:$2" "${plugins}/$name.wasm"
           done
         '';
       };
@@ -137,13 +165,14 @@
       packages.${system} = {
         inherit
           fleet
-          plugins
           image
           publish
           publish-plugins
           ;
         default = fleet;
       };
+
+      wasmComponents.${system} = wasmComponents;
 
       devShells.${system}.default = craneLib.devShell {
         packages = common.nativeBuildInputs ++ [
@@ -153,9 +182,7 @@
         ];
       };
 
-      checks.${system} = {
-        inherit fleet plugins image;
-
+      checks.${system} = ci.lib.outputChecks self system // {
         fmt = craneLib.cargoFmt (common // { cargoExtraArgs = "--all"; });
 
         nix-fmt = pkgs.runCommand "fleet-nix-fmt" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
