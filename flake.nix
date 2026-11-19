@@ -119,38 +119,26 @@
         name: lib.nameValuePair "fleet-plugin-${name}" (plugin name)
       );
 
-      image = pkgs.dockerTools.streamLayeredImage {
+      image = ci.lib.ociImage system {
         name = "fleet";
-        tag = "latest";
-        config = {
-          Entrypoint = [ (lib.getExe' fleet "fleet") ];
-          Env = [
-            "SSL_CERT_FILE=${certificates}"
-            "FLEET_DIR=/var/lib/fleet"
-          ];
+        entrypoint = [ (lib.getExe' fleet "fleet") ];
+        env = {
+          SSL_CERT_FILE = certificates;
+          FLEET_DIR = "/var/lib/fleet";
         };
-      };
-
-      # Usage: REGISTRY_USER=... REGISTRY_PASSWORD=... publish ghcr.io/owner/name:tag
-      publish = pkgs.writeShellApplication {
-        name = "publish";
-        runtimeInputs = [ pkgs.skopeo ];
-        text = ''
-          ${image} | skopeo --insecure-policy copy \
-            --dest-creds "$REGISTRY_USER:$REGISTRY_PASSWORD" \
-            docker-archive:/dev/stdin "docker://$1"
-        '';
+        layers = [
+          pkgs.stdenv.cc.cc.lib
+          pkgs.cacert
+        ];
       };
     in
     {
       packages.${system} = {
-        inherit
-          fleet
-          image
-          publish
-          ;
+        inherit fleet;
         default = fleet;
       };
+
+      ociImages.${system}.fleet = image;
 
       wasmComponents.${system} = wasmComponents;
 

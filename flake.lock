@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1795080899,
-        "narHash": "sha256-dHMwiiNywGSg2TAIEst0usrAw+XlAIOdyJ1Onnp5EhY=",
+        "lastModified": 1795138084,
+        "narHash": "sha256-URF8Ek4fnZBkxIcoA5XCxQCNh9+6UeuRuQ5Z6RzpxEU=",
         "owner": "halo-org",
         "repo": "ci",
-        "rev": "5b426f4a36caa1f371aadf774e438ffccbb61e87",
+        "rev": "0153ed1026bc3048a9b7853b6fc8cd4ffd679ad5",
         "type": "github"
       },
       "original": {
