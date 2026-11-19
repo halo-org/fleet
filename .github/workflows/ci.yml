@@ -7,23 +7,12 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - run: |
-          umask 077
-          mkdir -p ~/.ssh
-          printenv HALO_BUILDER_SSH_KEY > ~/.ssh/halo-builder
-          echo "halo-builder.fly.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+rL+Mybp7iCMdWGHZHBFTwmsmUaahwa8VLEjkFsjX6" >> ~/.ssh/known_hosts
-          printf 'Host halo-builder.fly.dev\n  IdentityFile ~/.ssh/halo-builder\n  ServerAliveInterval 30\n' >> ~/.ssh/config
-        env:
-          HALO_BUILDER_SSH_KEY: ${{ secrets.HALO_BUILDER_SSH_KEY }}
-      # nix flake check treats checks as built when their derivations are missing from the store.
-      - run: |
-          checks=$(nix eval --raw .#checks.x86_64-linux --apply 'checks: toString (map (c: c.drvPath) (builtins.attrValues checks))')
-          nix copy --to ssh-ng://ci@halo-builder.fly.dev $checks
-      - run: nix flake check -L --keep-going --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev
+    uses: halo-org/ci/.github/workflows/ci.yml@main
+    with:
+      builders: ${{ vars.NIX_BUILDERS }}
+      pin: fleet
+    secrets:
+      builder-ssh-key: ${{ secrets.NIX_BUILDER_SSH_KEY }}
 
   publish:
     if: github.ref == 'refs/heads/main'
@@ -38,13 +27,16 @@ jobs:
       - run: |
           umask 077
           mkdir -p ~/.ssh
-          printenv HALO_BUILDER_SSH_KEY > ~/.ssh/halo-builder
+          printenv NIX_BUILDER_SSH_KEY > ~/.ssh/halo-builder
           echo "halo-builder.fly.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+rL+Mybp7iCMdWGHZHBFTwmsmUaahwa8VLEjkFsjX6" >> ~/.ssh/known_hosts
           printf 'Host halo-builder.fly.dev\n  IdentityFile ~/.ssh/halo-builder\n  ServerAliveInterval 30\n' >> ~/.ssh/config
         env:
-          HALO_BUILDER_SSH_KEY: ${{ secrets.HALO_BUILDER_SSH_KEY }}
+          NIX_BUILDER_SSH_KEY: ${{ secrets.NIX_BUILDER_SSH_KEY }}
       - run: nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
       - run: nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
+      - run: |
+          publish=$(nix path-info --derivation .#publish .#publish-plugins)
+          ssh ci@halo-builder.fly.dev pin fleet-publish <<< "$publish"
       - run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
         env:
           REGISTRY_USER: ${{ github.actor }}
@@ -53,8 +45,3 @@ jobs:
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ github.token }}
-      - if: ${{ !cancelled() }}
-        run: |
-          checks=$(nix eval --raw .#checks.x86_64-linux --apply 'checks: toString (map (c: c.drvPath) (builtins.attrValues checks))')
-          packages=$(nix path-info --derivation .#publish .#publish-plugins)
-          printf '%s\n' $checks $packages | ssh ci@halo-builder.fly.dev pin fleet
