@@ -30,35 +30,3 @@ jobs:
     secrets:
       password: ${{ secrets.GITHUB_TOKEN }}
       builder-ssh-key: ${{ secrets.NIX_BUILDER_SSH_KEY }}
-
-  publish-image:
-    name: Publish image
-    if: github.ref == 'refs/heads/main'
-    needs: check
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - name: Set up builder
-        run: |
-          umask 077
-          mkdir -p ~/.ssh
-          printenv NIX_BUILDER_SSH_KEY > ~/.ssh/halo-builder
-          echo "halo-builder.fly.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+rL+Mybp7iCMdWGHZHBFTwmsmUaahwa8VLEjkFsjX6" >> ~/.ssh/known_hosts
-          printf 'Host halo-builder.fly.dev\n  IdentityFile ~/.ssh/halo-builder\n  ServerAliveInterval 30\n' >> ~/.ssh/config
-        env:
-          NIX_BUILDER_SSH_KEY: ${{ secrets.NIX_BUILDER_SSH_KEY }}
-      - name: Build
-        run: |
-          nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish
-          nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish
-      - name: Publish image
-        run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
-        env:
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ github.token }}
