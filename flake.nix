@@ -119,13 +119,6 @@
         name: lib.nameValuePair "fleet-plugin-${name}" (plugin name)
       );
 
-      plugins = pkgs.linkFarm "fleet-plugins" (
-        map (name: {
-          name = "${name}.wasm";
-          path = wasmComponents."fleet-plugin-${name}";
-        }) pluginNames
-      );
-
       image = pkgs.dockerTools.streamLayeredImage {
         name = "fleet";
         tag = "latest";
@@ -148,18 +141,6 @@
             docker-archive:/dev/stdin "docker://$1"
         '';
       };
-
-      # Usage: REGISTRY_USER=... REGISTRY_PASSWORD=... publish-plugins ghcr.io/owner tag
-      publish-plugins = pkgs.writeShellApplication {
-        name = "publish-plugins";
-        runtimeInputs = [ pkgs.wkg ];
-        text = ''
-          export WKG_OCI_USERNAME="$REGISTRY_USER" WKG_OCI_PASSWORD="$REGISTRY_PASSWORD"
-          for name in ${toString pluginNames}; do
-            wkg oci push "$1/fleet-plugin-$name:$2" "${plugins}/$name.wasm"
-          done
-        '';
-      };
     in
     {
       packages.${system} = {
@@ -167,7 +148,6 @@
           fleet
           image
           publish
-          publish-plugins
           ;
         default = fleet;
       };
