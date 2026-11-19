@@ -10,7 +10,6 @@ jobs:
     uses: halo-org/ci/.github/workflows/ci.yml@main
     with:
       builders: ${{ vars.NIX_BUILDERS }}
-      pin: fleet
     secrets:
       builder-ssh-key: ${{ secrets.NIX_BUILDER_SSH_KEY }}
 
@@ -34,9 +33,6 @@ jobs:
           NIX_BUILDER_SSH_KEY: ${{ secrets.NIX_BUILDER_SSH_KEY }}
       - run: nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
       - run: nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
-      - run: |
-          publish=$(nix path-info --derivation .#publish .#publish-plugins)
-          ssh ci@halo-builder.fly.dev pin fleet-publish <<< "$publish"
       - run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
         env:
           REGISTRY_USER: ${{ github.actor }}
