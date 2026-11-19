@@ -18,6 +18,23 @@ jobs:
     name: Publish
     if: github.ref == 'refs/heads/main'
     needs: check
+    permissions:
+      contents: read
+      packages: write
+    uses: halo-org/ci/.github/workflows/publish-oci-registry.yml@main
+    with:
+      to: ghcr.io/${{ github.repository_owner }}/{name}
+      tags: ${{ github.sha }}
+      username: ${{ github.actor }}
+      builders: ${{ vars.NIX_BUILDERS }}
+    secrets:
+      password: ${{ secrets.GITHUB_TOKEN }}
+      builder-ssh-key: ${{ secrets.NIX_BUILDER_SSH_KEY }}
+
+  publish-image:
+    name: Publish image
+    if: github.ref == 'refs/heads/main'
+    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,15 +55,10 @@ jobs:
           NIX_BUILDER_SSH_KEY: ${{ secrets.NIX_BUILDER_SSH_KEY }}
       - name: Build
         run: |
-          nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
-          nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish .#publish-plugins
+          nix build -L --no-link --eval-store auto --store ssh-ng://ci@halo-builder.fly.dev .#publish
+          nix copy --no-check-sigs --eval-store auto --from ssh-ng://ci@halo-builder.fly.dev .#publish
       - name: Publish image
         run: nix run -L .#publish -- "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_SHA"
-        env:
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ github.token }}
-      - name: Publish plugins
-        run: nix run -L .#publish-plugins -- "ghcr.io/$GITHUB_REPOSITORY_OWNER" "$GITHUB_SHA"
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ github.token }}
