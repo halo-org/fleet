@@ -40,6 +40,14 @@ pub struct AgentRecord {
     pub synchronous_tool_calls: u64,
 }
 
+/// The state reported as an agent's activity.
+#[derive(PartialEq, Eq)]
+pub struct Activity {
+    pub turn_active: bool,
+    pub interrupt_pending: bool,
+    pub interrupt_includes_async_tool_calls: bool,
+}
+
 pub const fn initial_metadata_revision() -> u128 {
     1
 }
@@ -272,6 +280,25 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
         Ok(true)
     }
 
+    /// Records an activity change if the agent's activity differs from `previous`.
+    pub fn update_activity(
+        &mut self,
+        agent: &mut AgentRecord,
+        previous: &Activity,
+    ) -> Result<(), StoreError> {
+        if agent.activity() != *previous {
+            self.change(
+                agent.agent.id,
+                ACTIVITY,
+                &[],
+                Some(agent.activity_revision),
+                agent.revision,
+            )?;
+            agent.activity_revision = agent.revision;
+        }
+        Ok(())
+    }
+
     pub fn save_agent(&mut self, agent: &AgentRecord) -> Result<(), StoreError> {
         let id = agent.agent.id;
         self.put(&key(AGENT, id, &[]), agent)?;
@@ -351,6 +378,15 @@ impl AgentRecord {
             && !self.interrupt_intent
             && self.pending_messages == 0
             && self.pending_tool_calls == 0
+    }
+
+    pub const fn activity(&self) -> Activity {
+        Activity {
+            turn_active: self.turn_active,
+            interrupt_pending: self.interrupt_intent,
+            interrupt_includes_async_tool_calls: self.interrupt_intent
+                && self.interrupt_includes_async_tool_calls,
+        }
     }
 
     pub fn check_latest_event(&self, expected: Option<u128>) -> Result<(), StoreError> {

@@ -2376,12 +2376,14 @@ mod tests {
                 "id": "a",
                 "tool": "shell",
                 "is_async": false,
+                "interrupt_pending": false,
             });
             let pending_b = json!({
                 "status": "pending",
                 "id": "b",
                 "tool": "shell",
                 "is_async": true,
+                "interrupt_pending": false,
             });
 
             let response = crate::api::handle(fleet.clone(), request("/agents/1/tool-calls"))
@@ -2500,6 +2502,7 @@ mod tests {
                 json!({
                     "turn": "idle",
                     "interrupt_pending": false,
+                    "interrupt_includes_async_tool_calls": false,
                 })
             );
             let current = fleet.tool_calls(1.into(), None).await.unwrap();
