@@ -203,12 +203,7 @@ impl AgentAccess {
                             return Err(StoreError::AgentDenied);
                         }
                         for blob in crate::blob_records::content_ids(&message.content) {
-                            if records.get::<bool>(&records::key(
-                                crate::blob_records::GRANT,
-                                owner,
-                                &blob.to_be_bytes(),
-                            ))? != Some(true)
-                            {
+                            if !crate::blob_records::readable(&records, owner, Some(&call), blob)? {
                                 return Err(StoreError::BlobDenied);
                             }
                         }

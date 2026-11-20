@@ -79,3 +79,33 @@ pub fn grant(
     }
     Ok(())
 }
+
+#[cfg(any(feature = "blobs", feature = "subagents"))]
+pub fn readable<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    records: &Records<T>,
+    agent: u128,
+    call: Option<&str>,
+    id: u128,
+) -> Result<bool, StoreError> {
+    let granted = |agent: u128| {
+        records
+            .get::<bool>(&records::key(GRANT, agent, &id.to_be_bytes()))
+            .map(|grant| grant == Some(true))
+    };
+    if granted(agent)? {
+        return Ok(true);
+    }
+    let Some(call) = call else {
+        return Ok(false);
+    };
+    for child in crate::agents::children(records, agent)? {
+        let child = child?;
+        if granted(child)?
+            && crate::metadata::agent_parent(&records.agent(child)?.agent.extensions)
+                == Some((agent, call))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

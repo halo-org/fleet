@@ -228,7 +228,8 @@ fn providers(
                     )
                 })),
                 blobs: Some(
-                    WasmBlobs::new(store.clone()).with_agents(move |id| blob_store.agent_blobs(id)),
+                    WasmBlobs::new(store.clone())
+                        .with_agents(move |id, call| blob_store.agent_blobs(id).for_call(call)),
                 ),
                 ..WasmCapabilities::default()
             },

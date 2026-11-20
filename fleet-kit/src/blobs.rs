@@ -26,6 +26,7 @@ pub struct ImageDimensions {
 ///
 /// Implementations control access. Writes must complete before their references are published.
 /// Blobs referenced by retained history must remain available, including after compaction.
+/// Models see each image's ID as a decimal reference, and tools accept references in that form.
 pub trait Blobs {
     /// The error type returned by this provider.
     type Error: fleet_core::Error<BlobsErrorKind> + 'static;

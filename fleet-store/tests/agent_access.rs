@@ -436,3 +436,60 @@ fn queued_images_require_the_callers_grant() {
         assert_eq!(bytes, image);
     });
 }
+
+#[cfg(feature = "blobs")]
+#[test]
+fn calls_can_use_images_held_by_their_agents() {
+    use fleet_kit::Blobs as _;
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        root(&store).await;
+        let access = store.agent_access(1.into()).for_call("drive".into());
+        let first = access
+            .create("first", &role(), &JsonObject::new())
+            .await
+            .unwrap();
+        let second = access
+            .create("second", &role(), &JsonObject::new())
+            .await
+            .unwrap();
+        let image = include_bytes!("fixtures/image.png");
+        store
+            .agent_blobs(first)
+            .put(1.into(), "image/png", image)
+            .await
+            .unwrap();
+
+        let error = store
+            .agent_blobs(1.into())
+            .read(1.into(), 1000)
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::BlobDenied);
+        let error = store
+            .agent_blobs(1.into())
+            .for_call("other".into())
+            .read(1.into(), 1000)
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::BlobDenied);
+        let drive = store.agent_blobs(1.into()).for_call("drive".into());
+        assert_eq!(drive.read(1.into(), 1000).await.unwrap(), image);
+
+        let content = [ContentBlock::Image(1.into())];
+        access.send("image", second, &content).await.unwrap();
+        let bytes = store
+            .agent_blobs(second)
+            .read(1.into(), 1000)
+            .await
+            .unwrap();
+        assert_eq!(bytes, image);
+
+        store
+            .interrupt_agent("interrupt", 1.into(), None)
+            .await
+            .unwrap();
+        store.reconcile_agent_scopes().await.unwrap();
+        assert_eq!(drive.read(1.into(), 1000).await.unwrap(), image);
+    });
+}
