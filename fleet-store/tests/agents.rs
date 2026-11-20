@@ -4,14 +4,15 @@
 
 use core::{assert_matches, num::NonZeroUsize};
 use fleet_core::{
-    Agent, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
+    Agent, AgentId, ClientStore as _, Configured, ContentBlock, JsonObject, Message, MessageMode,
     ModelOutput, ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage, RuntimeStore as _,
+    ToolCall, ToolOutput, ToolResult,
 };
 use fleet_kit::{
     AgentCollection as _, AgentParent, AgentSummary, AgentsQuery, CollectionRevision,
     EventDirection, Extension as _, InboxAction, InboxFilter, InboxState, Queries, QueryUpdate,
 };
-use fleet_store::{Store, StoreError};
+use fleet_store::{Store, StoreError, WorkspaceRelease, WorkspaceReleaseState};
 use futures_util::future;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -58,6 +59,26 @@ fn now() -> u64 {
         .as_millis()
         .try_into()
         .expect("timestamp fits u64")
+}
+
+async fn settle(store: &Store, key: &str) -> AgentSummary {
+    let version = summary(store, 1).await.version;
+    store
+        .set_inbox(key, 1.into(), version, InboxAction::Settle)
+        .await
+        .expect("agent can be settled");
+    summary(store, 1).await
+}
+
+async fn releases(store: &Store, now: u64) -> (Vec<WorkspaceRelease>, Option<u64>) {
+    store
+        .workspace_releases(now, Some(60_000))
+        .await
+        .expect("releases can be read")
+}
+
+fn agents(releases: &[WorkspaceRelease]) -> Vec<AgentId> {
+    releases.iter().map(WorkspaceRelease::agent).collect()
 }
 
 async fn summary(store: &Store, id: u128) -> AgentSummary {
@@ -395,6 +416,129 @@ fn snoozes_are_idle_only_version_checked_and_cancelled_by_activity() {
 }
 
 #[test]
+fn settling_schedules_a_release_that_unsettling_cancels() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        store.create_agent("create", &agent(1), None).await.unwrap();
+        let settled = settle(&store, "settle").await;
+        let deadline = settled.since + 60_000;
+
+        assert_eq!(
+            releases(&store, deadline - 1).await,
+            (vec![], Some(deadline))
+        );
+        assert_eq!(
+            store.workspace_releases(u64::MAX, None).await.unwrap(),
+            (vec![], None)
+        );
+        let (due, next) = releases(&store, deadline).await;
+        assert_eq!(agents(&due), [AgentId::from(1)]);
+        assert_eq!(next, None);
+
+        let version = summary(&store, 1).await.version;
+        store
+            .set_inbox("restore", 1.into(), version, InboxAction::Pending)
+            .await
+            .unwrap();
+        assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
+        assert_matches!(
+            store.workspace_release_state(due[0]).await,
+            Ok(WorkspaceReleaseState::Cancelled)
+        );
+        let resettled = settle(&store, "settle-again").await;
+        store.complete_workspace_release(due[0]).await.unwrap();
+        let (replaced, next) = releases(&store, resettled.since).await;
+        assert_eq!(replaced, []);
+        assert_eq!(next, Some(resettled.since + 60_000));
+
+        store
+            .set_inbox(
+                "snooze",
+                1.into(),
+                resettled.version,
+                InboxAction::Snooze(now() + 60_000),
+            )
+            .await
+            .unwrap();
+        assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
+        settle(&store, "settle-snoozed").await;
+        store
+            .send_message("send", 1.into(), &message(1))
+            .await
+            .unwrap();
+        assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
+    });
+}
+
+#[test]
+fn releases_wait_for_tool_calls_and_keep_agents_settled() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        store
+            .create_agent("create", &agent(1), Some(&message(1)))
+            .await
+            .unwrap();
+        store.consume_messages(1.into(), None, true).await.unwrap();
+        let mut background = response();
+        background.output.push(ModelOutput::ToolCall(ToolCall {
+            id: "background".into(),
+            tool: "tool".into(),
+            is_async: true,
+            input: JsonObject::new(),
+        }));
+        store
+            .append_model_response(1.into(), 0.into(), true, &background)
+            .await
+            .unwrap();
+        settle(&store, "settle").await;
+        let (due, _) = releases(&store, u64::MAX).await;
+        assert_matches!(
+            store.workspace_release_state(due[0]).await,
+            Ok(WorkspaceReleaseState::Busy)
+        );
+
+        store
+            .append_tool_result(
+                1.into(),
+                &ToolResult {
+                    call_id: "background".into(),
+                    output: ToolOutput {
+                        content: vec![],
+                        structured_content: None,
+                        is_error: false,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_matches!(
+            store.workspace_release_state(due[0]).await,
+            Ok(WorkspaceReleaseState::Cancelled)
+        );
+        let state = store.agent_state(1.into()).await.unwrap().unwrap();
+        store
+            .consume_messages(1.into(), state.latest_event, true)
+            .await
+            .unwrap();
+        let state = store.agent_state(1.into()).await.unwrap().unwrap();
+        store
+            .append_model_response(1.into(), state.latest_event.unwrap(), true, &response())
+            .await
+            .unwrap();
+        settle(&store, "settle-idle").await;
+        let (due, _) = releases(&store, u64::MAX).await;
+        assert_matches!(
+            store.workspace_release_state(due[0]).await,
+            Ok(WorkspaceReleaseState::Ready)
+        );
+        store.complete_workspace_release(due[0]).await.unwrap();
+        store.complete_workspace_release(due[0]).await.unwrap();
+        assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
+        assert_eq!(summary(&store, 1).await.inbox, InboxState::Settled);
+    });
+}
+
+#[test]
 fn pins_survive_activity_and_snoozes_but_not_settling() {
     futures_executor::block_on(async {
         let store = Store::memory().unwrap();
@@ -580,11 +724,16 @@ fn collection_resume_and_deadlines_survive_reopening() {
                 InboxState::Snoozed
             );
             store.expire_snoozes(deadline).await.unwrap();
+            settle(&store, "settle").await;
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store.agents_updates(cursor).await.unwrap().agents[0].inbox,
-            InboxState::Pending
+            InboxState::Settled
+        );
+        assert_eq!(
+            agents(&releases(&store, u64::MAX).await.0),
+            [AgentId::from(1)]
         );
     });
     std::fs::remove_file(path).unwrap();

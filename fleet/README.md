@@ -61,6 +61,10 @@ as a `wit-bindgen` plugin built by cargo for `wasm32-unknown-unknown`.
 The same compiled component is shared by providers using the same plugin.
 Restart Fleet after changing plugin or provider configuration.
 
+`release_settled_workspaces_after_ms` releases a root agent's workspace once the
+agent has been settled this many milliseconds, as described in
+[Workspaces](#workspaces).
+
 Approve `"workers": true` in a plugin's capabilities to let it retain private WASM
 workers between calls. The component must import `fleet:providers/workers@0.0.0`
 and export `fleet:providers/worker@0.0.0` alongside its normal provider interfaces.
@@ -278,6 +282,53 @@ Agents look up their role on every turn. Write access lets an agent change its o
 tools and system prompt from its next turn, and those of every agent sharing a writable role.
 Give it only to agents trusted with the access of any role they can write.
 
+## Workspaces
+
+A role's `workspace` selects a workspace provider and its config. Tools open the
+environment the first time they need it. An agent owns the environment of a
+provider workspace configured without an `id`, which uses the agent's ID. An `id`
+or a resolver, such as the agents plugin's `parent`, selects an environment the
+agent does not own.
+
+Releasing an environment asks its provider to discard what it holds for it, such
+as a sprite. A later open provisions it again. Fleet releases only an agent's own
+environment, resolved from the agent's current role. It never opens or provisions
+one to release it, and does nothing for an agent that owns no environment. No
+record is kept of what an agent opened. If the role or its workspace config was
+edited or deleted since, the release may do nothing, and the old environment must
+be removed by hand.
+
+Fleet releases a subagent's workspace when its scope closes, whether its call
+finished or was interrupted. A root agent's workspace is released once it has been
+settled for `release_settled_workspaces_after_ms`:
+
+```json
+{
+  "release_settled_workspaces_after_ms": 604800000
+}
+```
+
+The time counts from when the agent settled, so a changed setting also applies to
+agents that are already settled. Without the setting, root agents' workspaces are
+never released. Restoring an agent to pending, snoozing it or sending it a message
+cancels its pending release, and settling it again starts a new one. Settling and
+unsettling only change `fleet.db` and never call a workspace provider. The agent
+stays settled after the release, and its next tool call opens the workspace again.
+
+A release starts only while its agent has no turn, input or tool call in progress
+and no tool call is using the environment, including calls of agents sharing it.
+Tool calls wait to use the environment until a release that has started ends.
+Agents sharing an environment through an `id` lose its contents when its owner's
+workspace is released. Pending releases survive restarts, and deadlines that
+passed while Fleet was stopped are acted on when it starts. They do not keep Fleet
+from shutting down when idle, but shutdown waits for releases already in progress.
+Failures are retried with backoff, separately for each agent. A release whose role
+or workspace config is rejected as invalid, for example because the role was
+deleted, is logged and dropped.
+
+Workspace providers implement `release`. Rebuild provider components against the
+updated WIT files before using this version.
+
 ## Subagents
 
 Approve `"agents": true` in a plugin's capabilities and import
@@ -289,7 +340,8 @@ for the simple delegation tools and parent workspace configuration.
 
 An agent runs only within the call that created it, including queued input and
 background work. Durable resolution or interruption closes that scope recursively;
-a response or parent turn end does not. Cleanup survives restarts. Conversations
+a response or parent turn end does not. Closing the scope releases the agent's
+own workspace. Cleanup survives restarts. Conversations
 remain readable afterwards. There is no explicit close operation. Managed children cannot receive unscoped
 HTTP messages, including messages attached to interrupts.
 

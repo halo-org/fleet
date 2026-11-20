@@ -114,6 +114,8 @@ become `packages/src`. A tool retains its resolved binding for the operation, so
 an edit's read and write use the same workspace. The next open sees role changes.
 Missing roles, parent links and workspaces, cycles and inaccessible references
 produce errors rather than silently falling back to a different environment.
+A child using `parent` owns no environment, so releasing its workspace when its
+scope closes leaves the parent's environment in place.
 
 The resolver returns a typed agent reference, not a provider name convention.
 `helpers` is an arbitrary registration name. Other resolver plugins can select a

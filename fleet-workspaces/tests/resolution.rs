@@ -158,7 +158,11 @@ async fn agent(
         tools: BTreeMap::new(),
         system_prompt: String::new(),
         compaction: None,
-        extensions: object(json!({ "fleet.workspace": workspace })),
+        extensions: if workspace.is_null() {
+            JsonObject::new()
+        } else {
+            object(json!({ "fleet.workspace": workspace }))
+        },
     };
     store
         .put_role(&format!("role-{id}"), &role, None)
@@ -322,5 +326,65 @@ fn cycles_fail_and_concrete_bindings_can_share_an_environment() {
         let binding = access.open().await.unwrap();
         assert_eq!(binding.context.id, 42.into());
         assert_eq!(binding.context.agent_id, 1.into());
+    });
+}
+
+#[test]
+fn agents_own_only_unshared_provider_environments() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        agent(
+            &store,
+            1,
+            None,
+            json!({ "name": "host:default", "config": { "cwd": "/repo" } }),
+            json!({}),
+        )
+        .await;
+        agent(
+            &store,
+            2,
+            Some(1),
+            json!({ "name": "helpers:parent", "config": { "agent": "1" } }),
+            json!({}),
+        )
+        .await;
+        agent(
+            &store,
+            3,
+            None,
+            json!({ "name": "host:default", "id": "42" }),
+            json!({}),
+        )
+        .await;
+        agent(&store, 4, None, Value::Null, json!({})).await;
+        let providers = Providers::default();
+        let owned = async |id: u128| {
+            AgentWorkspaces::new(
+                id.into(),
+                store.agent_access(id.into()),
+                store.clone(),
+                providers.clone(),
+            )
+            .owned_environment()
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(
+            owned(1).await,
+            Some(WorkspaceContext {
+                workspace: Configured {
+                    name: "host:default".into(),
+                    config: object(json!({ "cwd": "/repo" })),
+                },
+                agent_id: 1.into(),
+                id: 1.into(),
+            })
+        );
+        for id in [2, 3, 4] {
+            assert_eq!(owned(id).await, None);
+        }
+        assert_eq!(*providers.0.lock().unwrap(), []);
     });
 }

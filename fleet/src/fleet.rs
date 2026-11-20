@@ -1,19 +1,23 @@
 use crate::{
     Authentication, Config, ErrorChain, ErrorHandler, IdleHandler, Notifications, SandboxOAuth,
+    WorkspaceLocks,
 };
-use core::{fmt, pin::pin, time::Duration};
+use core::{error::Error, fmt, pin::pin, time::Duration};
 use fleet_core::{
-    Agent, AgentId, ClientStore as _, JsonObject, Message, MessageId, Models, Role, RoleName, Tools,
+    Agent, AgentId, ClientStore as _, Error as _, ErrorHandler as _, JsonObject, Message,
+    MessageId, Models, Role, RoleName, Tools,
 };
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
     AgentsUpdates, CollectionRevision, EventQuery, EventRecord, InboxAction, MessageRecord,
     Preview, Queries as _, QueryResponse, QueryUpdate, Revision, RoleStore as _, RoleVersion,
-    StoredRole, ToolCallRecord, TurnEndEvent,
+    StoredRole, ToolCallRecord, TurnEndEvent, WorkspaceResolvers, Workspaces, WorkspacesErrorKind,
 };
-use fleet_store::{Store, StoreError};
-use futures_util::{Stream, TryStreamExt as _, future};
+use fleet_store::{Store, StoreError, WorkspaceRelease, WorkspaceReleaseState};
+use fleet_workspaces::AgentWorkspaces;
+use futures_util::{Stream, StreamExt as _, TryStreamExt as _, future, stream::FuturesUnordered};
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -44,6 +48,21 @@ pub enum FleetError {
 struct State {
     idle_handler: IdleHandler,
     store: Store,
+    workspace_locks: WorkspaceLocks,
+}
+
+/// The outcome of an attempt to release a workspace.
+enum ReleaseAttempt {
+    /// The workspace was released, or the release was cancelled or dropped.
+    Finished,
+    /// The agent or its environment is in use.
+    Busy,
+}
+
+#[derive(Debug)]
+struct WorkspaceReleaseError {
+    agent: AgentId,
+    source: Box<dyn Error + Send>,
 }
 
 struct Configuration {
@@ -62,12 +81,17 @@ impl Fleet {
             state: Arc::new(State {
                 idle_handler: IdleHandler::new(idle_timeout),
                 store,
+                workspace_locks: WorkspaceLocks::new(),
             }),
         }
     }
 
     pub(crate) fn blob_store(&self) -> &Store {
         &self.state.store
+    }
+
+    pub(crate) fn workspace_locks(&self) -> &WorkspaceLocks {
+        &self.state.workspace_locks
     }
 
     /// Enables provider authentication.
@@ -174,11 +198,12 @@ impl Fleet {
         &self.state.idle_handler
     }
 
-    /// Runs agents until shutdown and waits for pending mutations.
+    /// Runs agents and releases their workspaces until shutdown, then waits for pending mutations.
     pub async fn run(
         &self,
         models: &(impl Models<Error: Send> + Sync),
         tools: &(impl Tools<Error: Send> + Sync),
+        workspaces: &(impl Workspaces<Error: Send> + WorkspaceResolvers<Error: Send> + Clone + Sync),
     ) {
         let state = &self.state;
 
@@ -207,10 +232,11 @@ impl Fleet {
         };
 
         let work = future::join(
-            future::join3(
+            future::join4(
                 self.run_snoozes(),
                 self.run_notifications(),
                 self.run_agent_scopes(),
+                self.run_workspace_releases(workspaces),
             ),
             agents,
         );
@@ -303,6 +329,166 @@ impl Fleet {
                 return;
             }
         }
+    }
+
+    async fn run_workspace_releases(
+        &self,
+        workspaces: &(impl Workspaces<Error: Send> + WorkspaceResolvers<Error: Send> + Clone + Sync),
+    ) {
+        let settled_for = self
+            .configuration
+            .as_ref()
+            .and_then(|configuration| configuration.config.release_settled_workspaces_after_ms);
+        let mut releases = FuturesUnordered::new();
+        let mut releasing = BTreeSet::new();
+        loop {
+            let changed = self.state.store.workspace_releases_changed();
+            // Pending deadlines allow idle shutdown since due releases are listed on startup.
+            let now = crate::fleet::now();
+            let deadline = match self.state.store.workspace_releases(now, settled_for).await {
+                Ok((due, deadline)) => {
+                    for release in due {
+                        if releasing.insert(release.agent()) {
+                            releases.push(self.release_workspace(workspaces, release));
+                        }
+                    }
+                    deadline
+                }
+                Err(error) => {
+                    eprintln!("Could not read workspace releases: {}", ErrorChain(&error));
+                    Some(now.saturating_add(1000))
+                }
+            };
+            let finished = async {
+                match releases.next().await {
+                    Some(agent) => {
+                        releasing.remove(&agent);
+                    }
+                    None => future::pending().await,
+                }
+            };
+            let wait = async {
+                match deadline {
+                    Some(deadline) => {
+                        // Recheck wall time periodically in case the system clock moves.
+                        let delay = Duration::from_millis(deadline.saturating_sub(now))
+                            .min(Duration::from_secs(60));
+                        future::select(pin!(changed), pin!(tokio::time::sleep(delay))).await;
+                    }
+                    None => changed.await,
+                }
+            };
+            let stopped = matches!(
+                future::select(
+                    pin!(self.wait_for_shutdown()),
+                    pin!(future::select(pin!(wait), pin!(finished))),
+                )
+                .await,
+                future::Either::Left(_)
+            );
+            if stopped {
+                while releases.next().await.is_some() {}
+                return;
+            }
+        }
+    }
+
+    /// Releases an agent's workspace while it is idle, retrying failures until it is cancelled.
+    ///
+    /// Waiting stops at shutdown. An attempt that has started finishes first.
+    async fn release_workspace(
+        &self,
+        workspaces: &(impl Workspaces<Error: Send> + WorkspaceResolvers<Error: Send> + Clone + Sync),
+        release: WorkspaceRelease,
+    ) -> AgentId {
+        let agent = release.agent();
+        let mut retries = 0;
+        loop {
+            let Some(guard) = self.state.idle_handler.track_mutation() else {
+                return agent;
+            };
+            let result = self.try_release_workspace(workspaces, release).await;
+            drop(guard);
+            let wait = match result {
+                Ok(ReleaseAttempt::Finished) => return agent,
+                Ok(ReleaseAttempt::Busy) => {
+                    future::Either::Left(tokio::time::sleep(Duration::from_secs(60)))
+                }
+                Err(source) => {
+                    let error = WorkspaceReleaseError { agent, source };
+                    let backoff = ErrorHandler.handle_error_with_backoff(error, retries);
+                    retries = retries.saturating_add(1);
+                    future::Either::Right(backoff)
+                }
+            };
+            if let future::Either::Left(_) =
+                future::select(pin!(self.wait_for_shutdown()), pin!(wait)).await
+            {
+                return agent;
+            }
+        }
+    }
+
+    async fn try_release_workspace(
+        &self,
+        workspaces: &(impl Workspaces<Error: Send> + WorkspaceResolvers<Error: Send> + Clone + Sync),
+        release: WorkspaceRelease,
+    ) -> Result<ReleaseAttempt, Box<dyn Error + Send>> {
+        let agent = release.agent();
+        let store = &self.state.store;
+        let owned = AgentWorkspaces::new(
+            agent,
+            store.agent_access(agent),
+            store.clone(),
+            workspaces.clone(),
+        )
+        .owned_environment()
+        .await;
+        let context = match owned {
+            Ok(context) => context,
+            Err(error) if error.kind() == WorkspacesErrorKind::InvalidConfiguration => {
+                eprintln!(
+                    "Dropped the workspace release of agent {agent}. Release it by hand: {}",
+                    ErrorChain(&error),
+                );
+                None
+            }
+            Err(error) => return Err(boxed(error)),
+        };
+        let Some(context) = context else {
+            store
+                .complete_workspace_release(release)
+                .await
+                .map_err(boxed)?;
+            return Ok(ReleaseAttempt::Finished);
+        };
+        let Some(_lock) = self.state.workspace_locks.try_release(&context) else {
+            return Ok(ReleaseAttempt::Busy);
+        };
+        match store
+            .workspace_release_state(release)
+            .await
+            .map_err(boxed)?
+        {
+            WorkspaceReleaseState::Ready => {}
+            WorkspaceReleaseState::Busy => return Ok(ReleaseAttempt::Busy),
+            WorkspaceReleaseState::Cancelled => return Ok(ReleaseAttempt::Finished),
+        }
+        match Workspaces::release(workspaces, &context).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == WorkspacesErrorKind::InvalidConfiguration => {
+                eprintln!(
+                    "Dropped the workspace release of agent {agent}. Release it by hand: {}",
+                    ErrorChain(&error),
+                );
+            }
+            Err(error) => return Err(boxed(error)),
+        }
+        store
+            .complete_workspace_release(release)
+            .await
+            .map_err(boxed)?;
+        Ok(ReleaseAttempt::Finished)
     }
 
     async fn run_notifications(&self) {
@@ -711,6 +897,10 @@ impl Fleet {
     }
 }
 
+fn boxed(error: impl Error + Send + 'static) -> Box<dyn Error + Send> {
+    Box::new(error)
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -739,6 +929,18 @@ impl core::error::Error for FleetError {
     }
 }
 
+impl fmt::Display for WorkspaceReleaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "could not release the workspace of agent {}", self.agent)
+    }
+}
+
+impl Error for WorkspaceReleaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +955,128 @@ mod tests {
         body::{Body, Bytes},
     };
     use serde_json::{Value, json};
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    /// Records released agents and fails the given number of releases for each agent.
+    ///
+    /// Releases wait while `paused` is locked for writing, after notifying `entered`.
+    #[derive(Clone, Default)]
+    struct Releases {
+        released: Arc<Mutex<Vec<AgentId>>>,
+        failures: Arc<Mutex<BTreeMap<AgentId, u32>>>,
+        paused: Arc<tokio::sync::RwLock<()>>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[derive(Debug)]
+    struct Unavailable;
+
+    impl WorkspaceResolvers for Releases {
+        type Error = Unavailable;
+
+        fn get(
+            &self,
+            _: &fleet_kit::WorkspaceName,
+        ) -> impl Future<Output = Result<Option<fleet_kit::Workspace>, Unavailable>> + Send
+        {
+            future::ready(Ok(None))
+        }
+
+        fn resolve(
+            &self,
+            _: AgentId,
+            _: &Configured<fleet_kit::WorkspaceName>,
+        ) -> impl Future<Output = Result<fleet_kit::WorkspaceResolution, Unavailable>> + Send
+        {
+            future::ready(Err(Unavailable))
+        }
+    }
+
+    impl Workspaces for Releases {
+        type Error = Unavailable;
+
+        fn get(
+            &self,
+            _: &fleet_kit::WorkspaceName,
+        ) -> impl Future<Output = Result<Option<fleet_kit::Workspace>, Unavailable>> + Send
+        {
+            future::ready(Ok(None))
+        }
+
+        fn open(
+            &self,
+            _: &fleet_kit::WorkspaceContext,
+        ) -> impl Future<Output = Result<(), Unavailable>> + Send {
+            future::ready(Err(Unavailable))
+        }
+
+        fn release(
+            &self,
+            context: &fleet_kit::WorkspaceContext,
+        ) -> impl Future<Output = Result<(), Unavailable>> + Send {
+            let releases = self.clone();
+            let agent = context.agent_id;
+            async move {
+                releases.entered.notify_one();
+                let _paused = releases.paused.read().await;
+                let failed = releases
+                    .failures
+                    .lock()
+                    .unwrap()
+                    .get_mut(&agent)
+                    .is_some_and(|remaining| {
+                        let failed = *remaining != 0;
+                        *remaining = remaining.saturating_sub(1);
+                        failed
+                    });
+                if failed {
+                    return Err(Unavailable);
+                }
+                releases.released.lock().unwrap().push(agent);
+                Ok(())
+            }
+        }
+
+        fn read(
+            &self,
+            _: &fleet_kit::WorkspaceContext,
+            _: &str,
+            _: u64,
+        ) -> impl Future<Output = Result<Vec<u8>, Unavailable>> + Send {
+            future::ready(Err(Unavailable))
+        }
+
+        fn write(
+            &self,
+            _: &fleet_kit::WorkspaceContext,
+            _: &fleet_kit::WorkspaceWrite,
+        ) -> impl Future<Output = Result<(), Unavailable>> + Send {
+            future::ready(Err(Unavailable))
+        }
+
+        fn exec(
+            &self,
+            _: &fleet_kit::WorkspaceContext,
+            _: bool,
+            _: &fleet_kit::WorkspaceCommand,
+        ) -> impl Future<Output = Result<fleet_kit::WorkspaceOutput, Unavailable>> + Send {
+            future::ready(Err(Unavailable))
+        }
+    }
+
+    impl fmt::Display for Unavailable {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("workspace provider is unavailable")
+        }
+    }
+
+    impl Error for Unavailable {}
+
+    impl fleet_core::Error<WorkspacesErrorKind> for Unavailable {
+        fn kind(&self) -> WorkspacesErrorKind {
+            WorkspacesErrorKind::Other
+        }
+    }
 
     async fn fleet() -> Fleet {
         let fleet = Fleet::new(Store::memory().unwrap(), None);
@@ -1402,6 +1726,240 @@ mod tests {
                 .await
                 .unwrap();
             let worker = pin!(fleet.run_snoozes());
+            let idle = pin!(fleet_core::IdleHandler::on_idle(fleet.idle_handler()));
+            let output =
+                tokio::time::timeout(Duration::from_secs(3600), future::select(worker, idle))
+                    .await
+                    .unwrap();
+            assert!(matches!(output, future::Either::Right(_)));
+        });
+    }
+
+    /// Configures a release delay and gives `role-0` its own workspace.
+    async fn releasing_fleet(settled_for: u64) -> Fleet {
+        let fleet = idle_fleet().await.with_configuration(
+            serde_json::from_value(json!({
+                "release_settled_workspaces_after_ms": settled_for,
+            }))
+            .unwrap(),
+        );
+        let Value::Object(extensions) = json!({ "fleet.workspace": { "name": "fake:default" } })
+        else {
+            unreachable!()
+        };
+        let role = Role {
+            name: "role-0".into(),
+            parameters: BTreeMap::new(),
+            model: Configured {
+                name: "model".into(),
+                config: JsonObject::new(),
+            },
+            tools: BTreeMap::new(),
+            system_prompt: String::new(),
+            compaction: None,
+            extensions,
+        };
+        fleet.put_role("role".into(), role, None).await.unwrap();
+        fleet
+    }
+
+    async fn set_inbox(fleet: &Fleet, key: &str, agent: u128, action: InboxAction) {
+        let page = fleet.agents(AgentsQuery::default()).await.unwrap();
+        let summary = page
+            .agents
+            .iter()
+            .find(|summary| summary.id == agent.into())
+            .unwrap();
+        fleet
+            .set_inbox(key.into(), agent.into(), summary.version, action)
+            .await
+            .unwrap();
+    }
+
+    async fn wait_for_releases(fleet: &Fleet) {
+        while fleet
+            .state
+            .store
+            .workspace_releases(u64::MAX, Some(0))
+            .await
+            .unwrap()
+            != (vec![], None)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[test]
+    fn settled_workspaces_are_released_once_their_deadline_passes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(200).await;
+            let releases = Releases::default();
+            future::join(fleet.run_workspace_releases(&releases), async {
+                set_inbox(&fleet, "settle", 1, InboxAction::Settle).await;
+                set_inbox(&fleet, "restore", 1, InboxAction::Pending).await;
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                assert_eq!(*releases.released.lock().unwrap(), []);
+
+                set_inbox(&fleet, "settle-again", 1, InboxAction::Settle).await;
+                tokio::time::timeout(Duration::from_secs(5), wait_for_releases(&fleet))
+                    .await
+                    .unwrap();
+                assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+                let page = fleet.agents(AgentsQuery::default()).await.unwrap();
+                assert_eq!(page.agents[0].inbox, fleet_kit::InboxState::Settled);
+
+                set_inbox(&fleet, "restore-again", 1, InboxAction::Pending).await;
+                fleet.shutdown();
+            })
+            .await;
+            assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+        });
+    }
+
+    #[test]
+    fn failing_releases_retry_without_blocking_others() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(0).await;
+            for (id, role) in [(2, "role-0"), (3, "deleted")] {
+                let agent = Agent {
+                    id: id.into(),
+                    role: Configured {
+                        name: role.into(),
+                        config: JsonObject::new(),
+                    },
+                    extensions: JsonObject::new(),
+                };
+                fleet
+                    .create_agent(format!("create-{id}"), agent, None)
+                    .await
+                    .unwrap();
+            }
+            for id in 1..=3 {
+                set_inbox(&fleet, &format!("settle-{id}"), id, InboxAction::Settle).await;
+            }
+            let releases = Releases::default();
+            releases.failures.lock().unwrap().insert(1.into(), 3);
+
+            future::join(fleet.run_workspace_releases(&releases), async {
+                tokio::time::timeout(Duration::from_secs(5), wait_for_releases(&fleet))
+                    .await
+                    .unwrap();
+                fleet.shutdown();
+            })
+            .await;
+            assert_eq!(
+                *releases.released.lock().unwrap(),
+                [AgentId::from(2), AgentId::from(1)]
+            );
+        });
+    }
+
+    fn environment(agent: u128) -> fleet_kit::WorkspaceContext {
+        fleet_kit::WorkspaceContext {
+            workspace: Configured {
+                name: "fake:default".into(),
+                config: JsonObject::new(),
+            },
+            agent_id: agent.into(),
+            id: agent.into(),
+        }
+    }
+
+    #[test]
+    fn releases_in_progress_hold_back_use_and_finish_before_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(0).await;
+            set_inbox(&fleet, "settle", 1, InboxAction::Settle).await;
+            let releases = Releases::default();
+            let paused = releases.paused.clone().write_owned().await;
+
+            future::join(fleet.run_workspace_releases(&releases), async {
+                releases.entered.notified().await;
+                let child = fleet.workspace_locks().wrap(releases.clone());
+                let context = environment(1);
+                let mut open = pin!(Workspaces::open(&child, &context));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(futures_util::FutureExt::now_or_never(open.as_mut()).is_none());
+                fleet.shutdown();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(paused);
+                open.await.unwrap_err();
+            })
+            .await;
+            assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+            assert_eq!(
+                fleet
+                    .state
+                    .store
+                    .workspace_releases(u64::MAX, Some(0))
+                    .await
+                    .unwrap(),
+                (vec![], None)
+            );
+        });
+    }
+
+    #[test]
+    fn environments_in_use_are_released_after_their_use() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(0).await;
+            set_inbox(&fleet, "settle", 1, InboxAction::Settle).await;
+            let (due, _) = fleet
+                .state
+                .store
+                .workspace_releases(u64::MAX, Some(0))
+                .await
+                .unwrap();
+            let releases = Releases::default();
+            let borrower = fleet.workspace_locks().wrap(releases.clone());
+            Workspaces::read(&borrower, &environment(1), "file", 1)
+                .await
+                .unwrap_err();
+
+            let busy = fleet.try_release_workspace(&releases, due[0]).await;
+            drop(borrower);
+            let finished = fleet.try_release_workspace(&releases, due[0]).await;
+
+            assert!(matches!(busy, Ok(ReleaseAttempt::Busy)));
+            assert!(matches!(finished, Ok(ReleaseAttempt::Finished)));
+            assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+        });
+    }
+
+    #[test]
+    fn pending_releases_allow_idle_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let store = releasing_fleet(86_400_000).await.state.store.clone();
+            let fleet = Fleet::new(store, Some(Duration::from_secs(120))).with_configuration(
+                serde_json::from_value(json!({
+                    "release_settled_workspaces_after_ms": 86_400_000,
+                }))
+                .unwrap(),
+            );
+            set_inbox(&fleet, "settle", 1, InboxAction::Settle).await;
+            let releases = Releases::default();
+            let worker = pin!(fleet.run_workspace_releases(&releases));
             let idle = pin!(fleet_core::IdleHandler::on_idle(fleet.idle_handler()));
             let output =
                 tokio::time::timeout(Duration::from_secs(3600), future::select(worker, idle))

@@ -239,13 +239,14 @@ fn capabilities_for(
         .collect::<Result<_, _>>()?;
     let workspace_access = (!capabilities.workspaces.is_empty()).then(|| {
         let store = fleet.blob_store().clone();
+        let locks = fleet.workspace_locks().clone();
         let workspaces = workspaces.clone();
         WasmWorkspaceAccess::new(move |agent| {
             fleet_workspaces::AgentWorkspaces::new(
                 agent,
                 store.agent_access(agent),
                 store.clone(),
-                workspaces.clone(),
+                locks.wrap(workspaces.clone()),
             )
         })
     });

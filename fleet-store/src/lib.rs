@@ -38,6 +38,9 @@ mod notification_records;
 mod notifications;
 mod preview;
 mod records;
+mod release_records;
+#[cfg(feature = "queries")]
+mod releases;
 mod role_records;
 #[cfg(feature = "roles")]
 mod roles;
@@ -55,6 +58,8 @@ pub use self::agent_access::AgentAccess;
 pub use self::blobs::{AgentBlobs, MAX_BLOB_BYTES, MAX_UPLOAD_CHUNK_BYTES, Upload};
 #[cfg(feature = "notifications")]
 pub use self::notifications::NotificationClaim;
+#[cfg(feature = "queries")]
+pub use self::releases::{WorkspaceRelease, WorkspaceReleaseState};
 pub(crate) use self::{
     listeners::{Listeners, Topic},
     worker::WorkerHandle,

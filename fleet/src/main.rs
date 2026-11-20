@@ -28,6 +28,7 @@ mod server;
 mod signals;
 mod subscription;
 mod web_push;
+mod workspace_locks;
 
 pub(crate) use self::{
     admin_auth::AdminToken,
@@ -50,6 +51,7 @@ pub(crate) use self::{
     plugins::{PluginConfig, ProviderConfig},
     roles::RoleDefinition,
     sandbox_oauth::SandboxOAuth,
+    workspace_locks::WorkspaceLocks,
 };
 
 use core::{error::Error, net::SocketAddr, pin::pin, time::Duration};
@@ -188,7 +190,7 @@ async fn serve(
     providers: WasmRegistry,
     address: SocketAddr,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let agents = fleet.run(&providers, &providers);
+    let agents = fleet.run(&providers, &providers, &providers);
     let result = run(
         admin_token,
         fleet.clone(),

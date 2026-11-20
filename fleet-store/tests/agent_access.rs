@@ -10,7 +10,7 @@ use fleet_core::{
     ToolOutput, ToolResult, TurnEnd,
 };
 use fleet_kit::{Agents as _, EventQuery, MessageRecord, Queries as _};
-use fleet_store::{Store, StoreError};
+use fleet_store::{Store, StoreError, WorkspaceRelease};
 
 fn role() -> Configured<fleet_core::RoleName> {
     Configured {
@@ -83,6 +83,11 @@ async fn root(store: &Store) {
         .unwrap();
 }
 
+async fn released(store: &Store) -> Vec<AgentId> {
+    let (due, _) = store.workspace_releases(0, None).await.unwrap();
+    due.iter().map(WorkspaceRelease::agent).collect()
+}
+
 async fn answer(store: &Store, id: AgentId, output: Vec<ModelOutput>) {
     let state = store.agent_state(id).await.unwrap().unwrap();
     store
@@ -138,12 +143,14 @@ fn responses_keep_background_work_until_the_driving_call_ends() {
 
         let state = store.agent_state(child).await.unwrap().unwrap();
         assert!(state.interrupt_intent);
+        assert_eq!(released(&store).await, []);
         store
             .settle_interrupt(child, state.latest_event, &[result("server")])
             .await
             .unwrap();
         let remaining = store.reconcile_agent_scopes().await.unwrap();
         assert_eq!(remaining, 0);
+        assert_eq!(released(&store).await, [child]);
         let repeated = access
             .send("second", child, &[ContentBlock::Text("Next".into())])
             .await
@@ -182,6 +189,7 @@ fn closure_after_a_completed_turn_does_not_interrupt() {
         let state = store.agent_state(child).await.unwrap().unwrap();
         assert_eq!(remaining, 0);
         assert!(!state.interrupt_intent);
+        assert_eq!(released(&store).await, [child]);
     });
 }
 

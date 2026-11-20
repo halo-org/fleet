@@ -44,6 +44,62 @@ impl<A, R, W> AgentWorkspaces<A, R, W> {
     }
 }
 
+impl<A, R, W> AgentWorkspaces<A, R, W>
+where
+    A: Agents + Sync,
+    R: Roles<Error: Send> + Sync,
+    W: WorkspaceResolvers<Error: Send> + Sync,
+{
+    /// Resolves the environment the agent owns under its current role, without opening it.
+    ///
+    /// The agent owns the environment of a provider workspace configured without an ID. Returns
+    /// `None` when the role configures no workspace, a shared ID or a resolver, such as one
+    /// selecting a parent's workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the role or its workspace cannot be loaded.
+    pub async fn owned_environment(&self) -> Result<Option<WorkspaceContext>, WorkspaceError> {
+        let Some(workspace) = self.workspace(self.agent).await? else {
+            return Ok(None);
+        };
+        if workspace.id.is_some() {
+            return Ok(None);
+        }
+        let selection = Configured {
+            name: workspace.name,
+            config: workspace.config,
+        };
+        let resolver = WorkspaceResolvers::get(&self.workspaces, &selection.name)
+            .await
+            .map_err(|source| provider_error("could not look up workspace resolver", source))?;
+        Ok(resolver.is_none().then(|| WorkspaceContext {
+            workspace: selection,
+            agent_id: self.agent,
+            id: u128::from(self.agent).into(),
+        }))
+    }
+
+    async fn workspace(&self, subject: AgentId) -> Result<Option<RoleWorkspace>, WorkspaceError> {
+        let agent = self
+            .agents
+            .get(subject)
+            .await
+            .map_err(|source| failure("could not read workspace agent", source))?;
+        let role = self
+            .roles
+            .get(&agent.role.name)
+            .await
+            .map_err(|source| failure("could not load workspace role", source))?
+            .ok_or_else(|| invalid("workspace role does not exist"))?;
+        let extensions = RoleInstance::new(&role, &agent.role.config)
+            .extensions()
+            .map_err(|source| failure("could not configure workspace role", source))?;
+        RoleWorkspace::get(&extensions)
+            .map_err(|source| failure("could not read role workspace", source))
+    }
+}
+
 impl<A, R, W> WorkspaceAccess for AgentWorkspaces<A, R, W>
 where
     A: Agents + Sync,
@@ -60,22 +116,9 @@ where
             if !visited.insert(subject) {
                 return Err(invalid("workspace references contain a cycle"));
             }
-            let agent = self
-                .agents
-                .get(subject)
-                .await
-                .map_err(|source| failure("could not read workspace agent", source))?;
-            let role = self
-                .roles
-                .get(&agent.role.name)
-                .await
-                .map_err(|source| failure("could not load workspace role", source))?
-                .ok_or_else(|| invalid("workspace role does not exist"))?;
-            let extensions = RoleInstance::new(&role, &agent.role.config)
-                .extensions()
-                .map_err(|source| failure("could not configure workspace role", source))?;
-            let workspace = RoleWorkspace::get(&extensions)
-                .map_err(|source| failure("could not read role workspace", source))?
+            let workspace = self
+                .workspace(subject)
+                .await?
                 .ok_or_else(|| invalid("no workspace is configured in the role"))?;
             let selection = Configured {
                 name: workspace.name,

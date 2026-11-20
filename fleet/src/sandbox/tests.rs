@@ -4,8 +4,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
-use fleet_core::TurnEnd;
-use fleet_kit::TurnEndEvent;
+use fleet_core::{Configured, JsonObject, TurnEnd};
+use fleet_kit::{TurnEndEvent, WorkspaceContext, Workspaces, WorkspacesErrorKind};
 use futures_util::future;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header};
@@ -52,28 +52,38 @@ fn build() -> PathBuf {
     target.join("wasm32-unknown-unknown/debug")
 }
 
-/// Loads the example config with the fixture plugins.
-fn config() -> Config {
+/// Loads the example config with the fixture plugins and additional top-level settings.
+fn config(settings: Value) -> Config {
     let mut config: Value =
         serde_json::from_slice(&fs::read(directory().join("config.json")).unwrap()).unwrap();
     for (name, plugin) in config["plugins"].as_object_mut().unwrap() {
         let path = plugins().join(format!("fleet_plugin_{name}.wasm"));
         plugin["path"] = path.to_str().unwrap().into();
     }
+    let Value::Object(settings) = settings else {
+        panic!("settings must be an object")
+    };
+    for (key, value) in settings {
+        config[key.as_str()] = value;
+    }
     serde_json::from_value(config).unwrap()
 }
 
 fn run(test: impl AsyncFnOnce(&Fleet)) {
+    run_with(json!({}), async |fleet, _| test(fleet).await);
+}
+
+fn run_with(settings: Value, test: impl AsyncFnOnce(&Fleet, &WasmRegistry)) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            let (fleet, providers) = open(config(), &directory()).await.unwrap();
+            let (fleet, providers) = open(config(settings), &directory()).await.unwrap();
             tokio::time::timeout(
                 Duration::from_secs(60),
-                future::join(fleet.run(&providers, &providers), async {
-                    test(&fleet).await;
+                future::join(fleet.run(&providers, &providers, &providers), async {
+                    test(&fleet, &providers).await;
                     fleet.shutdown();
                 }),
             )
@@ -81,6 +91,36 @@ fn run(test: impl AsyncFnOnce(&Fleet)) {
             .unwrap();
             providers.shutdown().await;
         });
+}
+
+/// Reads a file from an agent's own sandbox workspace, or returns `None` if it does not exist.
+async fn workspace_file(providers: &WasmRegistry, agent: &str, path: &str) -> Option<String> {
+    let id = agent.parse::<u128>().unwrap();
+    let context = WorkspaceContext {
+        workspace: Configured {
+            name: "sandbox:default".into(),
+            config: JsonObject::new(),
+        },
+        agent_id: id.into(),
+        id: id.into(),
+    };
+    match Workspaces::read(providers, &context, path, 1024).await {
+        Ok(bytes) => Some(String::from_utf8(bytes).unwrap()),
+        Err(error)
+            if fleet_core::Error::<WorkspacesErrorKind>::kind(&error)
+                == WorkspacesErrorKind::FileNotFound =>
+        {
+            None
+        }
+        Err(error) => panic!("{error}"),
+    }
+}
+
+/// Waits until a file is released from an agent's own sandbox workspace.
+async fn wait_for_release(providers: &WasmRegistry, agent: &str, path: &str) {
+    while workspace_file(providers, agent, path).await.is_some() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn call(
@@ -259,6 +299,129 @@ fn delegated_agents_share_the_parent_workspace() {
         assert_eq!(delegated["output"]["content"][0]["text"], "Read the notes.");
         assert_eq!(reply(fleet).await, "Delegated.");
     });
+}
+
+#[test]
+fn closed_subagents_release_only_their_own_workspaces() {
+    run_with(json!({}), async |fleet, providers| {
+        let worker = json!({
+            "model": { "name": "sandbox:scripted" },
+            "tools": { "write": { "name": "tools:write" } },
+            "workspace": { "name": "sandbox:default" },
+        });
+        let (status, _) = call_with(
+            fleet,
+            "PUT",
+            "/roles/worker",
+            &[("if-none-match", "*")],
+            Some(&worker),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let write = |path: &str| json!({ "tool_calls": [{ "tool": "write", "input": { "path": path, "content": path } }] });
+        let delegate = |role: &str, step: Value| {
+            json!({
+                "tool_calls": [{
+                    "tool": "delegate",
+                    "input": { "role": role, "prompt": json!({ "steps": [step] }).to_string() },
+                }],
+            })
+        };
+        let script = json!({
+            "steps": [
+                write("notes.txt"),
+                delegate("helper", write("helped.txt")),
+                delegate("worker", write("own.txt")),
+                { "text": "Delegated." },
+            ],
+        });
+
+        start(fleet, "assistant", &script).await;
+
+        let (_, children) = call(fleet, "GET", "/agents?parent=1", None).await;
+        let worker = children["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|child| child["role"] == "worker")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let result = events(fleet, worker)
+            .await
+            .into_iter()
+            .find(|event| event["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(
+            result["output"]["content"][0]["text"],
+            "Wrote 7 bytes to own.txt."
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            wait_for_release(providers, worker, "own.txt").await;
+            let store = fleet.blob_store();
+            while !store
+                .workspace_releases(u64::MAX, None)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            workspace_file(providers, "1", "notes.txt").await.as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(
+            workspace_file(providers, "1", "helped.txt")
+                .await
+                .as_deref(),
+            Some("helped.txt")
+        );
+    });
+}
+
+#[test]
+fn settled_agents_release_their_workspace_and_reopen_it_when_used() {
+    run_with(
+        json!({ "release_settled_workspaces_after_ms": 0 }),
+        async |fleet, providers| {
+            let write = json!({
+                "tool_calls": [{ "tool": "write", "input": { "path": "notes.txt", "content": "kept" } }],
+            });
+            start(fleet, "assistant", &write).await;
+            assert_eq!(
+                workspace_file(providers, "1", "notes.txt").await.as_deref(),
+                Some("kept")
+            );
+            let (_, agents) = call(fleet, "GET", "/agents", None).await;
+            let version = format!("\"{}\"", agents["agents"][0]["version"].as_str().unwrap());
+            let (status, _) = call_with(
+                fleet,
+                "PUT",
+                "/agents/1/inbox",
+                &[("if-match", &version)],
+                Some(&json!({ "state": "settled" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_release(providers, "1", "notes.txt"),
+            )
+            .await
+            .unwrap();
+            send(fleet, 2, &write).await;
+            assert_eq!(
+                workspace_file(providers, "1", "notes.txt").await.as_deref(),
+                Some("kept")
+            );
+        },
+    );
 }
 
 #[test]
