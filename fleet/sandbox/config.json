@@ -5,6 +5,7 @@
       "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_agents.wasm",
       "capabilities": {
         "agents": true,
+        "blobs": true,
         "roles": "read"
       }
     },

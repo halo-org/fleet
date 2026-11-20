@@ -13,9 +13,9 @@ use fleet_core::{
     ToolCall, ToolContext, ToolResult, Tools as _, ToolsErrorKind,
 };
 use fleet_kit::{
-    AgentCollection as _, AgentsQuery, Queries as _, RoleStore as _, Workspace, WorkspaceCommand,
-    WorkspaceContext, WorkspaceName, WorkspaceOutput, WorkspaceResolution, WorkspaceResolvers,
-    WorkspaceWrite, Workspaces,
+    AgentCollection as _, AgentsQuery, Blobs as _, Queries as _, RoleStore as _, Workspace,
+    WorkspaceCommand, WorkspaceContext, WorkspaceName, WorkspaceOutput, WorkspaceResolution,
+    WorkspaceResolvers, WorkspaceWrite, Workspaces,
 };
 use fleet_store::Store;
 use fleet_wasm::{
@@ -30,6 +30,8 @@ use std::{
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+
+const IMAGE: &[u8] = include_bytes!("../../fleet-store/tests/fixtures/image.png");
 
 /// Loads the plugins from `FLEET_TEST_WASM`, or builds them if that is unset.
 fn components(wasm: &Wasm) -> (WasmComponent, WasmComponent) {
@@ -80,6 +82,7 @@ fn build() -> PathBuf {
 struct Providers {
     registry: WasmRegistry,
     reads: Arc<Mutex<Vec<(WorkspaceContext, String)>>>,
+    writes: Arc<Mutex<Vec<(WorkspaceContext, WorkspaceWrite)>>>,
 }
 
 impl WorkspaceResolvers for Providers {
@@ -127,9 +130,13 @@ impl Workspaces for Providers {
     }
     fn write(
         &self,
-        _: &WorkspaceContext,
-        _: &WorkspaceWrite,
+        context: &WorkspaceContext,
+        write: &WorkspaceWrite,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((context.clone(), write.clone()));
         ready(Ok(()))
     }
     fn exec(
@@ -185,9 +192,11 @@ fn providers(
     tools_component: &WasmComponent,
     store: &Store,
     reads: &Arc<Mutex<Vec<(WorkspaceContext, String)>>>,
+    writes: &Arc<Mutex<Vec<(WorkspaceContext, WorkspaceWrite)>>>,
 ) -> (WasmRegistry, WasmRegistry) {
     let agent_store = store.clone();
     let role_store = store.clone();
+    let blob_store = store.clone();
     let provider = wasm
         .provider(
             agents_component,
@@ -201,6 +210,10 @@ fn providers(
                     }
                 })),
                 roles: Some(WasmRoles::new(move |_| role_store.clone()).read_only()),
+                blobs: Some(
+                    WasmBlobs::new(store.clone())
+                        .with_agents(move |id, call| blob_store.agent_blobs(id).for_call(call)),
+                ),
                 ..WasmCapabilities::default()
             },
         )
@@ -211,6 +224,7 @@ fn providers(
     let providers = Providers {
         registry: registry.clone(),
         reads: reads.clone(),
+        writes: writes.clone(),
     };
     let workspace_store = store.clone();
     let blob_store = store.clone();
@@ -337,7 +351,8 @@ fn parent_workspace_on_root_returns_tool_errors() {
                 .await
                 .unwrap();
             let reads = Arc::new(Mutex::new(Vec::new()));
-            let (_, tools) = providers(&wasm, &agents_component, &tools_component, &store, &reads);
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let (_, tools) = providers(&wasm, &agents_component, &tools_component, &store, &reads, &writes);
 
             for (name, input) in [
                 ("tools:bash", json!({ "command": "pwd" })),
@@ -389,7 +404,15 @@ fn workspace_agent_lookup_failures_remain_provider_errors() {
         .block_on(async {
             let store = Store::memory().unwrap();
             let reads = Arc::new(Mutex::new(Vec::new()));
-            let (_, tools) = providers(&wasm, &agents_component, &tools_component, &store, &reads);
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let (_, tools) = providers(
+                &wasm,
+                &agents_component,
+                &tools_component,
+                &store,
+                &reads,
+                &writes,
+            );
             let context = ToolContext {
                 tool: configured("tools:read"),
                 agent_id: 1.into(),
@@ -422,8 +445,15 @@ fn delegation_retries_and_parent_resolution_ignore_provider_names() {
                 let store = Store::memory().unwrap();
                 start(&store).await;
                 let reads = Arc::new(Mutex::new(Vec::new()));
-                let (registry, tools_registry) =
-                    providers(&wasm, &agents_component, &tools_component, &store, &reads);
+                let writes = Arc::new(Mutex::new(Vec::new()));
+                let (registry, tools_registry) = providers(
+                    &wasm,
+                    &agents_component,
+                    &tools_component,
+                    &store,
+                    &reads,
+                    &writes,
+                );
                 let context = ToolContext {
                     tool: configured("renamed:oneshot_agent"),
                     agent_id: 1.into(),
@@ -497,5 +527,162 @@ fn delegation_retries_and_parent_resolution_ignore_provider_names() {
             })
             .await
             .unwrap();
+        });
+}
+
+#[test]
+fn delegation_forwards_and_returns_images() {
+    let wasm = Wasm::new().unwrap();
+    let (agents_component, tools_component) = components(&wasm);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let store = Store::memory().unwrap();
+                start(&store).await;
+                store.put(1.into(), "image/png", IMAGE).await.unwrap();
+                store
+                    .send_message(
+                        "attach",
+                        1.into(),
+                        &Message {
+                            id: 2.into(),
+                            mode: MessageMode::Queue,
+                            content: vec![ContentBlock::Image(1.into())],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let reads = Arc::new(Mutex::new(Vec::new()));
+                let writes = Arc::new(Mutex::new(Vec::new()));
+                let (registry, tools_registry) = providers(
+                    &wasm,
+                    &agents_component,
+                    &tools_component,
+                    &store,
+                    &reads,
+                    &writes,
+                );
+                let context = ToolContext {
+                    tool: configured("renamed:oneshot_agent"),
+                    agent_id: 1.into(),
+                    call_id: "drive".into(),
+                    role_extensions: JsonObject::new(),
+                };
+                let input = object(json!({
+                    "role": "child",
+                    "prompt": "Crop the image",
+                    "images": ["1"],
+                }));
+                let text = "Cropped as image reference 2, not 3.";
+
+                let (output, ()) =
+                    futures_util::future::join(registry.execute(&context, false, &input), async {
+                        let child = queued_child(&store).await;
+                        let context = ToolContext {
+                            tool: configured("tools:write"),
+                            agent_id: child,
+                            call_id: "write".into(),
+                            role_extensions: JsonObject::new(),
+                        };
+                        let input = object(json!({ "path": "image.png", "blob": "1" }));
+                        let output = tools_registry
+                            .execute(&context, false, &input)
+                            .await
+                            .unwrap();
+                        assert!(!output.is_error);
+                        let (workspace, write) = writes.lock().unwrap().first().unwrap().clone();
+                        assert_eq!(workspace.agent_id, child);
+                        assert_eq!(
+                            write,
+                            WorkspaceWrite {
+                                path: "src/image.png".into(),
+                                content: IMAGE.to_vec(),
+                                expected: None,
+                                create_parents: true,
+                            }
+                        );
+                        store
+                            .agent_blobs(child)
+                            .put(2.into(), "image/png", IMAGE)
+                            .await
+                            .unwrap();
+                        store.consume_messages(child, None, true).await.unwrap();
+                        store
+                            .append_model_response(
+                                child,
+                                0.into(),
+                                true,
+                                &response(vec![ModelOutput::Text(text.into())]),
+                            )
+                            .await
+                            .unwrap();
+                    })
+                    .await;
+
+                assert_eq!(
+                    output.unwrap().content,
+                    [
+                        ContentBlock::Text(text.into()),
+                        ContentBlock::Image(2.into())
+                    ]
+                );
+            })
+            .await
+            .unwrap();
+        });
+}
+
+#[test]
+fn delegation_rejects_unavailable_images() {
+    let wasm = Wasm::new().unwrap();
+    let (agents_component, tools_component) = components(&wasm);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::memory().unwrap();
+            start(&store).await;
+            store
+                .agent_blobs(1.into())
+                .put(1.into(), "text/plain", b"text")
+                .await
+                .unwrap();
+            let reads = Arc::new(Mutex::new(Vec::new()));
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let (registry, _) = providers(
+                &wasm,
+                &agents_component,
+                &tools_component,
+                &store,
+                &reads,
+                &writes,
+            );
+            let context = ToolContext {
+                tool: configured("renamed:oneshot_agent"),
+                agent_id: 1.into(),
+                call_id: "drive".into(),
+                role_extensions: JsonObject::new(),
+            };
+
+            for reference in ["1", "2", "image"] {
+                let input = object(json!({
+                    "role": "child",
+                    "prompt": "Crop the image",
+                    "images": [reference],
+                }));
+                let output = registry.execute(&context, false, &input).await.unwrap();
+
+                assert!(output.is_error);
+                assert_eq!(
+                    output.content,
+                    [ContentBlock::Text(format!(
+                        "Image reference {reference} is not an available image."
+                    ))]
+                );
+            }
         });
 }
