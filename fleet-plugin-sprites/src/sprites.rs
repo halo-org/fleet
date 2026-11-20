@@ -70,6 +70,17 @@ impl Sprite {
         }
     }
 
+    /// Deletes the sprite unless it does not exist.
+    pub async fn delete(&self) -> Result<(), WorkspacesError> {
+        let response = send(&Request::new(Method::Delete, self.path())).await?;
+        match response.status {
+            200 | 202 | 204 | 404 => Ok(()),
+            _ => Err(response
+                .failure(&format!("delete sprite {}", self.name))
+                .await),
+        }
+    }
+
     pub async fn read(&self, path: &str, limit: u64) -> Result<Vec<u8>, WorkspacesError> {
         let query = query(&[("path", path), ("workingDir", HOME)]);
         let request = Request::new(Method::Get, format!("{}/fs/read?{query}", self.path()));

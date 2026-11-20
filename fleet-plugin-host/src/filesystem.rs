@@ -94,6 +94,14 @@ impl Directory {
         }
         result
     }
+
+    /// Removes a file, succeeding if it does not exist.
+    pub async fn remove(&self, path: &str) -> Result<(), WorkspacesError> {
+        match self.0.unlink_file_at(path.into()).await {
+            Ok(()) | Err(ErrorCode::NoEntry) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 pub async fn read(path: &str, limit: u64) -> Result<Vec<u8>, WorkspacesError> {

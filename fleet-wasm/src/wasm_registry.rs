@@ -464,6 +464,16 @@ impl Workspaces for WasmRegistry {
         }
     }
 
+    async fn release(&self, context: &WorkspaceContext) -> Result<(), Self::Error> {
+        if let Some((_, name, provider)) = self.provider(context.workspace.name.as_ref())
+            && let Some(workspaces) = &provider.workspaces
+        {
+            workspaces.release(name, context).await
+        } else {
+            Err(WasmError::workspace_not_found(&context.workspace.name))
+        }
+    }
+
     async fn read(
         &self,
         context: &WorkspaceContext,

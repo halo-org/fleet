@@ -28,6 +28,16 @@ impl Guest for Sandbox {
         workspace(&context).map(drop)
     }
 
+    async fn release(context: WorkspaceContext) -> Result<(), WorkspacesError> {
+        let request = Request::Release {
+            workspace: workspace(&context)?,
+        };
+        match files::send(&request).await? {
+            Reply::Released => Ok(()),
+            reply => Err(unexpected(&reply)),
+        }
+    }
+
     async fn read(
         context: WorkspaceContext,
         path: String,

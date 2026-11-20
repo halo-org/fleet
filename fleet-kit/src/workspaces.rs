@@ -165,6 +165,20 @@ pub trait Workspaces {
         context: &WorkspaceContext,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Discards the resources held for a workspace environment.
+    ///
+    /// A later open provisions the environment again. Releasing an environment that was never
+    /// opened or was already released succeeds without provisioning anything. Release only when
+    /// nothing else uses the environment. Programs left running by earlier calls may fail.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when releasing fails. Retrying must resume it.
+    fn release(
+        &self,
+        context: &WorkspaceContext,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Reads a file from an open workspace.
     ///
     /// # Errors
@@ -254,6 +268,13 @@ macro_rules! impl_workspaces_for_pointer {
                 context: &WorkspaceContext,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
                 (**self).open(context)
+            }
+
+            fn release(
+                &self,
+                context: &WorkspaceContext,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).release(context)
             }
 
             fn read(

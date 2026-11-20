@@ -139,6 +139,14 @@ interface workspaces {
     /// An existing ID with incompatible configuration returns invalid-configuration.
     open: async func(context: workspace-context) -> result<_, workspaces-error>;
 
+    /// Discards the resources held for a workspace environment.
+    ///
+    /// A later open provisions the environment again. Releasing an environment that was never
+    /// opened or was already released succeeds without provisioning anything.
+    /// Release only when nothing else uses the environment. Programs left running by earlier
+    /// calls may fail. Retrying a failed release must resume it.
+    release: async func(context: workspace-context) -> result<_, workspaces-error>;
+
     /// Reads a file from an open workspace.
     ///
     /// Files exceeding the limit return file-too-large.
