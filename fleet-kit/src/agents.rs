@@ -120,7 +120,7 @@ pub struct AgentSummary {
     pub since: u64,
     /// The snooze deadline, in Unix milliseconds, if snoozed.
     pub until: Option<u64>,
-    /// Whether an interrupt is pending.
+    /// Whether an agent-wide interrupt is pending.
     pub interrupt_pending: bool,
     /// The position for subsequent scans.
     pub position: AgentPosition,

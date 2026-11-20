@@ -84,22 +84,13 @@ impl Worker {
         let (result, latest_event, interrupted, summary_changed) = {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             let mut agent = records.agent(agent_id)?;
-            let activity = (agent.turn_active, agent.interrupt_intent);
+            let activity = agent.activity();
             agent.revision = agent
                 .revision
                 .checked_add(1)
                 .expect("revisions do not overflow");
             let result = operation(&mut records, &mut agent)?;
-            if activity != (agent.turn_active, agent.interrupt_intent) {
-                records.change(
-                    agent_id,
-                    records::ACTIVITY,
-                    &[],
-                    Some(agent.activity_revision),
-                    agent.revision,
-                )?;
-                agent.activity_revision = agent.revision;
-            }
+            records.update_activity(&mut agent, &activity)?;
             records.save_agent(&agent)?;
             let summary_changed =
                 crate::agents::sync_agent(&mut records, &agent, crate::agents::now_millis())?;

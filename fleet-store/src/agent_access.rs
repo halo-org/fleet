@@ -83,25 +83,17 @@ impl Store {
                             && agent.interrupt_includes_async_tool_calls)
                             && (agent.turn_active || agent.pending_tool_calls != 0);
                         if interrupt || agent.pending_messages != 0 {
+                            let activity = agent.activity();
                             agent.revision = agent
                                 .revision
                                 .checked_add(1)
                                 .expect("revisions do not overflow");
                             withdraw_messages(&mut records, &mut agent)?;
                             if interrupt {
-                                if !agent.interrupt_intent {
-                                    records.change(
-                                        id,
-                                        records::ACTIVITY,
-                                        &[],
-                                        Some(agent.activity_revision),
-                                        agent.revision,
-                                    )?;
-                                    agent.interrupt_intent = true;
-                                    agent.activity_revision = agent.revision;
-                                }
+                                agent.interrupt_intent = true;
                                 agent.interrupt_includes_async_tool_calls = true;
                             }
+                            records.update_activity(&mut agent, &activity)?;
                             records.save_agent(&agent)?;
                             crate::agents::sync_agent(
                                 &mut records,
