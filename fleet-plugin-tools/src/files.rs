@@ -1,12 +1,12 @@
 use crate::{
-    AgentId, BlobId, Config, ContentBlock, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding,
-    WorkspacesError, WorkspacesErrorKind, blobs, workspaces,
+    AgentId, BlobId, BlobsErrorKind, Config, ContentBlock, Error, Tool, ToolContext, ToolOutput,
+    WorkspaceBinding, WorkspacesError, WorkspacesErrorKind, blobs, workspaces,
 };
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-const IMAGE_LIMIT: u64 = 10 * 1024 * 1024;
+const BLOB_LIMIT: u64 = 10 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,7 +18,8 @@ struct Read {
 #[serde(deny_unknown_fields)]
 struct Write {
     path: String,
-    content: String,
+    content: Option<String>,
+    blob: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -57,7 +58,7 @@ pub fn metadata(name: &str) -> Option<Tool> {
         "write" => crate::metadata(
             "write",
             "Write",
-            "Creates or completely replaces a UTF-8 file in the workspace. Creates missing parent directories.",
+            "Creates or completely replaces a file in the workspace with UTF-8 content or a blob's bytes. Creates missing parent directories.",
             &json!({
                 "type": "object",
                 "properties": {
@@ -70,8 +71,12 @@ pub fn metadata(name: &str) -> Option<Tool> {
                         "type": "string",
                         "description": "Complete file contents.",
                     },
+                    "blob": {
+                        "type": "string",
+                        "description": "A blob reference to write instead of content, such as an image reference.",
+                    },
                 },
-                "required": ["path", "content"],
+                "required": ["path"],
                 "additionalProperties": false,
             }),
         ),
@@ -124,8 +129,7 @@ pub async fn read(
     validate_path(&input.path)?;
     let limit = config.read_limit.unwrap_or(65_536);
     let bytes =
-        crate::workspace_access::read(workspace, input.path.clone(), limit.max(IMAGE_LIMIT))
-            .await?;
+        crate::workspace_access::read(workspace, input.path.clone(), limit.max(BLOB_LIMIT)).await?;
     if let Some(media_type) = image_type(&bytes) {
         let id = blob_id(context.agent_id, media_type, &bytes);
         let info = blobs::put(id, media_type.into(), bytes).await?;
@@ -162,12 +166,17 @@ pub async fn write(
     if is_retry {
         return Err(unsafe_retry());
     }
-    let length = input.content.len();
+    let content = match (input.content, input.blob) {
+        (Some(content), None) => content.into_bytes(),
+        (None, Some(reference)) => read_blob(&reference).await?,
+        _ => return Err(Error::Input("Supply either content or blob.".into())),
+    };
+    let length = content.len();
     crate::workspace_access::write(
         workspace,
         workspaces::WorkspaceWrite {
             path: input.path.clone(),
-            content: input.content.into_bytes(),
+            content,
             expected: None,
             create_parents: true,
         },
@@ -226,6 +235,25 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+async fn read_blob(reference: &str) -> Result<Vec<u8>, Error> {
+    let id = reference.parse().map_err(|_| {
+        Error::Input(format!(
+            "Blob reference {reference} is not a decimal blob ID."
+        ))
+    })?;
+    blobs::read(to_blob_id(id), BLOB_LIMIT)
+        .await
+        .map_err(|error| match error.kind {
+            BlobsErrorKind::NotFound | BlobsErrorKind::Denied => {
+                Error::Input(format!("Blob {reference} is not available to this agent."))
+            }
+            BlobsErrorKind::TooLarge => Error::Input(format!(
+                "Blob {reference} exceeds the {BLOB_LIMIT}-byte limit."
+            )),
+            _ => Error::Blobs(error),
+        })
+}
+
 fn blob_id(agent_id: AgentId, media_type: &str, content: &[u8]) -> BlobId {
     let digest = Sha256::new()
         .chain_update(agent_id.high.to_be_bytes())
@@ -234,7 +262,12 @@ fn blob_id(agent_id: AgentId, media_type: &str, content: &[u8]) -> BlobId {
         .chain_update([0])
         .chain_update(content)
         .finalize();
-    let id = u128::from_be_bytes(*digest.first_chunk().expect("digest has 16 bytes"));
+    to_blob_id(u128::from_be_bytes(
+        *digest.first_chunk().expect("digest has 16 bytes"),
+    ))
+}
+
+fn to_blob_id(id: u128) -> BlobId {
     BlobId {
         high: u64::try_from(id >> 64).expect("high bits fit in u64"),
         low: u64::try_from(id & u128::from(u64::MAX)).expect("low bits fit in u64"),

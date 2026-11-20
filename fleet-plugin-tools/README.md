@@ -1,7 +1,7 @@
 # Basic tools plugin
 
 Provides `bash`, `read`, `write` and `edit` through Fleet's workspace interface.
-The plugin needs blob access to return images. It does not need process, filesystem
+The plugin needs blob access to return and write images. It does not need process, filesystem
 or HTTP access.
 
 - `bash` runs a command in a new Bash process and returns its combined stdout and
@@ -9,7 +9,8 @@ or HTTP access.
 - `read` reads a UTF-8 file within the configured size limit. PNG, JPEG, GIF and
   WebP files up to 10 MiB are detected by their contents and returned as images.
   Each image is stored as a blob for the agent. Rereading the same file reuses it.
-- `write` creates or replaces a UTF-8 file, creating parent directories as needed.
+- `write` creates or replaces a file with UTF-8 `content` or the bytes of a readable
+  `blob` reference, creating parent directories as needed.
 - `edit` applies sequential exact replacements. Each match must be unique, including
   overlapping matches. All edits are prepared before writing. The write checks the
   original contents to detect intervening changes.
