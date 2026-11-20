@@ -81,6 +81,12 @@ impl Workspaces for Providers {
     fn open(&self, _: &WorkspaceContext) -> impl Future<Output = Result<(), Self::Error>> + Send {
         ready(Ok(()))
     }
+    fn release(
+        &self,
+        _: &WorkspaceContext,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        ready(Ok(()))
+    }
     fn read(
         &self,
         context: &WorkspaceContext,

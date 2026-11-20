@@ -54,7 +54,9 @@ absolute path covered by a workspace mount. Set it in the role's
 `workspace.config` when using the basic tools plugin.
 There is no provider-wide default directory. Opening a workspace binds its ID to
 that directory. Reopening is safe, but changing the directory for an existing ID
-is rejected. Different IDs may share a directory.
+is rejected. Different IDs may share a directory. Releasing a workspace removes
+only its binding, so the ID can be opened on another directory. The directory
+and its files are kept.
 
 Relative file paths and command working directories start in the workspace directory.
 Absolute paths and `..` are supported within the granted filesystem mounts.

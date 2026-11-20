@@ -77,6 +77,30 @@ impl WasmWorkspaces {
             .map_err(WasmError::from_workspace)
     }
 
+    pub(crate) async fn release(
+        &self,
+        name: &str,
+        context: &WorkspaceContext,
+    ) -> Result<(), WasmError> {
+        let mut store = self.store();
+        let instance = self
+            .instance
+            .instantiate_async(&mut store)
+            .await
+            .map_err(WasmError::runtime)?;
+        store
+            .run_concurrent(async |accessor| {
+                instance
+                    .fleet_providers_workspaces()
+                    .call_release(accessor, workspaces::WorkspaceContext::new(name, context))
+                    .await
+            })
+            .await
+            .flatten()
+            .map_err(WasmError::runtime)?
+            .map_err(WasmError::from_workspace)
+    }
+
     pub(crate) async fn read(
         &self,
         name: &str,

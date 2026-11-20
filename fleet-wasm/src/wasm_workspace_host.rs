@@ -22,6 +22,10 @@ trait WorkspacesObject: Send + Sync {
         &self,
         context: workspaces::WorkspaceContext,
     ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>>;
+    fn release(
+        &self,
+        context: workspaces::WorkspaceContext,
+    ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>>;
     fn read(
         &self,
         context: workspaces::WorkspaceContext,
@@ -80,6 +84,17 @@ impl<W: Workspaces + Send + Sync> WorkspacesObject for W {
     ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>> {
         Box::pin(async move {
             Workspaces::open(self, &convert_context(context)?)
+                .await
+                .map_err(|source| error(&source))
+        })
+    }
+
+    fn release(
+        &self,
+        context: workspaces::WorkspaceContext,
+    ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>> {
+        Box::pin(async move {
+            Workspaces::release(self, &convert_context(context)?)
                 .await
                 .map_err(|source| error(&source))
         })
@@ -156,6 +171,13 @@ impl workspaces::HostWithStore<WasmState> for HasSelf<WasmState> {
         context: workspaces::WorkspaceContext,
     ) -> Result<(), workspaces::WorkspacesError> {
         host(store)?.0.open(context).await
+    }
+
+    async fn release(
+        store: &Accessor<WasmState, Self>,
+        context: workspaces::WorkspaceContext,
+    ) -> Result<(), workspaces::WorkspacesError> {
+        host(store)?.0.release(context).await
     }
 
     async fn read(

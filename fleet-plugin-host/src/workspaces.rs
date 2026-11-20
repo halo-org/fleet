@@ -51,6 +51,17 @@ impl Guest for Host {
         check_binding(&state, &id, &config.cwd).await
     }
 
+    async fn release(context: WorkspaceContext) -> Result<(), WorkspacesError> {
+        if context.workspace.name != "default" {
+            return Err(crate::error(
+                WorkspacesErrorKind::NotFound,
+                "workspace was not found",
+            ));
+        }
+        let state = Directory::open("/state", false).await?;
+        state.remove(&binding_name(&context)).await
+    }
+
     async fn read(
         context: WorkspaceContext,
         path: String,

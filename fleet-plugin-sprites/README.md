@@ -110,6 +110,15 @@ variables when they run rather than copy their values. A referenced connection
 missing from the provider config is an invalid configuration. A referenced
 connection without a key fails commands and provisioning until a key is added.
 
+Releasing a workspace without `sprite` deletes its sprite, including any
+uncommitted or unpushed work. With `sprite`, the shared sprite and its setup
+are kept. Release holds the repository lock and removes the workspace's record,
+the worktrees in its directory or on its `fleet/<id>` branch, and that branch
+from every bare clone. Other branches are kept. A sprite that does not exist is
+not created, and a sprite Fleet has not provisioned is not changed. Releasing
+again, or releasing a workspace that was never opened, succeeds. A later open
+provisions the workspace again.
+
 Relative file paths and command working directories start in
 `/home/sprite/worktrees/<id>` with `repos`, and in `/home/sprite` otherwise.
 File writes go to a temporary sibling that is then renamed over the destination.
@@ -123,8 +132,10 @@ group. Exits caused by signals are reported as codes above 128.
 
 ## Limitations
 
-- Sprites, worktrees and branches are never deleted. They accumulate until
-  removed by hand.
+- Only releasing removes sprites, worktrees and branches. Bare clones are kept.
+  A workspace that is never released, or whose sprite or ID changed since it
+  was opened, must be removed by hand.
+- Release does not stop commands still running in the workspace.
 - Changing `sprite` for an existing ID opens a new environment, because the
   previous sprite is not consulted.
 - Changing `repos` for an existing ID keeps existing worktrees, which still use

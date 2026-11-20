@@ -52,6 +52,44 @@ fi
 git -C "$2" worktree move "$5" "$3"
 "#;
 
+/// Removes a workspace ID's record, worktrees and branches from a shared sprite.
+///
+/// Takes the ID. Holds the repository lock, so it does not interleave with provisioning. Removes
+/// worktrees in the workspace directory and elsewhere on the ID's branch from each bare clone.
+const RELEASE: &str = r#"set -euo pipefail
+shopt -s nullglob dotglob
+if [ ! -d /home/sprite/.fleet ]; then exit 0; fi
+exec 9>/home/sprite/.fleet/repos.lock
+flock 9
+rm -f -- "/home/sprite/.fleet/workspaces/$1"
+for repo in /home/sprite/repos/*/; do
+  if [ "$(git --git-dir="$repo" rev-parse --is-bare-repository 2>/dev/null)" != true ]; then
+    continue
+  fi
+  trees=()
+  while read -r key value; do
+    case $key in
+      worktree)
+        tree=$value
+        case $tree/ in "/home/sprite/worktrees/$1/"*) trees+=("$tree") ;; esac
+        ;;
+      branch)
+        if [ "$value" = "refs/heads/fleet/$1" ]; then trees+=("$tree"); fi
+        ;;
+    esac
+  done < <(git --git-dir="$repo" worktree list --porcelain)
+  for tree in "${trees[@]}"; do
+    git --git-dir="$repo" worktree unlock "$tree" 2>/dev/null || true
+    rm -rf -- "$tree"
+  done
+  git --git-dir="$repo" worktree prune
+  if git --git-dir="$repo" show-ref --verify --quiet "refs/heads/fleet/$1"; then
+    git --git-dir="$repo" branch --quiet -D "fleet/$1"
+  fi
+done
+rm -rf -- "/home/sprite/worktrees/$1" "/home/sprite/.fleet/tmp/$1"
+"#;
+
 impl Guest for Sprites {
     #[expect(clippy::unused_async_trait_impl, reason = "matches the WIT export")]
     async fn get(name: String) -> Result<Option<Workspace>, WorkspacesError> {
@@ -155,6 +193,26 @@ impl Guest for Sprites {
         replace(&sprite, &marker, bytes, true).await
     }
 
+    async fn release(context: WorkspaceContext) -> Result<(), WorkspacesError> {
+        let (config, sprite) = parse(&context)?;
+        if config.sprite.is_none() {
+            return sprite.delete().await;
+        }
+        let args = vec![
+            "-c".into(),
+            RELEASE.into(),
+            "bash".into(),
+            crate::hex(&context.id),
+        ];
+        match provision(&sprite, &[], "release", args).await {
+            Err(WorkspacesError {
+                kind: WorkspacesErrorKind::NotFound,
+                message: _,
+            }) => Ok(()),
+            result => result,
+        }
+    }
+
     async fn read(
         context: WorkspaceContext,
         path: String,
@@ -206,6 +264,15 @@ impl Guest for Sprites {
 }
 
 fn load(context: &WorkspaceContext) -> Result<(Config, Sprite), WorkspacesError> {
+    let (config, sprite) = parse(context)?;
+    let provider = ProviderConfig::load()
+        .map_err(|message| crate::error(WorkspacesErrorKind::Other, message))?;
+    config.check(&provider)?;
+    Ok((config, sprite))
+}
+
+/// Parses the workspace config without checking it against the provider config.
+fn parse(context: &WorkspaceContext) -> Result<(Config, Sprite), WorkspacesError> {
     if context.workspace.name != "default" {
         return Err(crate::error(
             WorkspacesErrorKind::NotFound,
@@ -213,9 +280,6 @@ fn load(context: &WorkspaceContext) -> Result<(Config, Sprite), WorkspacesError>
         ));
     }
     let config = Config::parse(&context.workspace.config)?;
-    let provider = ProviderConfig::load()
-        .map_err(|message| crate::error(WorkspacesErrorKind::Other, message))?;
-    config.check(&provider)?;
     let sprite = Sprite::new(config.sprite(&context.id));
     Ok((config, sprite))
 }

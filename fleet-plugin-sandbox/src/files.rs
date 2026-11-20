@@ -28,6 +28,9 @@ pub enum Request {
         content: Vec<u8>,
         expected: Option<Vec<u8>>,
     },
+    Release {
+        workspace: String,
+    },
 }
 
 /// The worker's reply to a request.
@@ -36,6 +39,7 @@ pub enum Request {
 pub enum Reply {
     Contents(Vec<u8>),
     Written,
+    Released,
     NotFound,
     TooLarge,
     Changed,
@@ -73,6 +77,10 @@ impl Files {
                 }
                 self.0.insert(key, content);
                 Reply::Written
+            }
+            Request::Release { workspace } => {
+                self.0.retain(|(owner, _), _| *owner != workspace);
+                Reply::Released
             }
         }
     }
@@ -182,6 +190,30 @@ mod tests {
         );
         assert_eq!(files.handle(read_file("a", "/notes", 4)), Reply::TooLarge);
         assert_eq!(files.handle(read_file("b", "/notes", 5)), Reply::NotFound);
+    }
+
+    #[test]
+    fn release_drops_only_its_workspace() {
+        let mut files = Files::default();
+        files.handle(write_file("/notes", "hello", None));
+        files.handle(Request::Write {
+            workspace: "b".into(),
+            path: "/notes".into(),
+            content: b"other".to_vec(),
+            expected: None,
+        });
+
+        let release = || Request::Release {
+            workspace: "a".into(),
+        };
+        assert_eq!(files.handle(release()), Reply::Released);
+        assert_eq!(files.handle(release()), Reply::Released);
+
+        assert_eq!(files.handle(read_file("a", "/notes", 5)), Reply::NotFound);
+        assert_eq!(
+            files.handle(read_file("b", "/notes", 5)),
+            Reply::Contents(b"other".to_vec())
+        );
     }
 
     #[test]

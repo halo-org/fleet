@@ -43,7 +43,7 @@ invalid.
 ## Workspace
 
 `default` keeps files in memory, separately for each workspace ID, until Fleet
-stops. Relative paths start in `/workspace`. Commands do not run: they report
+stops or the workspace is released. Relative paths start in `/workspace`. Commands do not run: they report
 `Simulated: <command>` and succeed, except `exit N`, which exits with `N`. Output
 beyond the command's limit keeps its head and tail.
 
