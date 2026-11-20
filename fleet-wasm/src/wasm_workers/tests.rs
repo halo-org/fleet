@@ -3,7 +3,11 @@ use crate::{Wasm, WasmCapabilities, WasmEnvironment, WasmRegistry};
 use core::assert_matches;
 use fleet_core::{Configured, ContentBlock, JsonObject, PromptContext, PromptOutput, Prompts as _};
 use serde_json::json;
-use std::{path::Path, process::Command, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
+};
 
 fn run(future: impl Future<Output = ()>) {
     tokio::runtime::Builder::new_current_thread()
@@ -17,37 +21,42 @@ fn run(future: impl Future<Output = ()>) {
         });
 }
 
+/// Loads the worker from `FLEET_TEST_WASM`, or builds it if that is unset.
 fn component(wasm: &Wasm) -> crate::WasmComponent {
     static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
     let bytes = BYTES.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let target = root.join("target/worker-fixture");
-        let output = Command::new(env!("CARGO"))
-            .current_dir(root)
-            .args([
-                "build",
-                "--offline",
-                "--locked",
-                "-p",
-                "fleet-wasm-test-worker",
-                "--target",
-                "wasm32-unknown-unknown",
-                "--config",
-                "profile.dev.opt-level=1",
-            ])
-            .arg("--target-dir")
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        std::fs::read(target.join("wasm32-unknown-unknown/debug/fleet_wasm_test_worker.wasm"))
-            .unwrap()
+        let directory = std::env::var_os("FLEET_TEST_WASM").map_or_else(build, PathBuf::from);
+        std::fs::read(directory.join("fleet_wasm_test_worker.wasm")).unwrap()
     });
     wasm.compile(bytes).unwrap()
+}
+
+fn build() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let target = root.join("target/worker-fixture");
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args([
+            "build",
+            "--offline",
+            "--locked",
+            "-p",
+            "fleet-wasm-test-worker",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--config",
+            "profile.dev.opt-level=1",
+        ])
+        .arg("--target-dir")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    target.join("wasm32-unknown-unknown/debug")
 }
 
 fn provider(wasm: &Wasm, component: &crate::WasmComponent) -> crate::WasmProvider {

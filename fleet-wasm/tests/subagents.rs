@@ -26,51 +26,54 @@ use fleet_workspaces::AgentWorkspaces;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
 
+/// Loads the plugins from `FLEET_TEST_WASM`, or builds them if that is unset.
 fn components(wasm: &Wasm) -> (WasmComponent, WasmComponent) {
     static MODULES: OnceLock<[Vec<u8>; 2]> = OnceLock::new();
     let modules = MODULES.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let target = root.join("target/subagent-fixture");
-        let output = Command::new(env!("CARGO"))
-            .current_dir(root)
-            .args([
-                "build",
-                "--offline",
-                "--locked",
-                "-p",
-                "fleet-plugin-agents",
-                "-p",
-                "fleet-plugin-tools",
-                "--target",
-                "wasm32-unknown-unknown",
-                "--config",
-                "profile.dev.opt-level=1",
-            ])
-            .arg("--target-dir")
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let directory = std::env::var_os("FLEET_TEST_WASM").map_or_else(build, PathBuf::from);
         ["agents", "tools"].map(|plugin| {
-            std::fs::read(target.join(format!(
-                "wasm32-unknown-unknown/debug/fleet_plugin_{plugin}.wasm"
-            )))
-            .unwrap()
+            std::fs::read(directory.join(format!("fleet_plugin_{plugin}.wasm"))).unwrap()
         })
     });
     (
         wasm.compile(&modules[0]).unwrap(),
         wasm.compile(&modules[1]).unwrap(),
     )
+}
+
+fn build() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let target = root.join("target/subagent-fixture");
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args([
+            "build",
+            "--offline",
+            "--locked",
+            "-p",
+            "fleet-plugin-agents",
+            "-p",
+            "fleet-plugin-tools",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--config",
+            "profile.dev.opt-level=1",
+        ])
+        .arg("--target-dir")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    target.join("wasm32-unknown-unknown/debug")
 }
 
 #[derive(Clone)]
