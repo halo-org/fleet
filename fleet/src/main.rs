@@ -36,7 +36,7 @@ pub(crate) use self::{
         ApiAgent, ApiAgentActivity, ApiAgentUpdates, ApiEvent, ApiMessage, ApiMessageRecord,
         ApiPreview, ApiPreviewKind, ApiPreviewSelection, ApiProvider, ApiRole, ApiRoleDefinition,
         ApiToolCallRecord, CreateAgentRequest, ErrorDetails, ErrorResponse, EventsQuery,
-        InterruptAgentRequest, SinceQuery,
+        InterruptAgentRequest, InterruptToolCallsRequest, SinceQuery,
     },
     authentication::Authentication,
     authentication_error::AuthenticationError,

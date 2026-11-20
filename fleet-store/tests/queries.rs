@@ -189,7 +189,7 @@ fn compaction_notifications_are_transient_and_superseded() {
             })
         );
         store
-            .interrupt_agent("interrupt", agent.id, None)
+            .interrupt_agent("interrupt", agent.id, true, None)
             .await
             .unwrap();
         store

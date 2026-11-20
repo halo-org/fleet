@@ -5,7 +5,7 @@ use crate::{
 use core::{error::Error, fmt, pin::pin, time::Duration};
 use fleet_core::{
     Agent, AgentId, ClientStore as _, Error as _, ErrorHandler as _, JsonObject, Message,
-    MessageId, Models, Role, RoleName, Tools,
+    MessageId, Models, Role, RoleName, ToolCallId, Tools,
 };
 use fleet_kit::{
     AgentActivity, AgentCollection as _, AgentMetadata, AgentUpdates, AgentsPage, AgentsQuery,
@@ -810,13 +810,40 @@ impl Fleet {
         &self,
         idempotency_key: String,
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<Message>,
     ) -> Result<(), FleetError> {
         self.mutate(async move |fleet| {
             fleet
                 .state
                 .store
-                .interrupt_agent(&idempotency_key, agent_id, message.as_ref())
+                .interrupt_agent(
+                    &idempotency_key,
+                    agent_id,
+                    include_async_tool_calls,
+                    message.as_ref(),
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Interrupts tool calls without interrupting the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown has begun or the mutation fails.
+    pub async fn interrupt_tool_calls(
+        &self,
+        idempotency_key: String,
+        agent_id: AgentId,
+        call_ids: Vec<ToolCallId>,
+    ) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| {
+            fleet
+                .state
+                .store
+                .interrupt_tool_calls(&idempotency_key, agent_id, &call_ids)
                 .await
         })
         .await
@@ -2438,7 +2465,7 @@ mod tests {
             assert_eq!(updates.tool_calls, []);
 
             fleet
-                .interrupt_agent("interrupt".into(), 1.into(), None)
+                .interrupt_agent("interrupt".into(), 1.into(), true, None)
                 .await
                 .unwrap();
             let updates = fleet.updates(1.into(), 4.into()).await.unwrap();
@@ -2616,7 +2643,7 @@ mod tests {
             let store = &fleet.state.store;
             store.consume_messages(1.into(), None, true).await.unwrap();
             fleet
-                .interrupt_agent("interrupt".into(), 1.into(), None)
+                .interrupt_agent("interrupt".into(), 1.into(), true, None)
                 .await
                 .unwrap();
             store

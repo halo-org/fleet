@@ -8,6 +8,7 @@ use fleet_core::{
 };
 use fleet_store::{Store, StoreError};
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use std::collections::BTreeSet;
 
 fn agent() -> Agent {
     Agent {
@@ -347,7 +348,7 @@ fn settle_interrupt_requires_all_pending_results() {
             .await
             .unwrap();
         store
-            .interrupt_agent("interrupt", agent.id, None)
+            .interrupt_agent("interrupt", agent.id, true, None)
             .await
             .unwrap();
         let error = store
@@ -357,6 +358,10 @@ fn settle_interrupt_requires_all_pending_results() {
         assert_matches!(error, StoreError::Conflict(_));
         let state = store.agent_state(agent.id).await.unwrap().unwrap();
         assert!(state.interrupt_intent);
+        assert_eq!(
+            state.tool_call_interrupt_intents,
+            BTreeSet::from(["a".into(), "b".into()])
+        );
         assert_eq!(state.latest_event, Some(1.into()));
 
         store
@@ -384,6 +389,108 @@ fn settle_interrupt_requires_all_pending_results() {
 }
 
 #[test]
+fn settle_interrupt_without_async_tool_calls_requires_synchronous_results() {
+    let store = Store::memory().unwrap();
+    let agent = agent();
+    let message = message(1, MessageMode::Steer);
+    let response = response(vec![
+        ModelOutput::ToolCall(tool_call("a", false)),
+        ModelOutput::ToolCall(tool_call("b", true)),
+    ]);
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &agent, Some(&message))
+            .await
+            .unwrap();
+        store.consume_messages(agent.id, None, true).await.unwrap();
+        store
+            .append_model_response(agent.id, 0.into(), false, &response)
+            .await
+            .unwrap();
+        store
+            .interrupt_agent("interrupt", agent.id, false, None)
+            .await
+            .unwrap();
+        let error = store
+            .settle_interrupt(
+                agent.id,
+                Some(1.into()),
+                &[tool_result("a"), tool_result("b")],
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::Conflict(_));
+
+        store
+            .settle_interrupt(agent.id, Some(1.into()), &[tool_result("a")])
+            .await
+            .unwrap();
+        store
+            .append_tool_result(agent.id, &tool_result("b"))
+            .await
+            .unwrap();
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert!(!state.interrupt_intent);
+        assert_eq!(state.latest_event, Some(4.into()));
+        assert_eq!(state.parked_at, Some(3.into()));
+    });
+}
+
+#[test]
+fn interrupt_tool_calls_sets_intents_until_results() {
+    let store = Store::memory().unwrap();
+    let agent = agent();
+    let message = message(1, MessageMode::Steer);
+    let response = response(vec![
+        ModelOutput::ToolCall(tool_call("a", true)),
+        ModelOutput::ToolCall(tool_call("b", true)),
+    ]);
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &agent, Some(&message))
+            .await
+            .unwrap();
+        store.consume_messages(agent.id, None, true).await.unwrap();
+        store
+            .append_model_response(agent.id, 0.into(), true, &response)
+            .await
+            .unwrap();
+        let error = store
+            .interrupt_tool_calls("missing", agent.id, &["missing".into()])
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::Conflict(_));
+
+        store
+            .interrupt_tool_calls("interrupt", agent.id, &["a".into()])
+            .await
+            .unwrap();
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert_eq!(
+            state.tool_call_interrupt_intents,
+            BTreeSet::from(["a".into()])
+        );
+
+        store
+            .append_tool_result(agent.id, &tool_result("a"))
+            .await
+            .unwrap();
+        store
+            .interrupt_tool_calls("interrupt again", agent.id, &["a".into(), "b".into()])
+            .await
+            .unwrap();
+        let state = store.agent_state(agent.id).await.unwrap().unwrap();
+        assert!(!state.interrupt_intent);
+        assert_eq!(
+            state.tool_call_interrupt_intents,
+            BTreeSet::from(["b".into()])
+        );
+    });
+}
+
+#[test]
 fn wakes_deliver_interrupts_before_idle() {
     let store = Store::memory().unwrap();
     let agent = agent();
@@ -401,7 +508,7 @@ fn wakes_deliver_interrupts_before_idle() {
         let wake = wakes.next().await.unwrap().unwrap();
         assert_eq!(wake, Wake::Reconcile(agent.id));
         store
-            .interrupt_agent("interrupt", agent.id, None)
+            .interrupt_agent("interrupt", agent.id, true, None)
             .await
             .unwrap();
         store

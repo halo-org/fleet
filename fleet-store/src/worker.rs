@@ -228,6 +228,7 @@ pub fn append_tool_result(
     )?;
     call.revision = agent.revision;
     records.put(&key, &call)?;
+    agent.tool_call_interrupt_intents.remove(&call_id);
     records.remove(&records::key(
         records::PENDING_TOOL,
         agent.agent.id,
