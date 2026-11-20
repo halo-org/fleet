@@ -2,14 +2,16 @@
 
 `oneshot_agent` and `oneshot_agent_async` run a task in a new child agent and
 return its response. `parent` resolves a workspace from the parent
-agent's current role. The plugin needs agent access and read-only role access;
+agent's current role. The plugin needs agent, blob and read-only role access;
 it does not need workspace I/O, process, filesystem or HTTP access.
 
 ## Calls and responses
 
-Supply `role`, `prompt` and optional `parameters` and `title`. The result is the
-agent's response text. The agent finishes when the call ends, and only that call
-can message it.
+Supply `role`, `prompt` and optional `parameters`, `images` and `title`. `images`
+lists up to 20 image references the caller can read, attached after the prompt.
+The result is the agent's response text. Any decimal number in that text that names
+an image the call can read is returned after it as an image, up to 20 images and
+40 MiB. The agent finishes when the call ends, and only that call can message it.
 
 Both tools wait for the first turn end **after the queued message is consumed**.
 An earlier unsolicited response does not satisfy the wait. An interruption is
@@ -55,6 +57,7 @@ With a `host` workspace provider configured:
       "path": "./plugins/agents.wasm",
       "capabilities": {
         "agents": true,
+        "blobs": true,
         "roles": "read"
       }
     },

@@ -9,9 +9,11 @@ pub(crate) use self::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
         fleet::providers::{
             agents::{self, AgentsError, EventDirection, EventPayload, EventQuery, TurnEnd},
+            blobs::{self, BlobsErrorKind},
             roles,
             types::{
-                AgentId, Configured, ContentBlock, ModelOutput, Tool, ToolContext, ToolOutput,
+                AgentId, BlobId, Configured, ContentBlock, ModelOutput, Tool, ToolContext,
+                ToolOutput,
             },
         },
     },
@@ -19,6 +21,10 @@ pub(crate) use self::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
+
+const IMAGE_COUNT_LIMIT: usize = 20;
+const IMAGE_SIZE_LIMIT: u64 = 40 * 1024 * 1024;
 
 struct Agents;
 
@@ -34,6 +40,8 @@ struct Input {
     #[serde(default)]
     parameters: Map<String, Value>,
     prompt: String,
+    #[serde(default)]
+    images: Vec<String>,
     title: Option<String>,
 }
 
@@ -45,14 +53,16 @@ impl Guest for Agents {
                 "oneshot_agent",
                 "Delegate to agent",
                 "Runs a task in a new agent and returns its final response. The agent finishes \
-                 when this call ends.",
+                 when this call ends. Images it mentions by reference are returned with the \
+                 response.",
                 false,
             )),
             "oneshot_agent_async" => Some(metadata(
                 "oneshot_agent_async",
                 "Delegate to agent in background",
                 "Runs a task in a new agent and continues without waiting. Its final response \
-                 arrives as this call's result. The agent finishes when this call ends.",
+                 arrives as this call's result. The agent finishes when this call ends. Images \
+                 it mentions by reference are returned with the response.",
                 true,
             )),
             _ => None,
@@ -123,6 +133,29 @@ async fn oneshot(context: &ToolContext, input: &str) -> Result<ToolOutput, Error
     if let Some(title) = input.title {
         extensions.insert("fleet.title".into(), title.into());
     }
+    if input.images.len() > IMAGE_COUNT_LIMIT {
+        return Err(Error::Input(format!(
+            "Attach at most {IMAGE_COUNT_LIMIT} images."
+        )));
+    }
+    let mut prompt = vec![ContentBlock::Text(input.prompt)];
+    let mut size = 0_u64;
+    for reference in &input.images {
+        let image = match reference.parse() {
+            Ok(id) => image_size(id).await?.map(|size| (id, size)),
+            Err(_) => None,
+        };
+        let Some((id, image_size)) = image else {
+            return Err(Error::Input(format!(
+                "Image reference {reference} is not an available image."
+            )));
+        };
+        size = size.saturating_add(image_size);
+        prompt.push(ContentBlock::Image(blob_id(id)));
+    }
+    if size > IMAGE_SIZE_LIMIT {
+        return Err(Error::Input("Attach at most 40 MiB of images.".into()));
+    }
     let agent = agents::create(
         "agent".into(),
         Configured {
@@ -133,13 +166,9 @@ async fn oneshot(context: &ToolContext, input: &str) -> Result<ToolOutput, Error
     )
     .await
     .map_err(|error| agents_error("failed to create agent", &error))?;
-    let message = agents::send(
-        "message".into(),
-        agent,
-        vec![ContentBlock::Text(input.prompt)],
-    )
-    .await
-    .map_err(|error| agents_error("failed to queue agent message", &error))?;
+    let message = agents::send("message".into(), agent, prompt)
+        .await
+        .map_err(|error| agents_error("failed to queue agent message", &error))?;
     response(agent, message).await
 }
 
@@ -180,11 +209,59 @@ async fn response(agent: AgentId, message: agents::MessageId) -> Result<ToolOutp
             return Ok(error_output("The agent was interrupted before finishing."));
         }
     };
+    let mut content = images(&text).await?;
+    content.insert(0, ContentBlock::Text(text));
     Ok(ToolOutput {
-        content: vec![ContentBlock::Text(text)],
+        content,
         structured_content: None,
         is_error: false,
     })
+}
+
+async fn images(text: &str) -> Result<Vec<ContentBlock>, Error> {
+    let mut images = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut size = 0_u64;
+    for reference in text.split(|c: char| !c.is_ascii_digit()) {
+        let Ok(id) = reference.parse() else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(image_size) = image_size(id).await? {
+            size = size.saturating_add(image_size);
+            if images.len() == IMAGE_COUNT_LIMIT || size > IMAGE_SIZE_LIMIT {
+                break;
+            }
+            images.push(ContentBlock::Image(blob_id(id)));
+        }
+    }
+    Ok(images)
+}
+
+async fn image_size(id: u128) -> Result<Option<u64>, Error> {
+    match blobs::get(blob_id(id)).await {
+        Ok(metadata) => Ok(metadata
+            .filter(|metadata| metadata.image.is_some())
+            .map(|metadata| metadata.size)),
+        Err(error)
+            if matches!(
+                error.kind,
+                BlobsErrorKind::NotFound | BlobsErrorKind::Denied
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(service_error("failed to read image", &error.message)),
+    }
+}
+
+fn blob_id(id: u128) -> BlobId {
+    BlobId {
+        high: u64::try_from(id >> 64).expect("high bits fit in u64"),
+        low: u64::try_from(id & u128::from(u64::MAX)).expect("low bits fit in u64"),
+    }
 }
 
 async fn unknown_role(config: &Config, name: &str) -> Result<String, Error> {
@@ -260,6 +337,14 @@ fn metadata(name: &str, title: &str, description: &str, is_async: bool) -> Tool 
                 "prompt": {
                     "type": "string",
                     "description": "The complete task. The agent cannot see this conversation.",
+                },
+                "images": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                    },
+                    "maxItems": IMAGE_COUNT_LIMIT,
+                    "description": "Image references to attach after the prompt.",
                 },
                 "title": {
                     "type": "string",
