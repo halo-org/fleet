@@ -9,7 +9,9 @@ use fleet_core::{
     ModelOutput, ModelProvenance, ModelResponse, ModelUsage, RuntimeStore as _, ToolCall,
     ToolOutput, ToolResult, TurnEnd,
 };
-use fleet_kit::{Agents as _, EventQuery, MessageRecord, Queries as _};
+use fleet_kit::{
+    AgentActivity, Agents as _, EventQuery, MessageRecord, Queries as _, QueryUpdate, TurnStatus,
+};
 use fleet_store::{Store, StoreError, WorkspaceRelease};
 
 fn role() -> Configured<fleet_core::RoleName> {
@@ -247,20 +249,37 @@ fn interrupts_close_scopes_of_interrupted_calls() {
             .interrupt_agent("stop turn", 1.into(), false, None)
             .await
             .unwrap();
-        access
+        let child = access
             .create("child", &role(), &JsonObject::new())
             .await
             .unwrap();
+        access.send("start", child, &[]).await.unwrap();
+        answer(&store, child, vec![call("server")]).await;
+        store
+            .interrupt_agent("stop child turn", child, false, None)
+            .await
+            .unwrap();
+        let revision = store.activity(child, None).await.unwrap().revision;
 
         store
             .interrupt_tool_calls("stop call", 1.into(), &["drive".into()])
             .await
             .unwrap();
+        store.reconcile_agent_scopes().await.unwrap();
         let error = access
             .create("late", &role(), &JsonObject::new())
             .await
             .unwrap_err();
+        let activity = store.activity(child, Some(revision)).await.unwrap().value;
         assert_matches!(error, StoreError::ScopeClosed);
+        assert_eq!(
+            activity,
+            QueryUpdate::Changed(AgentActivity {
+                turn: TurnStatus::Idle,
+                interrupt_pending: true,
+                interrupt_includes_async_tool_calls: true,
+            })
+        );
     });
 }
 

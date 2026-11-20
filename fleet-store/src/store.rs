@@ -271,6 +271,7 @@ pub fn apply_agent_request(
         }
     };
     let id = agent.agent.id;
+    let activity = agent.activity();
     if !create {
         agent.revision = agent
             .revision
@@ -288,16 +289,11 @@ pub fn apply_agent_request(
         if !agent.interrupt_intent {
             agent.interrupt_intent = true;
             agent.interrupt_includes_async_tool_calls = false;
-            records.change(
-                id,
-                records::ACTIVITY,
-                &[],
-                Some(agent.activity_revision),
-                agent.revision,
-            )?;
-            agent.activity_revision = agent.revision;
         }
         agent.interrupt_includes_async_tool_calls |= include_async_tool_calls;
+    }
+    if !create {
+        records.update_activity(&mut agent, &activity)?;
     }
     records.save_agent(&agent)?;
     Ok((agent, interrupt || message.is_some()))
@@ -314,11 +310,20 @@ fn interrupt_tool_calls(
         .checked_add(1)
         .expect("revisions do not overflow");
     for call_id in call_ids {
-        let call = records
-            .get::<ToolCallRecord>(&records::key(records::TOOL_CALL, id, call_id.as_bytes()))?
+        let key = records::key(records::TOOL_CALL, id, call_id.as_bytes());
+        let mut call = records
+            .get::<ToolCallRecord>(&key)?
             .ok_or(StoreError::Conflict("tool call does not exist"))?;
-        if call.resolved_at.is_none() {
-            agent.tool_call_interrupt_intents.insert(call_id.clone());
+        if call.resolved_at.is_none() && agent.tool_call_interrupt_intents.insert(call_id.clone()) {
+            records.change(
+                id,
+                records::TOOL_CALL,
+                call_id.as_bytes(),
+                Some(call.revision),
+                agent.revision,
+            )?;
+            call.revision = agent.revision;
+            records.put(&key, &call)?;
         }
     }
     records.save_agent(&agent)?;
