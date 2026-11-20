@@ -59,7 +59,15 @@
         doInstallCargoArtifacts = false;
       };
 
-      withDependencies = args: args // { cargoArtifacts = craneLib.buildDepsOnly args; };
+      # Dependencies are symlinked into each build. Unpacking an archive of
+      # them in every check at once is limited by how fast the builder's disk
+      # writes.
+      withDependencies =
+        args:
+        args
+        // {
+          cargoArtifacts = craneLib.buildDepsOnly (args // { installCargoArtifactsMode = "use-symlink"; });
+        };
 
       # The whole workspace, as developers build and test it.
       workspace = withDependencies (
