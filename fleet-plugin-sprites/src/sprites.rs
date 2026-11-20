@@ -1,6 +1,6 @@
 use crate::{WorkspacesError, WorkspacesErrorKind, bindings, config::HOME};
 use bindings::{
-    fleet::providers::credentials::{self, Credential},
+    fleet::providers::credentials,
     wasi::http::{
         client,
         types::{ErrorCode, Fields, Method, Request as HttpRequest, RequestOptions, Scheme},
@@ -10,8 +10,9 @@ use futures_util::future;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
+/// The connection holding the Sprites API key.
+pub const CONNECTION: &str = "sprites";
 const AUTHORITY: &str = "api.sprites.dev";
-const CONNECTION: &str = "sprites";
 const QUERY: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
@@ -269,14 +270,9 @@ async fn send(request: &Request) -> Result<Response, WorkspacesError> {
 }
 
 async fn key() -> Result<String, WorkspacesError> {
-    match credentials::get(CONNECTION.into()).await.map_err(other)? {
-        Some(Credential::ApiKey(key)) => Ok(key),
-        Some(Credential::Oauth(credential)) => Ok(credential.access_token),
-        None => Err(crate::error(
-            WorkspacesErrorKind::Other,
-            "Sprites is not signed in",
-        )),
-    }
+    crate::authentication::credential(CONNECTION)
+        .await?
+        .ok_or_else(|| crate::error(WorkspacesErrorKind::Other, "Sprites is not signed in"))
 }
 
 async fn send_with(request: &Request, key: &str) -> Result<Response, WorkspacesError> {

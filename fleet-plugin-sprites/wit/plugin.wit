@@ -2,6 +2,7 @@ package fleet:plugin-sprites@0.0.0;
 
 /// Workspaces on Sprites.
 world plugin {
+    import fleet:providers/configuration@0.0.0;
     import fleet:providers/credentials@0.0.0;
     import wasi:http/types@0.3.0;
     import wasi:http/client@0.3.0;

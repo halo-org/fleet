@@ -1,11 +1,31 @@
-use crate::{WorkspaceId, WorkspacesError, WorkspacesErrorKind};
+use crate::{
+    WorkspaceId, WorkspacesError, WorkspacesErrorKind, bindings::fleet::providers::configuration,
+};
 use percent_encoding::{AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The home directory on each sprite.
 pub const HOME: &str = "/home/sprite";
 const REPOSITORY: &AsciiSet = &CONTROLS.add(b'%').add(b'/');
+
+/// The provider config.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// API key connections offered in addition to Sprites.
+    #[serde(default)]
+    pub connections: BTreeMap<String, ConnectionConfig>,
+}
+
+/// An API key connection declared in the provider config.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionConfig {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +36,8 @@ pub struct Config {
     pub setup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repos: Option<Repos>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, Variable>,
 }
 
 /// The repositories checked out in a workspace.
@@ -26,6 +48,41 @@ pub enum Repos {
     One(String),
     /// Repositories whose worktrees are named subdirectories of the workspace directory.
     Many(Vec<String>),
+}
+
+/// The value of an environment variable.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged, expecting = "a string or a connection reference")]
+pub enum Variable {
+    /// A literal value.
+    Value(String),
+    /// The credential of a connection declared in the provider config.
+    Credential(Credential),
+}
+
+/// A reference to the credential of a connection.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Credential {
+    pub connection: String,
+}
+
+impl ProviderConfig {
+    pub fn load() -> Result<Self, String> {
+        Self::parse(&configuration::get())
+    }
+
+    fn parse(config: &str) -> Result<Self, String> {
+        let config: Self =
+            serde_json::from_str(config).map_err(|error| format!("invalid config: {error}"))?;
+        if config.connections.contains_key(crate::sprites::CONNECTION) {
+            return Err(format!(
+                "invalid config: connection {} is built in",
+                crate::sprites::CONNECTION,
+            ));
+        }
+        Ok(config)
+    }
 }
 
 impl Config {
@@ -79,7 +136,38 @@ impl Config {
                 }
             }
         }
+        for (name, variable) in &config.env {
+            if !crate::exec::valid_name(name) {
+                return Err(crate::error(
+                    WorkspacesErrorKind::InvalidConfiguration,
+                    format!("env names must be shell variable names: {name}"),
+                ));
+            }
+            if let Variable::Value(value) = variable
+                && value.contains('\0')
+            {
+                return Err(crate::error(
+                    WorkspacesErrorKind::InvalidConfiguration,
+                    format!("env values must not contain null bytes: {name}"),
+                ));
+            }
+        }
         Ok(config)
+    }
+
+    /// Checks that env only refers to connections declared in the provider config.
+    pub fn check(&self, provider: &ProviderConfig) -> Result<(), WorkspacesError> {
+        for (name, variable) in &self.env {
+            if let Variable::Credential(Credential { connection }) = variable
+                && !provider.connections.contains_key(connection)
+            {
+                return Err(crate::error(
+                    WorkspacesErrorKind::InvalidConfiguration,
+                    format!("env {name} refers to undeclared connection {connection}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Returns the name of the sprite hosting a workspace ID.
@@ -159,6 +247,68 @@ mod tests {
     };
 
     #[test]
+    fn provider_config_declares_connections() {
+        let config = ProviderConfig::parse("{}").unwrap();
+        assert!(config.connections.is_empty());
+
+        let parameters = json!({
+            "connections": {
+                "github": {
+                    "title": "GitHub",
+                },
+                "npm": {
+                    "title": "npm",
+                    "description": "Publishes packages.",
+                },
+            },
+        })
+        .to_string();
+        let config = ProviderConfig::parse(&parameters).unwrap();
+        assert_eq!(
+            config.connections,
+            BTreeMap::from([
+                (
+                    "github".into(),
+                    ConnectionConfig {
+                        title: "GitHub".into(),
+                        description: None,
+                    },
+                ),
+                (
+                    "npm".into(),
+                    ConnectionConfig {
+                        title: "npm".into(),
+                        description: Some("Publishes packages.".into()),
+                    },
+                ),
+            ]),
+        );
+    }
+
+    #[test]
+    fn provider_config_rejects_invalid_connections() {
+        let sprites = json!({
+            "connections": {
+                "sprites": {
+                    "title": "Sprites",
+                },
+            },
+        });
+        let untitled = json!({
+            "connections": {
+                "github": {},
+            },
+        });
+        let unknown = json!({
+            "connection": {},
+        });
+
+        for config in [sprites, untitled, unknown] {
+            ProviderConfig::parse(&config.to_string()).unwrap_err();
+        }
+    }
+
+    #[test]
     fn parse_accepts_optional_fields() {
         let config = Config::parse("{}").unwrap();
         assert_eq!(
@@ -167,6 +317,7 @@ mod tests {
                 sprite: None,
                 setup: None,
                 repos: None,
+                env: BTreeMap::new(),
             },
         );
 
@@ -196,6 +347,73 @@ mod tests {
                 "git@github.com:a/b".into(),
             ])),
         );
+
+        let parameters = json!({
+            "env": {
+                "GH_TOKEN": {"connection": "github"},
+                "_NAME": "'$(a\nb)\"",
+            },
+        })
+        .to_string();
+        let config = Config::parse(&parameters).unwrap();
+        assert_eq!(
+            config.env,
+            BTreeMap::from([
+                (
+                    "GH_TOKEN".into(),
+                    Variable::Credential(Credential {
+                        connection: "github".into(),
+                    }),
+                ),
+                ("_NAME".into(), Variable::Value("'$(a\nb)\"".into())),
+            ]),
+        );
+    }
+
+    #[test]
+    fn config_stores_connection_references() {
+        let parameters = json!({
+            "env": {
+                "GH_TOKEN": {"connection": "github"},
+                "NAME": "value",
+            },
+        });
+        let config = Config::parse(&parameters.to_string()).unwrap();
+
+        let stored = serde_json::to_string_pretty(&config).unwrap();
+
+        assert_eq!(
+            stored,
+            r#"{
+  "env": {
+    "GH_TOKEN": {
+      "connection": "github"
+    },
+    "NAME": "value"
+  }
+}"#,
+        );
+        assert_eq!(Config::parse(&stored).unwrap(), config);
+    }
+
+    #[test]
+    fn check_rejects_undeclared_connections() {
+        let provider =
+            ProviderConfig::parse(r#"{"connections": {"github": {"title": "GitHub"}}}"#).unwrap();
+        let declared = Config::parse(r#"{"env": {"GH_TOKEN": {"connection": "github"}}}"#).unwrap();
+        let undeclared = Config::parse(r#"{"env": {"TOKEN": {"connection": "gitlab"}}}"#).unwrap();
+
+        declared.check(&provider).unwrap();
+        let error = undeclared.check(&provider).unwrap_err();
+
+        assert!(matches!(
+            error.kind,
+            WorkspacesErrorKind::InvalidConfiguration
+        ));
+        assert_eq!(
+            error.message,
+            "env TOKEN refers to undeclared connection gitlab"
+        );
     }
 
     #[test]
@@ -221,8 +439,26 @@ mod tests {
         let duplicate = json!({
             "repos": ["https://github.com/a/fleet.git", "https://github.com/b/fleet"],
         });
+        let name = json!({
+            "env": {"GIT-TOKEN": "a"},
+        });
+        let digit = json!({
+            "env": {"1TOKEN": "a"},
+        });
+        let nul = json!({
+            "env": {"TOKEN": "a\0"},
+        });
+        let number = json!({
+            "env": {"TOKEN": 1},
+        });
+        let reference = json!({
+            "env": {"TOKEN": {"connection": "github", "field": "token"}},
+        });
 
-        for parameters in [unknown, sprite, repo, dots, empty, unnamed, duplicate] {
+        for parameters in [
+            unknown, sprite, repo, dots, empty, unnamed, duplicate, name, digit, nul, number,
+            reference,
+        ] {
             let error = Config::parse(&parameters.to_string()).unwrap_err();
 
             assert!(matches!(

@@ -6,6 +6,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 /// Reads the command from standard input, runs it and reports buffered output.
 ///
+/// Exports variables with a builtin so their values stay out of process arguments. Unsetting them
+/// first keeps special shell variables from altering their values.
 /// Prints keepalive lines while the command runs so idle connections stay open.
 const SCRIPT: &str = r#"set -m
 IFS= read -r -d '' t; IFS= read -r -d '' l; IFS= read -r -d '' c
@@ -14,7 +16,8 @@ IFS= read -r -d '' n; a=(); for ((i=0;i<n;i++)); do IFS= read -r -d '' v; a+=("$
 cd -- "$c" || exit 1
 d=$(mktemp -d) || exit 1
 trap 'rm -rf -- "$d"' EXIT
-env -- "${e[@]}" "${a[@]}" <&0 >"$d/1" 2>"$d/2" & p=$!
+x() { unset -v -- a e "${@%%=*}"; [ "$#" = 0 ] || export -- "$@"; }
+(set -- "${a[@]}"; x "${e[@]}" 2>/dev/null || { echo 'could not set environment variables' >&2; exit 125; }; exec env -- "$@") <&0 >"$d/1" 2>"$d/2" & p=$!
 (sleep "$t"; : >"$d/t"; kill -KILL -- -"$p") >/dev/null 2>&1 & w=$!
 (while sleep 10; do echo .; done) & k=$!
 wait "$p"; s=$?
@@ -38,15 +41,20 @@ pub fn query() -> String {
 }
 
 pub fn body(command: WorkspaceCommand, cwd: &str) -> Result<Vec<u8>, WorkspacesError> {
-    if command.program.contains('=')
-        || command
-            .env
-            .iter()
-            .any(|(name, _)| name.is_empty() || name.contains('='))
+    if command.program.contains('=') {
+        return Err(crate::error(
+            WorkspacesErrorKind::Other,
+            "program must not contain '='",
+        ));
+    }
+    if let Some((name, _)) = command
+        .env
+        .iter()
+        .find(|(name, _)| !crate::exec::valid_name(name))
     {
         return Err(crate::error(
             WorkspacesErrorKind::Other,
-            "program and environment variable names must not contain '='",
+            format!("environment variable names must be shell variable names: {name}"),
         ));
     }
     let timeout = format!(
@@ -85,6 +93,14 @@ pub fn body(command: WorkspaceCommand, cwd: &str) -> Result<Vec<u8>, WorkspacesE
     }
     body.extend(command.stdin);
     Ok(body)
+}
+
+/// Returns whether a name can be exported by the shell.
+pub fn valid_name(name: &str) -> bool {
+    name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 pub fn parse(response: &[u8]) -> Result<WorkspaceOutput, WorkspacesError> {
@@ -193,16 +209,62 @@ mod tests {
     fn body_rejects_ambiguous_commands() {
         let mut nul = command();
         nul.args.push("\0".into());
+        let mut value = command();
+        value.env.push(("A".into(), "\0".into()));
         let mut program = command();
         program.program = "A=b".into();
+        let mut assignment = command();
+        assignment.env.push(("A=b".into(), "c".into()));
         let mut name = command();
-        name.env.push(("A=b".into(), "c".into()));
+        name.env.push(("A-B".into(), "c".into()));
 
-        for command in [nul, program, name] {
+        for command in [nul, value, program, assignment, name] {
             let error = body(command, "/home/sprite").unwrap_err();
 
             assert!(matches!(error.kind, WorkspacesErrorKind::Other));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn script_passes_env_unchanged() {
+        use std::{
+            io::Write as _,
+            process::{Command, Stdio},
+        };
+
+        let mut command = command();
+        command.program = "printenv".into();
+        command.env = [
+            ("SECRET", "'$(a)\"\n=`b`"),
+            ("LC_ALL", "secret"),
+            ("OPTIND", "0007"),
+            ("RANDOM", "1"),
+            ("a", "b"),
+            ("e", "f"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .into();
+        command.args = command.env.iter().map(|(name, _)| name.clone()).collect();
+        let mut bash = Command::new("bash")
+            .args(["-c", SCRIPT, "bash"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = bash.stdin.take().unwrap();
+        stdin.write_all(&body(command, "/").unwrap()).unwrap();
+        drop(stdin);
+        let response = [&[1], bash.wait_with_output().unwrap().stdout.as_slice()].concat();
+
+        let output = parse(&response).unwrap();
+
+        assert!(matches!(output.exit, WorkspaceExit::Code(0)));
+        assert_eq!(
+            String::from_utf8(output.stdout.head).unwrap(),
+            "'$(a)\"\n=`b`\nsecret\n0007\n1\nb\nf\n",
+        );
+        assert_eq!(output.stderr.head, b"");
     }
 
     #[test]
