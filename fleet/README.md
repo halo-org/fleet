@@ -296,7 +296,7 @@ HTTP messages, including messages attached to interrupts.
 Creation records `fleet.parent`, exposed as `parent` by the API. Clients cannot
 set or change it.
 Operation keys are scoped to the calling agent and call, not provider names.
-Images sent to a child must already be readable by its caller.
+Images sent to a child must be readable by its caller or an agent created by the same call.
 
 Children do not appear in the root inbox or notifications. `GET /agents?parent=1`
 scans agent `1`'s children; collection updates include them. Subagent execution and
@@ -346,8 +346,11 @@ Approve `"blobs": true` in a plugin's `capabilities` and have its component impo
 `fleet:providers/blobs@0.0.0`. The host supplies metadata, bounded reads, and immutable writes.
 Model generation and compaction get read-only access to the configured blob provider, including
 older blobs that are no longer in the current input. Compaction does not revoke access.
-Tools get access to the executing agent's attachments and can create new blobs. A model plugin
-must not assume any particular attachment tool exists. No filesystem paths or tools are injected.
+Tools get access to the executing agent's attachments and can create new blobs. They can also
+read blobs held by agents their call created, so delegation tools can return a child's images.
+Images enter a conversation only as content, and content may carry an image only if its author
+can read it. A model plugin must not assume any particular attachment tool exists. No filesystem
+paths or tools are injected.
 
 Native model providers use `OpenAiModels::with_blobs(...)`. WASM model plugins can implement the
 `fleet_kit::Blobs` interface using their generated blob-import bindings. Blob failures use the

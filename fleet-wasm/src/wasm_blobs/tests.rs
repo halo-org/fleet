@@ -80,8 +80,9 @@ fn tool_host_uses_agent_authority_and_validates_output_references() {
                 .await
                 .unwrap();
         }
-        let host = WasmBlobs::new(blobs.clone()).with_agents(move |id| blobs.agent_blobs(id));
-        let first = host.for_agent(1.into()).unwrap();
+        let host = WasmBlobs::new(blobs.clone())
+            .with_agents(move |id, call| blobs.agent_blobs(id).for_call(call));
+        let first = host.for_call(1.into(), "read".into()).unwrap();
         first
             .provider
             .put(3.into(), "image/png".into(), IMAGE.to_vec())
@@ -92,7 +93,7 @@ fn tool_host_uses_agent_authority_and_validates_output_references() {
         first.validate_content(&content).await.unwrap();
 
         let error = host
-            .for_agent(2.into())
+            .for_call(2.into(), "read".into())
             .unwrap()
             .validate_content(&content)
             .await

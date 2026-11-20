@@ -148,7 +148,7 @@ interface agents {
     ///
     /// Execution lasts until the driving call ends, not until a response or parent turn ends.
     /// Closing the driving call withdraws pending input and interrupts its agents' remaining work.
-    /// Images must be readable by the caller.
+    /// Images must be readable by the caller or an agent created by the driving call.
     send: async func(key: string, id: agent-id, content: list<content-block>)
         -> result<message-id, agents-error>;
 }

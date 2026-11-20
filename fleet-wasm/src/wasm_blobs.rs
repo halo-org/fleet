@@ -3,7 +3,7 @@ use crate::{
     bindings::{blobs, types},
 };
 use core::fmt;
-use fleet_core::{AgentId, BlobId, ContentBlock};
+use fleet_core::{AgentId, BlobId, ContentBlock, ToolCallId};
 use fleet_kit::{Blobs, BlobsErrorKind};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
@@ -15,11 +15,11 @@ mod tests;
 /// Blob capabilities available to a WebAssembly provider.
 ///
 /// Model calls receive read-only access to the provider. Tools receive access through the
-/// agent factory. Metadata lookups receive no blob access.
+/// agent factory for their agent and call. Metadata lookups receive no blob access.
 #[derive(Clone)]
 pub struct WasmBlobs {
     provider: Arc<dyn BlobsObject>,
-    agents: Option<Arc<dyn Fn(AgentId) -> Self + Send + Sync>>,
+    agents: Option<Arc<dyn Fn(AgentId, ToolCallId) -> Self + Send + Sync>>,
     writable: bool,
 }
 
@@ -51,9 +51,9 @@ impl WasmBlobs {
     #[must_use]
     pub fn with_agents<B: Blobs + Send + Sync + 'static>(
         mut self,
-        factory: impl Fn(AgentId) -> B + Send + Sync + 'static,
+        factory: impl Fn(AgentId, ToolCallId) -> B + Send + Sync + 'static,
     ) -> Self {
-        self.agents = Some(Arc::new(move |id| Self::new(factory(id))));
+        self.agents = Some(Arc::new(move |id, call| Self::new(factory(id, call))));
         self
     }
 
@@ -65,8 +65,8 @@ impl WasmBlobs {
         }
     }
 
-    pub(crate) fn for_agent(&self, id: AgentId) -> Option<Self> {
-        self.agents.as_ref().map(|factory| factory(id))
+    pub(crate) fn for_call(&self, id: AgentId, call: ToolCallId) -> Option<Self> {
+        self.agents.as_ref().map(|factory| factory(id, call))
     }
 
     pub(crate) async fn validate_content(

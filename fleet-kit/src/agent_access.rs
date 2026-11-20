@@ -53,8 +53,8 @@ pub trait Agents {
     /// Queues a message to an agent created by this call.
     ///
     /// Execution lasts until the driving call ends, not until a response or parent turn ends.
-    /// Images must already be readable by the caller. Another call's agent returns
-    /// [`AccessDenied`](AgentsErrorKind::AccessDenied).
+    /// Images must be readable by the caller or an agent created by this call. Another call's
+    /// agent returns [`AccessDenied`](AgentsErrorKind::AccessDenied).
     fn send(
         &self,
         key: &str,

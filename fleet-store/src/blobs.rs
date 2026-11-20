@@ -3,7 +3,7 @@ use crate::{
     blob_records::{self, Metadata},
     records::{self, Records},
 };
-use fleet_core::{AgentId, BlobId};
+use fleet_core::{AgentId, BlobId, ToolCallId};
 use fleet_kit::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions};
 use image::{ImageFormat, ImageReader, Limits};
 use redb::{ReadableDatabase as _, ReadableTable as _};
@@ -218,26 +218,38 @@ impl Blobs for Store {
 }
 
 /// Blob access restricted to an agent's published attachments and newly created blobs.
+///
+/// Images enter a conversation only as content, and content may carry an image only if its
+/// author can read it.
 #[derive(Clone)]
 pub struct AgentBlobs {
     store: Store,
     agent_id: AgentId,
+    call: Option<ToolCallId>,
 }
 
 impl AgentBlobs {
+    /// Extends read access to blobs held by agents this tool call created.
+    #[must_use]
+    pub fn for_call(mut self, call: ToolCallId) -> Self {
+        self.call = Some(call);
+        self
+    }
+
     async fn check(&self, id: BlobId) -> Result<(), StoreError> {
         let agent = self.agent_id;
+        let call = self.call.clone();
         self.store
             .worker()
             .call(move |worker| {
                 let transaction = worker.database.begin_read()?;
                 let records = Records(transaction.open_table(records::RECORDS)?);
-                if records.get::<bool>(&records::key(
-                    blob_records::GRANT,
+                if !blob_records::readable(
+                    &records,
                     agent.into(),
-                    &u128::from(id).to_be_bytes(),
-                ))? != Some(true)
-                {
+                    call.as_ref().map(AsRef::as_ref),
+                    id.into(),
+                )? {
                     return Err(StoreError::BlobDenied);
                 }
                 Ok(())
@@ -342,6 +354,7 @@ impl Store {
         AgentBlobs {
             store: self.clone(),
             agent_id,
+            call: None,
         }
     }
 

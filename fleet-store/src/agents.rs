@@ -121,6 +121,14 @@ fn index_key(parent: Option<u128>) -> Vec<u8> {
     )
 }
 
+#[cfg(any(feature = "blobs", feature = "subagents"))]
+pub fn children<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    records: &Records<T>,
+    parent: u128,
+) -> Result<impl Iterator<Item = Result<u128, StoreError>> + '_, StoreError> {
+    records.prefix(&index_key(Some(parent)))
+}
+
 fn position_key(index: &[u8], inbox: u8, order: u128, id: u128) -> Vec<u8> {
     [
         index,

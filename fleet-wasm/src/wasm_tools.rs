@@ -87,7 +87,7 @@ impl WasmTools {
         store.data_mut().set_blobs(
             self.blobs
                 .as_ref()
-                .and_then(|blobs| blobs.for_agent(context.agent_id)),
+                .and_then(|blobs| blobs.for_call(context.agent_id, context.call_id.clone())),
         );
         store.data_mut().set_roles(
             self.roles
@@ -143,7 +143,7 @@ impl WasmTools {
         store.data_mut().set_blobs(
             self.blobs
                 .as_ref()
-                .and_then(|blobs| blobs.for_agent(context.agent_id)),
+                .and_then(|blobs| blobs.for_call(context.agent_id, context.call_id.clone())),
         );
         let output = store
             .run_concurrent(async |accessor| {
@@ -180,7 +180,7 @@ impl WasmTools {
         let access = self
             .blobs
             .as_ref()
-            .and_then(|blobs| blobs.for_agent(context.agent_id));
+            .and_then(|blobs| blobs.for_call(context.agent_id, context.call_id.clone()));
         let result = match access {
             Some(access) => access.validate_content(&output.content).await,
             None => Err(crate::bindings::blobs::BlobsError {

@@ -252,7 +252,8 @@ fn capabilities_for(
     let blob_store = fleet.blob_store().clone();
     Ok(WasmCapabilities {
         blobs: capabilities.blobs.then(|| {
-            WasmBlobs::new(blob_store.clone()).with_agents(move |id| blob_store.agent_blobs(id))
+            WasmBlobs::new(blob_store.clone())
+                .with_agents(move |id, call| blob_store.agent_blobs(id).for_call(call))
         }),
         http,
         filesystem: capabilities
