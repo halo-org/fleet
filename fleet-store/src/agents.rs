@@ -27,10 +27,10 @@ const CHANGE: u8 = 16;
 const SNOOZE: u8 = 17;
 const CHILDREN: u8 = 20;
 
-const PENDING: u8 = 0;
+pub const PENDING: u8 = 0;
 const BUSY: u8 = 1;
 const SNOOZED: u8 = 2;
-const SETTLED: u8 = 3;
+pub const SETTLED: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Summary {
@@ -218,6 +218,26 @@ fn write_summary(
             }
         }
     }
+    let settled_root = |summary: &Summary| summary.inbox == SETTLED && summary.parent.is_none();
+    match old
+        .and_then(|row| row.value.as_ref())
+        .filter(|previous| settled_root(previous))
+    {
+        Some(previous) if !settled_root(&value) => crate::release_records::cancel(
+            records,
+            crate::release_records::SETTLED,
+            previous.since,
+            id,
+        )?,
+        None if settled_root(&value) => crate::release_records::schedule(
+            records,
+            crate::release_records::SETTLED,
+            value.since,
+            id,
+            version,
+        )?,
+        _ => {}
+    }
     records.put(&inbox_key(id, &value), &id)?;
     if let Some(until) = value.until {
         records.put(&snooze_key(until, id), &(id, version))?;
@@ -233,6 +253,35 @@ fn write_summary(
     records.put(&change_key(version, id), &id)?;
     records.put(&[META], &version)?;
     Ok(true)
+}
+
+/// Schedules releases for root agents settled before releases were indexed.
+pub fn index_releases(
+    records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
+) -> Result<(), StoreError> {
+    if records
+        .get::<()>(crate::release_records::INDEXED)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let settled = records
+        .prefix::<u128>(&[INBOX, SETTLED])?
+        .collect::<Result<Vec<_>, _>>()?;
+    for id in settled {
+        let row = records
+            .get::<SummaryRecord>(&records::key(SUMMARY, id, &[]))?
+            .ok_or(StoreError::UnsupportedFormat)?;
+        let value = row.value.ok_or(StoreError::UnsupportedFormat)?;
+        crate::release_records::schedule(
+            records,
+            crate::release_records::SETTLED,
+            value.since,
+            id,
+            row.version,
+        )?;
+    }
+    records.put(crate::release_records::INDEXED, &())
 }
 
 /// Called by both runtime writes and client writes before their transaction commits.

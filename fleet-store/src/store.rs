@@ -64,6 +64,7 @@ impl Store {
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
             crate::agents::expire(&mut records, crate::agents::now_millis())?;
+            crate::agents::index_releases(&mut records)?;
         }
         transaction.open_table(crate::blob_records::BYTES)?;
         transaction.open_table(crate::blob_records::UPLOADS)?;
@@ -120,6 +121,7 @@ impl Store {
                         if summary_changed {
                             worker.listeners.notify(Topic::Agents);
                             worker.listeners.notify(Topic::Snoozes);
+                            worker.listeners.notify(Topic::WorkspaceReleases);
                         }
                         return Ok(());
                     }

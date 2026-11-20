@@ -50,7 +50,7 @@ impl Store {
     /// Stops execution whose driving call has ended. Returns the number of remaining scopes.
     ///
     /// Run after changes and on startup. Pending input is withdrawn before interruption. A scope
-    /// remains closed until its agent settles.
+    /// remains closed until its agent settles, which schedules the release of its workspace.
     ///
     /// # Errors
     ///
@@ -60,6 +60,7 @@ impl Store {
             .call(|worker| {
                 let transaction = worker.database.begin_write()?;
                 let mut changed = Vec::new();
+                let mut released = false;
                 let remaining = {
                     let mut records = Records(transaction.open_table(records::RECORDS)?);
                     let mut scopes = transaction.open_table(SCOPES)?;
@@ -105,8 +106,16 @@ impl Store {
                             )?;
                             changed.push((id, agent.interrupt_intent));
                         }
-                        if idle(&agent) {
+                        if agent.idle() {
                             scopes.remove(id)?;
+                            crate::release_records::schedule(
+                                &mut records,
+                                crate::release_records::ENDED,
+                                crate::agents::now_millis(),
+                                id,
+                                agent.revision,
+                            )?;
+                            released = true;
                         } else {
                             scopes.insert(id, serde_json::to_vec(&scope)?.as_slice())?;
                         }
@@ -116,6 +125,9 @@ impl Store {
                 transaction.commit()?;
                 if !changed.is_empty() {
                     worker.listeners.notify(Topic::Agents);
+                }
+                if released {
+                    worker.listeners.notify(Topic::WorkspaceReleases);
                 }
                 for (id, interrupt) in changed {
                     worker.listeners.notify(Topic::Agent(id));
@@ -365,13 +377,6 @@ fn identity(key: &str, kind: u8) -> u128 {
         .chain_update(key)
         .finalize();
     u128::from_be_bytes(*digest.first_chunk().expect("digest contains 16 bytes"))
-}
-
-const fn idle(agent: &AgentRecord) -> bool {
-    !agent.turn_active
-        && !agent.interrupt_intent
-        && agent.pending_messages == 0
-        && agent.pending_tool_calls == 0
 }
 
 fn ancestor<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(

@@ -16,6 +16,9 @@ pub struct Config {
     /// The configured providers.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// How long a root agent stays settled before its workspace is released, in milliseconds.
+    #[serde(default)]
+    pub release_settled_workspaces_after_ms: Option<u64>,
 }
 
 impl Config {

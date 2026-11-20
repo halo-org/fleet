@@ -330,6 +330,15 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
 }
 
 impl AgentRecord {
+    /// Returns whether the agent has no turn, interruption, input or tool call in progress.
+    #[cfg(feature = "queries")]
+    pub const fn idle(&self) -> bool {
+        !self.turn_active
+            && !self.interrupt_intent
+            && self.pending_messages == 0
+            && self.pending_tool_calls == 0
+    }
+
     pub fn check_latest_event(&self, expected: Option<u128>) -> Result<(), StoreError> {
         if self.latest_event != expected {
             return Err(StoreError::Conflict("latest event does not match"));

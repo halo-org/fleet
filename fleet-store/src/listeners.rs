@@ -11,6 +11,7 @@ use std::{
 pub enum Topic {
     Agents,
     Snoozes,
+    WorkspaceReleases,
     AgentScopes,
     Wakes,
     Notifications,

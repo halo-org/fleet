@@ -79,7 +79,8 @@ Select the workspace in the role:
 
 The agent ID identifies its workspace environment by default. An optional `id`
 as a decimal string selects an existing environment, allowing agents to share
-it. Reuse both its name and config. Role parameters can target fields under the
+it. Reuse both its name and config. Fleet releases only environments selected
+without an `id`. See [Workspaces](../fleet/README.md#workspaces). Role parameters can target fields under the
 workspace with `"type": "workspace"`.
 
 Workspace selection and config come only from the `fleet.workspace` entry in
