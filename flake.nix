@@ -100,14 +100,16 @@
 
       fleet = craneLib.buildPackage server;
 
-      plugin =
-        name:
+      wasmFile = package: "${lib.replaceStrings [ "-" ] [ "_" ] package}.wasm";
+
+      component =
+        package:
         let
           args = withDependencies (
             common
             // {
-              pname = "fleet-plugin-${name}";
-              cargoExtraArgs = "--locked --package fleet-plugin-${name}";
+              pname = package;
+              cargoExtraArgs = "--locked --package ${package}";
               CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
               doCheck = false;
             }
@@ -118,13 +120,20 @@
           // {
             nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.wasm-tools ];
             installPhaseCommand = ''
-              wasm-tools component new target/wasm32-unknown-unknown/release/fleet_plugin_${name}.wasm -o $out
+              wasm-tools component new target/wasm32-unknown-unknown/release/${wasmFile package} -o $out
             '';
           }
         );
 
       wasmComponents = lib.genAttrs' pluginNames (
-        name: lib.nameValuePair "fleet-plugin-${name}" (plugin name)
+        name: lib.nameValuePair "fleet-plugin-${name}" (component "fleet-plugin-${name}")
+      );
+
+      # The shipped components and the test worker, which the tests load instead of building.
+      testComponents = pkgs.linkFarm "fleet-test-components" (
+        lib.mapAttrs' (package: lib.nameValuePair (wasmFile package)) (
+          wasmComponents // { fleet-wasm-test-worker = component "fleet-wasm-test-worker"; }
+        )
       );
 
       image = ci.lib.ociImage system {
@@ -172,7 +181,13 @@
 
         clippy-plugins = craneLib.cargoClippy (guest // { cargoClippyExtraArgs = "-- --deny warnings"; });
 
-        test = craneLib.cargoTest (workspace // { SSL_CERT_FILE = certificates; });
+        test = craneLib.cargoTest (
+          workspace
+          // {
+            SSL_CERT_FILE = certificates;
+            FLEET_TEST_WASM = testComponents;
+          }
+        );
 
         doc = craneLib.cargoDoc (workspace // { RUSTDOCFLAGS = "--deny warnings"; });
       };

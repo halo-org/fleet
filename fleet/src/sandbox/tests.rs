@@ -18,35 +18,41 @@ fn directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("sandbox")
 }
 
+/// Returns the plugin directory from `FLEET_TEST_WASM`, or builds the plugins if that is unset.
 fn plugins() -> &'static Path {
     static PLUGINS: OnceLock<PathBuf> = OnceLock::new();
     PLUGINS.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let target = root.join("target/sandbox-fixture");
-        let output = Command::new(env!("CARGO"))
-            .current_dir(root)
-            .args(["build", "--offline", "--locked", "--target"])
-            .args([
-                "wasm32-unknown-unknown",
-                "--config",
-                "profile.dev.opt-level=1",
-            ])
-            .args(["-p", "fleet-plugin-agents", "-p", "fleet-plugin-roles"])
-            .args(["-p", "fleet-plugin-sandbox", "-p", "fleet-plugin-tools"])
-            .arg("--target-dir")
-            .arg(&target)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        target.join("wasm32-unknown-unknown/debug")
+        std::env::var_os("FLEET_TEST_WASM")
+            .map_or_else(build, |directory| std::path::absolute(directory).unwrap())
     })
 }
 
-/// Loads the example config with plugins from the fixture build.
+fn build() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let target = root.join("target/sandbox-fixture");
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args(["build", "--offline", "--locked", "--target"])
+        .args([
+            "wasm32-unknown-unknown",
+            "--config",
+            "profile.dev.opt-level=1",
+        ])
+        .args(["-p", "fleet-plugin-agents", "-p", "fleet-plugin-roles"])
+        .args(["-p", "fleet-plugin-sandbox", "-p", "fleet-plugin-tools"])
+        .arg("--target-dir")
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    target.join("wasm32-unknown-unknown/debug")
+}
+
+/// Loads the example config with the fixture plugins.
 fn config() -> Config {
     let mut config: Value =
         serde_json::from_slice(&fs::read(directory().join("config.json")).unwrap()).unwrap();
