@@ -77,7 +77,7 @@ impl Guest for Tools {
             },
             Err(Error::Blobs(error)) => Err(ToolsError {
                 kind: ToolsErrorKind::Other,
-                message: format!("failed to store image: {}", error.message),
+                message: format!("failed to access blob: {}", error.message),
             }),
         }
     }
