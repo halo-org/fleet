@@ -162,7 +162,7 @@ mod tests {
         futures_executor::block_on(async {
             store.create_agent("create", &agent, None).await.unwrap();
             store
-                .interrupt_agent("interrupt", agent.id, None)
+                .interrupt_agent("interrupt", agent.id, true, None)
                 .await
                 .unwrap();
             let wake = store.listeners().listen(Topic::Wakes);

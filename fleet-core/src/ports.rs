@@ -334,7 +334,8 @@ pub trait RuntimeStore {
     ///   - there is no agent with the provided ID.
     ///   - the event log's latest event doesn't match `expected_latest_event`.
     ///   - the agent has no interrupt intent.
-    ///   - the provided results do not correspond exactly to the unresolved tool calls.
+    ///   - the provided results do not correspond exactly to the unresolved synchronous tool calls
+    ///     and those with interrupt intents.
     /// - [`Other`](RuntimeStoreErrorKind::Other) when there are any other provider specific errors.
     fn settle_interrupt(
         &self,
@@ -504,6 +505,7 @@ pub trait RuntimeStore {
     /// Appends a tool result to the agent's event log.
     ///
     /// The first committed result for a tool call wins. Existing results are never replaced.
+    /// Committing a result clears the call's interrupt intent.
     ///
     /// # Errors
     ///
@@ -570,6 +572,11 @@ pub trait ClientStore {
     /// atomically. Existing pending messages are preserved. Pending messages are consumed after the
     /// runtime settles the interrupt.
     ///
+    /// Synchronous tool calls are interrupted with the turn. When `include_async_tool_calls` is
+    /// true, so are async tool calls that are unresolved when the interrupt settles, including
+    /// those added after this call. Otherwise they continue. An interrupt that excludes async tool
+    /// calls does not withdraw a pending one that includes them or any tool call interrupt intents.
+    ///
     /// # Errors
     ///
     /// Returns errors with the following error kinds:
@@ -584,7 +591,32 @@ pub trait ClientStore {
         &self,
         idempotency_key: &str,
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<&Message>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Interrupts tool calls without interrupting the agent.
+    ///
+    /// Sets interrupt intents on the provided tool calls. Calls that are already resolved are
+    /// ignored. Unless another result is committed first, a call's interrupted output becomes its
+    /// result. The agent continues as it would after any other tool result, and in-flight model
+    /// requests are not aborted.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Conflict`](ClientStoreErrorKind::Conflict) when a call ID does not identify a tool call
+    ///   of the agent.
+    /// - [`IdempotencyConflict`](ClientStoreErrorKind::IdempotencyConflict) when the key was used
+    ///   with a different method or arguments.
+    /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the agent does not exist.
+    /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
+    fn interrupt_tool_calls(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
+        call_ids: &[ToolCallId],
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Sends a message to an agent.
@@ -934,9 +966,24 @@ macro_rules! impl_client_store_for_pointer {
                 &self,
                 idempotency_key: &str,
                 agent_id: AgentId,
+                include_async_tool_calls: bool,
                 message: Option<&Message>,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-                (**self).interrupt_agent(idempotency_key, agent_id, message)
+                (**self).interrupt_agent(
+                    idempotency_key,
+                    agent_id,
+                    include_async_tool_calls,
+                    message,
+                )
+            }
+
+            fn interrupt_tool_calls(
+                &self,
+                idempotency_key: &str,
+                agent_id: AgentId,
+                call_ids: &[ToolCallId],
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).interrupt_tool_calls(idempotency_key, agent_id, call_ids)
             }
 
             fn send_message(

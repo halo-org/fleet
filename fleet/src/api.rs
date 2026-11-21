@@ -4,8 +4,8 @@ use crate::api_types::{
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
     ApiRoleDefinition, ApiToolCallRecord, CreateAgentRequest, ErrorChain, ErrorDetails,
-    ErrorResponse, EventsQuery, Fleet, FleetError, InterruptAgentRequest, RoleDefinition,
-    SinceQuery,
+    ErrorResponse, EventsQuery, Fleet, FleetError, InterruptAgentRequest,
+    InterruptToolCallsRequest, RoleDefinition, SinceQuery,
 };
 use core::{convert::Infallible, error::Error, fmt, str::FromStr};
 use fleet_core::{AgentId, ClientStoreErrorKind, Error as _};
@@ -47,6 +47,7 @@ where
 
 #[expect(
     clippy::too_many_lines,
+    clippy::cognitive_complexity,
     reason = "routes each API request in one place"
 )]
 async fn route<B>(fleet: &Fleet, request: Request<B>) -> Result<Response<ResponseBody>, ApiError>
@@ -112,6 +113,9 @@ where
         (&Method::POST, ["", "agents", agent_id, "interrupts"]) => {
             interrupt_agent(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
+        (&Method::POST, ["", "agents", agent_id, "tool-calls", "interrupts"]) => {
+            interrupt_tool_calls(fleet, parse_id(agent_id)?, &parts.headers, body).await
+        }
         (&Method::GET, ["", "agents", agent_id]) => {
             agent(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
@@ -146,7 +150,9 @@ where
         (_, ["", "agents"] | ["", "agents", _, "messages"]) => {
             Err(ApiError::MethodNotAllowed("GET, POST"))
         }
-        (_, ["", "agents", _, "interrupts"]) => Err(ApiError::MethodNotAllowed("POST")),
+        (_, ["", "agents", _, "interrupts"] | ["", "agents", _, "tool-calls", "interrupts"]) => {
+            Err(ApiError::MethodNotAllowed("POST"))
+        }
         (
             _,
             ["", "agents", _]
@@ -436,7 +442,37 @@ where
     let request: InterruptAgentRequest = read_json(headers, body).await?;
 
     fleet
-        .interrupt_agent(idempotency_key, agent_id, request.message.map(Into::into))
+        .interrupt_agent(
+            idempotency_key,
+            agent_id,
+            request.include_async_tool_calls,
+            request.message.map(Into::into),
+        )
+        .await
+        .map_err(ApiError::Fleet)?;
+
+    Ok(empty_response(StatusCode::ACCEPTED))
+}
+
+async fn interrupt_tool_calls<B>(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    let idempotency_key = idempotency_key(headers)?;
+    let request: InterruptToolCallsRequest = read_json(headers, body).await?;
+
+    fleet
+        .interrupt_tool_calls(
+            idempotency_key,
+            agent_id,
+            request.call_ids.into_iter().map(Into::into).collect(),
+        )
         .await
         .map_err(ApiError::Fleet)?;
 

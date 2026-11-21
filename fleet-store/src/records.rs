@@ -1,6 +1,7 @@
 use crate::{StoreError, data};
 use redb::{ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeSet;
 
 pub const RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("records");
 pub const AGENT: u8 = 1;
@@ -24,6 +25,10 @@ pub struct AgentRecord {
     pub latest_event: Option<u128>,
     pub parked_at: Option<u128>,
     pub interrupt_intent: bool,
+    #[serde(default = "legacy_interrupt_includes_async_tool_calls")]
+    pub interrupt_includes_async_tool_calls: bool,
+    #[serde(default)]
+    pub tool_call_interrupt_intents: BTreeSet<String>,
     pub revision: u128,
     #[serde(default = "initial_metadata_revision")]
     pub metadata_revision: u128,
@@ -37,6 +42,10 @@ pub struct AgentRecord {
 
 pub const fn initial_metadata_revision() -> u128 {
     1
+}
+
+pub const fn legacy_interrupt_includes_async_tool_calls() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,7 +85,12 @@ pub struct Change {
 pub enum Request {
     CreateAgent(data::Agent, Option<data::Message>),
     SendMessage(u128, data::Message),
-    InterruptAgent(u128, Option<data::Message>),
+    InterruptAgent(
+        u128,
+        Option<data::Message>,
+        #[serde(default = "legacy_interrupt_includes_async_tool_calls")] bool,
+    ),
+    InterruptToolCalls(u128, Vec<String>),
     SetTitle {
         id: u128,
         expected: u128,

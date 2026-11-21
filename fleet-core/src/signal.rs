@@ -49,15 +49,6 @@ pub enum Signal {
     Stop,
 }
 
-/// A priority signal for a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PrioritySignal {
-    /// The task should cancel ongoing work and check for new work.
-    Recheck,
-    /// The task should cancel ongoing work and shut down.
-    Stop,
-}
-
 impl SignalSender {
     /// Sends a signal.
     pub fn send(&self, signal: Signal) {
@@ -87,15 +78,6 @@ impl SignalReceiver {
         })
     }
 
-    /// Waits for the next priority signal.
-    pub fn priority_signal(&mut self) -> impl Future<Output = PrioritySignal> {
-        future::poll_fn(|cx| {
-            self.state.waker.register(cx.waker());
-            self.take_priority_signal()
-                .map_or(Poll::Pending, Poll::Ready)
-        })
-    }
-
     /// Consumes any existing signal without waiting.
     pub fn take_signal(&mut self) -> Option<Signal> {
         match self.state.pending.swap(0, Ordering::AcqRel) {
@@ -103,16 +85,6 @@ impl SignalReceiver {
             1 => Some(Signal::Check),
             2 => Some(Signal::Recheck),
             4 => Some(Signal::Stop),
-            _ => unreachable!("pending is never set to any other value"),
-        }
-    }
-
-    /// Consumes any existing priority signal without waiting.
-    fn take_priority_signal(&mut self) -> Option<PrioritySignal> {
-        match self.state.pending.fetch_and(1, Ordering::AcqRel) {
-            0 | 1 => None,
-            2 => Some(PrioritySignal::Recheck),
-            4 => Some(PrioritySignal::Stop),
             _ => unreachable!("pending is never set to any other value"),
         }
     }
@@ -157,21 +129,6 @@ mod tests {
     }
 
     #[test]
-    fn take_priority_signal_returns_none_when_empty() {
-        let (_, mut receiver) = signal_channel();
-        assert_eq!(receiver.take_priority_signal(), None);
-    }
-
-    #[test]
-    fn take_priority_signal_preserves_check() {
-        let (sender, mut receiver) = signal_channel();
-
-        sender.send(Signal::Check);
-        assert_eq!(receiver.take_priority_signal(), None);
-        assert_eq!(receiver.take_signal(), Some(Signal::Check));
-    }
-
-    #[test]
     fn take_signal_returns_and_clears_pending_signal() {
         let signals = [Signal::Check, Signal::Recheck, Signal::Stop];
 
@@ -181,27 +138,6 @@ mod tests {
             sender.send(signal);
             assert_eq!(receiver.take_signal(), Some(signal));
             assert_eq!(receiver.take_signal(), None);
-        }
-    }
-
-    #[test]
-    fn take_priority_signal_returns_and_clears_pending_signal() {
-        let signals = [
-            (Signal::Check, None),
-            (Signal::Recheck, Some(PrioritySignal::Recheck)),
-            (Signal::Stop, Some(PrioritySignal::Stop)),
-        ];
-
-        for (signal, expected) in signals {
-            let (sender, mut receiver) = signal_channel();
-
-            sender.send(signal);
-            assert_eq!(
-                receiver.take_priority_signal(),
-                expected,
-                "signal: {signal:?}",
-            );
-            assert_eq!(receiver.take_priority_signal(), None, "signal: {signal:?}");
         }
     }
 
@@ -251,25 +187,5 @@ mod tests {
         sender.send(Signal::Stop);
         wake.assert_wake_count(1);
         assert_eq!(future.poll_unpin(&mut cx), Poll::Ready(Signal::Stop));
-    }
-
-    #[test]
-    fn send_wakes_priority_signal_waiter() {
-        let wake = Arc::new(CountingWake::new());
-        let waker = futures_util::task::waker_ref(&wake);
-        let mut cx = Context::from_waker(&waker);
-
-        let (sender, mut receiver) = signal_channel();
-        let mut future = receiver.priority_signal();
-
-        assert_eq!(future.poll_unpin(&mut cx), Poll::Pending);
-        wake.assert_wake_count(0);
-
-        sender.send(Signal::Stop);
-        wake.assert_wake_count(1);
-        assert_eq!(
-            future.poll_unpin(&mut cx),
-            Poll::Ready(PrioritySignal::Stop),
-        );
     }
 }

@@ -116,8 +116,19 @@ pub struct SetPinnedRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterruptAgentRequest {
+    /// Whether to interrupt async tool calls as well as the turn.
+    #[serde(default = "default_include_async_tool_calls")]
+    pub include_async_tool_calls: bool,
     /// A message to send with the interrupt.
     pub message: Option<ApiMessage>,
+}
+
+/// A request to interrupt tool calls without interrupting the agent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptToolCallsRequest {
+    /// The IDs of the tool calls to interrupt.
+    pub call_ids: Vec<String>,
 }
 
 /// A query for changes after a revision.
@@ -1486,6 +1497,10 @@ const fn default_event_limit() -> NonZeroUsize {
     NonZeroUsize::new(100).expect("limit is positive")
 }
 
+const fn default_include_async_tool_calls() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1536,6 +1551,7 @@ mod tests {
 
         assert!(request.parameters.is_empty());
         assert!(request.message.is_none());
+        assert!(interrupt.include_async_tool_calls);
         assert!(interrupt.message.is_none());
     }
 

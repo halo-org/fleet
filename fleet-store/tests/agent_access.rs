@@ -213,7 +213,10 @@ fn closure_withdraws_input_and_fences_late_nested_work() {
         let pending = nested.send("queued", grandchild, &[]).await.unwrap();
 
         let revision = store.messages(grandchild, None).await.unwrap().revision;
-        store.interrupt_agent("stop", 1.into(), None).await.unwrap();
+        store
+            .interrupt_agent("stop", 1.into(), true, None)
+            .await
+            .unwrap();
         let error = nested
             .create("late", &role(), &JsonObject::new())
             .await
@@ -230,6 +233,34 @@ fn closure_withdraws_input_and_fences_late_nested_work() {
         assert_eq!(messages.value, [MessageRecord::Deleted(pending)]);
         assert_matches!(error, StoreError::MessageNotFound);
         assert_eq!(state.parked_at, state.latest_event);
+    });
+}
+
+#[test]
+fn interrupts_close_scopes_of_interrupted_calls() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        root(&store).await;
+        let access = store.agent_access(1.into()).for_call("drive".into());
+
+        store
+            .interrupt_agent("stop turn", 1.into(), false, None)
+            .await
+            .unwrap();
+        access
+            .create("child", &role(), &JsonObject::new())
+            .await
+            .unwrap();
+
+        store
+            .interrupt_tool_calls("stop call", 1.into(), &["drive".into()])
+            .await
+            .unwrap();
+        let error = access
+            .create("late", &role(), &JsonObject::new())
+            .await
+            .unwrap_err();
+        assert_matches!(error, StoreError::ScopeClosed);
     });
 }
 
@@ -348,7 +379,7 @@ fn waiting_skips_unsolicited_turns_and_preserves_interruptions() {
             .await
             .unwrap();
         store
-            .interrupt_agent("interrupt", child, None)
+            .interrupt_agent("interrupt", child, true, None)
             .await
             .unwrap();
         let state = store.agent_state(child).await.unwrap().unwrap();
@@ -494,7 +525,7 @@ fn calls_can_use_images_held_by_their_agents() {
         assert_eq!(bytes, image);
 
         store
-            .interrupt_agent("interrupt", 1.into(), None)
+            .interrupt_agent("interrupt", 1.into(), true, None)
             .await
             .unwrap();
         store.reconcile_agent_scopes().await.unwrap();
