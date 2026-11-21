@@ -4,10 +4,10 @@
 )]
 
 use crate::{
-    Agent, AgentId, Backoff, Compaction, Error as _, ErrorHandler, Event, EventCursor, EventLog,
-    EventPayload, IdleHandler, Model, ModelCompactionResponse, ModelContext, ModelContinuation,
-    ModelInput, ModelOutput, ModelRequest, ModelResponse, ModelResponseChunk, ModelTool, Models,
-    OperationError, ParametersError, PrioritySignal, Role, RoleInstance, Roles, RuntimeError,
+    Agent, AgentId, AgentState, Backoff, Compaction, Error as _, ErrorHandler, Event, EventCursor,
+    EventLog, EventPayload, IdleHandler, Model, ModelCompactionResponse, ModelContext,
+    ModelContinuation, ModelInput, ModelOutput, ModelRequest, ModelResponse, ModelResponseChunk,
+    ModelTool, Models, OperationError, ParametersError, Role, RoleInstance, Roles, RuntimeError,
     RuntimeStore, RuntimeStoreErrorKind, Signal, SignalReceiver, SignalSender, ToolCall,
     ToolCallId, ToolContext, ToolResult, Tools, ToolsErrorKind, Wake,
 };
@@ -16,13 +16,10 @@ use alloc::{
     collections::{BTreeMap, BTreeSet, btree_map},
     vec::Vec,
 };
-use core::{
-    mem,
-    pin::{Pin, pin},
-};
+use core::pin::{Pin, pin};
 use futures_util::{
     FutureExt as _, Stream, StreamExt as _, TryStreamExt as _,
-    future::{self, Either},
+    future::{self, AbortHandle, AbortRegistration, Abortable, Aborted, Either, Fuse},
     stream::{self, FuturesUnordered},
 };
 
@@ -67,9 +64,14 @@ struct Runtime<I, E, S, R, M, T> {
 
 struct ReconcileState {
     cursor: Option<EventCursor>,
-    tool_calls: BTreeMap<ToolCallId, ToolCall>,
-    tool_calls_to_start: BTreeSet<ToolCallId>,
+    tool_calls: BTreeMap<ToolCallId, ToolCallTask>,
     tool_results: BTreeMap<ToolCallId, ToolResult>,
+}
+
+struct ToolCallTask {
+    call: ToolCall,
+    abort_handle: AbortHandle,
+    registration: Option<AbortRegistration>,
 }
 
 enum ReconcileAction {
@@ -235,14 +237,16 @@ where
 
         loop {
             let mut tool_results = Vec::<ToolResult>::new();
+            let mut received_check = false;
 
             let action = {
                 let mut step = pin!(self.reconcile_step(agent_id, &state));
+                let mut abort = pin!(Fuse::terminated());
 
                 loop {
                     let next_event = async {
                         let tool_result = tool_call_futures.next();
-                        let signal = receiver.priority_signal();
+                        let signal = receiver.signal();
 
                         match future::select(tool_result, signal).await {
                             Either::Left((Some(tool_result), _)) => Either::Left(tool_result),
@@ -251,26 +255,31 @@ where
                         }
                     };
 
-                    match future::select(step.as_mut(), pin!(next_event)).await {
-                        Either::Left((action, _)) => break action,
-                        Either::Right((Either::Left(Outcome::Completed(tool_result)), _)) => {
+                    let step_or_abort = future::select(step.as_mut(), abort.as_mut());
+
+                    let event = match future::select(step_or_abort, pin!(next_event)).await {
+                        Either::Left((Either::Left((action, _)), _)) => break action,
+                        Either::Left((Either::Right(((), _)), _)) => continue,
+                        Either::Right((event, _)) => event,
+                    };
+
+                    match event {
+                        Either::Left(Outcome::Completed(tool_result)) => {
                             tool_results.push(tool_result);
                         }
-                        Either::Right((
-                            Either::Left(Outcome::Obsolete)
-                            | Either::Right(PrioritySignal::Recheck),
-                            _,
-                        )) => {
+                        Either::Left(Outcome::Obsolete) | Either::Right(Signal::Recheck) => {
                             break ReconcileAction::Continue;
                         }
-                        Either::Right((Either::Right(PrioritySignal::Stop), _)) => {
-                            break ReconcileAction::Stop;
+                        Either::Right(Signal::Check) => {
+                            received_check = true;
+                            abort.set(self.abort_interrupted_tool_calls(agent_id, &state).fuse());
                         }
+                        Either::Right(Signal::Stop) => break ReconcileAction::Stop,
                     }
                 }
             };
 
-            let step_is_stale = !tool_results.is_empty();
+            let step_is_stale = received_check || !tool_results.is_empty();
 
             for tool_result in tool_results {
                 state.record_tool_result(tool_result);
@@ -284,7 +293,6 @@ where
                 } => {
                     for tool_call_id in completed_tool_calls {
                         state.tool_calls.remove(&tool_call_id);
-                        state.tool_calls_to_start.remove(&tool_call_id);
                         state.tool_results.remove(&tool_call_id);
                     }
 
@@ -293,24 +301,23 @@ where
                     }
 
                     for tool_call in pending_tool_calls {
-                        if let btree_map::Entry::Vacant(entry) =
-                            state.tool_calls.entry(tool_call.id.clone())
-                        {
-                            state.tool_calls_to_start.insert(tool_call.id.clone());
-                            entry.insert(tool_call);
-                        }
+                        state
+                            .tool_calls
+                            .entry(tool_call.id.clone())
+                            .or_insert_with(|| ToolCallTask::new(tool_call));
                     }
 
                     state.cursor = Some(cursor);
                 }
                 ReconcileAction::StartToolCalls => {
-                    for tool_call_id in mem::take(&mut state.tool_calls_to_start) {
-                        let tool_call = state
-                            .tool_calls
-                            .get(&tool_call_id)
-                            .expect("call is awaiting execution")
-                            .clone();
-                        tool_call_futures.push(self.execute_tool_call(agent_id, tool_call));
+                    for task in state.tool_calls.values_mut() {
+                        if let Some(registration) = task.registration.take() {
+                            tool_call_futures.push(self.execute_interruptible_tool_call(
+                                agent_id,
+                                task.call.clone(),
+                                registration,
+                            ));
+                        }
                     }
                 }
                 ReconcileAction::Continue => {}
@@ -359,9 +366,13 @@ where
                 .await;
         }
 
+        for task in state.interrupted_tool_calls(&agent) {
+            task.abort_handle.abort();
+        }
+
         if agent.interrupt_intent {
             return self
-                .reconcile_interrupt_intent(agent_id, state, agent.latest_event)
+                .reconcile_interrupt_intent(agent_id, state, &agent)
                 .await;
         }
 
@@ -369,11 +380,15 @@ where
             return self.reconcile_tool_results(agent_id, state).await;
         }
 
-        if !state.tool_calls_to_start.is_empty() {
+        if state
+            .tool_calls
+            .values()
+            .any(|task| task.registration.is_some())
+        {
             return ReconcileAction::StartToolCalls;
         }
 
-        if state.tool_calls.values().any(|call| !call.is_async) {
+        if state.tool_calls.values().any(|task| !task.call.is_async) {
             return ReconcileAction::Wait;
         }
 
@@ -463,18 +478,32 @@ where
         &self,
         agent_id: AgentId,
         state: &ReconcileState,
-        latest_event: Option<EventCursor>,
+        agent: &AgentState,
     ) -> ReconcileAction {
-        self.retry(agent_id, async || {
-            let Outcome::Completed(tool_results) =
-                self.interrupted_tool_results(agent_id, state).await?
-            else {
-                return Ok(ReconcileAction::Stop);
-            };
+        let mut tool_results = Vec::new();
+        let mut is_ready = true;
 
+        for task in state.interrupted_tool_calls(agent) {
+            if task.registration.is_some() {
+                return ReconcileAction::StartToolCalls;
+            }
+
+            match state.tool_results.get(&task.call.id) {
+                Some(tool_result) => tool_results.push(tool_result),
+                None => is_ready = false,
+            }
+        }
+
+        if !is_ready {
+            return ReconcileAction::Wait;
+        }
+
+        let tool_results = tool_results.into_iter().cloned().collect::<Vec<_>>();
+
+        self.retry(agent_id, async || {
             let result = self
                 .store
-                .settle_interrupt(agent_id, latest_event, &tool_results)
+                .settle_interrupt(agent_id, agent.latest_event, &tool_results)
                 .await;
 
             match result {
@@ -625,6 +654,23 @@ where
 
     // === Tools ===
 
+    async fn execute_interruptible_tool_call(
+        &self,
+        agent_id: AgentId,
+        tool_call: ToolCall,
+        registration: AbortRegistration,
+    ) -> Outcome<ToolResult> {
+        let execution = Abortable::new(
+            self.execute_tool_call(agent_id, tool_call.clone()),
+            registration,
+        );
+
+        match execution.await {
+            Ok(outcome) => outcome,
+            Err(Aborted) => self.interrupt_tool_call(agent_id, tool_call).await,
+        }
+    }
+
     async fn execute_tool_call(
         &self,
         agent_id: AgentId,
@@ -705,29 +751,17 @@ where
         .await
     }
 
-    async fn interrupted_tool_results(
+    async fn interrupt_tool_call(
         &self,
         agent_id: AgentId,
-        state: &ReconcileState,
-    ) -> Result<Outcome<Vec<ToolResult>>, OperationError<S::Error, R::Error, M::Error, T::Error>>
-    {
-        if state.tool_calls.is_empty() {
-            return Ok(Outcome::Completed(Vec::new()));
-        }
+        tool_call: ToolCall,
+    ) -> Outcome<ToolResult> {
+        self.retry(agent_id, async || {
+            let Outcome::Completed(agent_role) = self.agent_role(agent_id).await? else {
+                return Ok(Outcome::Obsolete);
+            };
 
-        let Outcome::Completed(agent_role) = self.agent_role(agent_id).await? else {
-            return Ok(Outcome::Obsolete);
-        };
-
-        let mut results = Vec::new();
-
-        for call in state.tool_calls.values() {
-            if let Some(result) = state.tool_results.get(&call.id) {
-                results.push(result.clone());
-                continue;
-            }
-
-            let context = agent_role.tool_context(call).map_err(|source| {
+            let context = agent_role.tool_context(&tool_call).map_err(|source| {
                 OperationError::ApplyToolParameters {
                     role: agent_role.agent.role.name.clone(),
                     source,
@@ -736,31 +770,47 @@ where
 
             let output = if let Some(context) = context {
                 self.tools
-                    .interrupted_output(&context, &call.input)
+                    .interrupted_output(&context, &tool_call.input)
                     .await
                     .map_err(|source| OperationError::ProduceInterruptedToolOutput {
                         tool: context.tool.name.clone(),
-                        call_id: call.id.clone(),
+                        call_id: tool_call.id.clone(),
                         source,
                     })?
             } else {
                 self.tools
-                    .unknown_tool_output(agent_id, call)
+                    .unknown_tool_output(agent_id, &tool_call)
                     .await
                     .map_err(|source| OperationError::ProduceUnknownToolOutput {
-                        alias: call.tool.clone(),
-                        call_id: call.id.clone(),
+                        alias: tool_call.tool.clone(),
+                        call_id: tool_call.id.clone(),
                         source,
                     })?
             };
 
-            results.push(ToolResult {
-                call_id: call.id.clone(),
+            Ok(Outcome::Completed(ToolResult {
+                call_id: tool_call.id.clone(),
                 output,
-            });
-        }
+            }))
+        })
+        .await
+    }
 
-        Ok(Outcome::Completed(results))
+    async fn abort_interrupted_tool_calls(&self, agent_id: AgentId, state: &ReconcileState) {
+        let agent = self
+            .retry(agent_id, async || {
+                self.store
+                    .agent_state(agent_id)
+                    .await
+                    .map_err(OperationError::LoadAgentState)
+            })
+            .await;
+
+        if let Some(agent) = agent {
+            for task in state.interrupted_tool_calls(&agent) {
+                task.abort_handle.abort();
+            }
+        }
     }
 
     // === Model ===
@@ -952,7 +1002,11 @@ where
                 let compaction = Compaction {
                     last_event: latest_event,
                     input: response.input,
-                    pending_tool_calls: state.tool_calls.values().cloned().collect(),
+                    pending_tool_calls: state
+                        .tool_calls
+                        .values()
+                        .map(|task| task.call.clone())
+                        .collect(),
                     usage: response.usage,
                 };
 
@@ -1192,7 +1246,6 @@ impl ReconcileState {
         Self {
             cursor: idle_cursor,
             tool_calls: BTreeMap::new(),
-            tool_calls_to_start: BTreeSet::new(),
             tool_results: BTreeMap::new(),
         }
     }
@@ -1201,11 +1254,33 @@ impl ReconcileState {
         self.cursor.is_none_or(|c| c < cursor)
     }
 
+    fn interrupted_tool_calls<'a>(
+        &'a self,
+        agent: &'a AgentState,
+    ) -> impl Iterator<Item = &'a ToolCallTask> {
+        self.tool_calls.values().filter(|task| {
+            agent.tool_call_interrupt_intents.contains(&task.call.id)
+                || (agent.interrupt_intent && !task.call.is_async)
+        })
+    }
+
     fn record_tool_result(&mut self, result: ToolResult) {
         if self.tool_calls.contains_key(&result.call_id) {
             self.tool_results
                 .entry(result.call_id.clone())
                 .or_insert(result);
+        }
+    }
+}
+
+impl ToolCallTask {
+    fn new(call: ToolCall) -> Self {
+        let (abort_handle, registration) = AbortHandle::new_pair();
+
+        Self {
+            call,
+            abort_handle,
+            registration: Some(registration),
         }
     }
 }

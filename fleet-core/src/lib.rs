@@ -24,7 +24,7 @@ pub(crate) use self::{
     operation_error::OperationError,
     parameters::{apply_extension_parameters, apply_model_parameters, apply_tool_parameters},
     runtime_error::RuntimeError,
-    signal::{PrioritySignal, Signal, SignalReceiver, SignalSender, signal_channel},
+    signal::{Signal, SignalReceiver, SignalSender, signal_channel},
 };
 pub use self::{
     error::Error,

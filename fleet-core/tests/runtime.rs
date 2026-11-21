@@ -4,7 +4,7 @@ use core::assert_matches;
 use fleet_core::{
     Agent, ClientStore as _, ClientStoreErrorKind, Configured, ContentBlock, Error as _,
     EventPayload, JsonObject, Message, MessageMode, ModelOutput, ModelProvenance, ModelResponse,
-    ModelUsage, RoleName, RuntimeStore as _, TurnEnd,
+    ModelUsage, RoleName, RuntimeStore as _, ToolCall, TurnEnd,
 };
 use fleet_simulator::{Scheduler, Simulator};
 use std::collections::{BTreeMap, BTreeSet};
@@ -213,7 +213,7 @@ fn run_defers_compaction_after_an_interrupt_until_a_message_arrives() {
                 .unwrap();
             simulator
                 .store
-                .interrupt_agent("interrupt", agent.id, None)
+                .interrupt_agent("interrupt", agent.id, true, None)
                 .await
                 .unwrap();
 
@@ -249,5 +249,75 @@ fn run_defers_compaction_after_an_interrupt_until_a_message_arrives() {
             EventPayload::Input(next_message.id, next_message.content)
         );
         assert_eq!(snapshot.pending_messages, []);
+    }
+}
+
+#[test]
+fn run_interrupts_a_turn_without_its_async_tool_calls() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let store = simulator.store.partition(partition);
+        let agent = agent(simulator.roles.role_names()[0].clone());
+        let tool_call = |id: &str, is_async| {
+            ModelOutput::ToolCall(ToolCall {
+                id: id.into(),
+                tool: "missing".into(),
+                is_async,
+                input: JsonObject::new(),
+            })
+        };
+        let response = ModelResponse {
+            output: vec![tool_call("sync", false), tool_call("async", true)],
+            usage: ModelUsage {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            provenance: ModelProvenance {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            continuation_token: None,
+        };
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&message(0, MessageMode::Queue)))
+                .await
+                .unwrap();
+            store.consume_messages(agent.id, None, true).await.unwrap();
+            store
+                .append_model_response(agent.id, 0.into(), false, &response)
+                .await
+                .unwrap();
+            simulator
+                .store
+                .interrupt_agent("interrupt", agent.id, false, None)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_matches!(
+            &snapshot.events[2].payload,
+            EventPayload::ToolResult(result) if result.call_id == "sync".into()
+        );
+        assert_eq!(
+            snapshot.events[3].payload,
+            EventPayload::TurnEnd(TurnEnd::Interrupted)
+        );
+        assert_matches!(
+            &snapshot.events[4].payload,
+            EventPayload::ToolResult(result) if result.call_id == "async".into()
+        );
     }
 }

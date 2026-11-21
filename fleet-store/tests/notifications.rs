@@ -119,7 +119,7 @@ fn turns_with_later_work_do_not_notify() {
             .await
             .unwrap();
         store
-            .interrupt_agent("interrupt", agent, None)
+            .interrupt_agent("interrupt", agent, true, None)
             .await
             .unwrap();
         store

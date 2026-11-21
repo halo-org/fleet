@@ -47,6 +47,7 @@ pub fn apply(
         Request::CreateAgent(..)
         | Request::SendMessage(..)
         | Request::InterruptAgent(..)
+        | Request::InterruptToolCalls(..)
         | Request::SetTitle { .. }
         | Request::SetPinned { .. }
         | Request::SetInbox { .. } => return Ok(false),
