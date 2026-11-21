@@ -66,8 +66,12 @@ pub struct AgentMetadata {
 pub struct AgentActivity {
     /// Whether a turn is in progress.
     pub turn: TurnStatus,
-    /// Whether an interrupt is pending.
+    /// Whether an agent-wide interrupt is pending.
     pub interrupt_pending: bool,
+    /// Whether the pending interrupt includes async tool calls.
+    ///
+    /// Synchronous tool calls are always included. This is false when no interrupt is pending.
+    pub interrupt_includes_async_tool_calls: bool,
 }
 
 /// A turn's current status.
@@ -111,6 +115,10 @@ pub enum ToolCallRecord {
         tool: ToolAlias,
         /// Whether the agent can continue before the call completes.
         is_async: bool,
+        /// Whether an interrupt is pending for this tool call alone.
+        ///
+        /// Interrupts of the agent are reported by its [`AgentActivity`].
+        interrupt_pending: bool,
     },
     /// A tool call with a committed result.
     Resolved(ToolCallId),

@@ -116,8 +116,19 @@ pub struct SetPinnedRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterruptAgentRequest {
+    /// Whether to interrupt async tool calls as well as the turn.
+    #[serde(default = "default_include_async_tool_calls")]
+    pub include_async_tool_calls: bool,
     /// A message to send with the interrupt.
     pub message: Option<ApiMessage>,
+}
+
+/// A request to interrupt tool calls without interrupting the agent.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptToolCallsRequest {
+    /// The IDs of the tool calls to interrupt.
+    pub call_ids: Vec<String>,
 }
 
 /// A query for changes after a revision.
@@ -439,8 +450,10 @@ pub struct ApiAgent {
 pub struct ApiAgentActivity {
     /// Whether a turn is in progress.
     pub turn: ApiTurnStatus,
-    /// Whether an interrupt is pending.
+    /// Whether an agent-wide interrupt is pending.
     pub interrupt_pending: bool,
+    /// Whether the pending interrupt includes async tool calls.
+    pub interrupt_includes_async_tool_calls: bool,
 }
 
 /// A turn's current status.
@@ -686,6 +699,8 @@ pub enum ApiToolCallRecord {
         tool: String,
         /// Whether the agent can continue before the call completes.
         is_async: bool,
+        /// Whether an interrupt is pending for this tool call alone.
+        interrupt_pending: bool,
     },
     /// A tool call with a committed result.
     Resolved {
@@ -1141,10 +1156,16 @@ impl From<ModelProvenance> for ApiModelProvenance {
 impl From<ToolCallRecord> for ApiToolCallRecord {
     fn from(record: ToolCallRecord) -> Self {
         match record {
-            ToolCallRecord::Pending { id, tool, is_async } => Self::Pending {
+            ToolCallRecord::Pending {
+                id,
+                tool,
+                is_async,
+                interrupt_pending,
+            } => Self::Pending {
                 id: id.into(),
                 tool: tool.into(),
                 is_async,
+                interrupt_pending,
             },
             ToolCallRecord::Resolved(id) => Self::Resolved { id: id.into() },
         }
@@ -1365,6 +1386,7 @@ impl From<AgentActivity> for ApiAgentActivity {
                 TurnStatus::Idle => ApiTurnStatus::Idle,
             },
             interrupt_pending: activity.interrupt_pending,
+            interrupt_includes_async_tool_calls: activity.interrupt_includes_async_tool_calls,
         }
     }
 }
@@ -1486,6 +1508,10 @@ const fn default_event_limit() -> NonZeroUsize {
     NonZeroUsize::new(100).expect("limit is positive")
 }
 
+const fn default_include_async_tool_calls() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1536,6 +1562,7 @@ mod tests {
 
         assert!(request.parameters.is_empty());
         assert!(request.message.is_none());
+        assert!(interrupt.include_async_tool_calls);
         assert!(interrupt.message.is_none());
     }
 

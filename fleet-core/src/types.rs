@@ -1,4 +1,9 @@
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    vec::Vec,
+};
 use core::fmt;
 
 /// A JSON value.
@@ -25,7 +30,7 @@ pub struct Agent {
 pub struct AgentId(u128);
 
 /// The runtime state of an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentState {
     /// The cursor of latest event in the agent's event log.
     pub latest_event: Option<EventCursor>,
@@ -33,6 +38,11 @@ pub struct AgentState {
     pub parked_at: Option<EventCursor>,
     /// Whether the agent should be interrupted.
     pub interrupt_intent: bool,
+    /// The unresolved tool calls that should be interrupted.
+    ///
+    /// When the interrupt intent includes async tool calls, this contains every unresolved tool
+    /// call. Synchronous tool calls are interrupted with the turn even when they are not listed.
+    pub tool_call_interrupt_intents: BTreeSet<ToolCallId>,
     /// Whether the agent has pending messages.
     pub has_pending_messages: bool,
 }
@@ -577,8 +587,9 @@ pub enum Wake {
     Reconcile(AgentId),
     /// The agent got an interrupt.
     ///
-    /// Interrupts should complete all pending tool calls with an output informing the agent of what
-    /// happened. All in-flight model requests should also be aborted.
+    /// Interrupts should complete synchronous tool calls and those with interrupt intents with an
+    /// output informing the agent of what happened. All in-flight model requests should also be
+    /// aborted.
     ///
     /// When there are queued messages for the agent, it will become active again immediately after
     /// the interrupt in order to process them.

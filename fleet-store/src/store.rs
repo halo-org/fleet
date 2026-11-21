@@ -125,7 +125,7 @@ impl Store {
                         }
                         return Ok(());
                     }
-                    if let Request::SendMessage(id, _) | Request::InterruptAgent(id, Some(_)) =
+                    if let Request::SendMessage(id, _) | Request::InterruptAgent(id, Some(_), _) =
                         &request
                         && crate::metadata::agent_parent(&records.agent(*id)?.agent.extensions)
                             .is_some()
@@ -210,6 +210,7 @@ fn apply_collection_request(
         Request::CreateAgent(..)
         | Request::SendMessage(..)
         | Request::InterruptAgent(..)
+        | Request::InterruptToolCalls(..)
         | Request::PutRole { .. }
         | Request::DeleteRole { .. } => {
             return Ok(None);
@@ -222,7 +223,7 @@ pub fn apply_agent_request(
     records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
     request: &Request,
 ) -> Result<(AgentRecord, bool), StoreError> {
-    let (mut agent, message, interrupt, create) = match request {
+    let (mut agent, message, interrupt, include_async_tool_calls, create) = match request {
         Request::CreateAgent(agent, message) => {
             if records
                 .get::<AgentRecord>(&records::key(records::AGENT, agent.id, &[]))?
@@ -235,6 +236,8 @@ pub fn apply_agent_request(
                 latest_event: None,
                 parked_at: None,
                 interrupt_intent: false,
+                interrupt_includes_async_tool_calls: false,
+                tool_call_interrupt_intents: BTreeSet::new(),
                 revision: 1,
                 metadata_revision: records::initial_metadata_revision(),
                 activity_revision: 1,
@@ -244,11 +247,20 @@ pub fn apply_agent_request(
                 pending_tool_calls: 0,
                 synchronous_tool_calls: 0,
             };
-            (agent, message.as_ref(), false, true)
+            (agent, message.as_ref(), false, false, true)
         }
-        Request::SendMessage(id, message) => (records.agent(*id)?, Some(message), false, false),
-        Request::InterruptAgent(id, message) => {
-            (records.agent(*id)?, message.as_ref(), true, false)
+        Request::SendMessage(id, message) => {
+            (records.agent(*id)?, Some(message), false, false, false)
+        }
+        Request::InterruptAgent(id, message, include_async_tool_calls) => (
+            records.agent(*id)?,
+            message.as_ref(),
+            true,
+            *include_async_tool_calls,
+            false,
+        ),
+        Request::InterruptToolCalls(id, call_ids) => {
+            return interrupt_tool_calls(records, *id, call_ids);
         }
         Request::SetTitle { .. }
         | Request::SetPinned { .. }
@@ -259,6 +271,7 @@ pub fn apply_agent_request(
         }
     };
     let id = agent.agent.id;
+    let activity = agent.activity();
     if !create {
         agent.revision = agent
             .revision
@@ -272,19 +285,62 @@ pub fn apply_agent_request(
     if let Some(message) = message {
         records.push_message(&mut agent, message)?;
     }
-    if interrupt && !agent.interrupt_intent {
-        agent.interrupt_intent = true;
-        records.change(
-            id,
-            records::ACTIVITY,
-            &[],
-            Some(agent.activity_revision),
-            agent.revision,
-        )?;
-        agent.activity_revision = agent.revision;
+    if interrupt {
+        if !agent.interrupt_intent {
+            agent.interrupt_intent = true;
+            agent.interrupt_includes_async_tool_calls = false;
+        }
+        agent.interrupt_includes_async_tool_calls |= include_async_tool_calls;
+    }
+    if !create {
+        records.update_activity(&mut agent, &activity)?;
     }
     records.save_agent(&agent)?;
     Ok((agent, interrupt || message.is_some()))
+}
+
+fn interrupt_tool_calls(
+    records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
+    id: u128,
+    call_ids: &[String],
+) -> Result<(AgentRecord, bool), StoreError> {
+    let mut agent = records.agent(id)?;
+    agent.revision = agent
+        .revision
+        .checked_add(1)
+        .expect("revisions do not overflow");
+    for call_id in call_ids {
+        let key = records::key(records::TOOL_CALL, id, call_id.as_bytes());
+        let mut call = records
+            .get::<ToolCallRecord>(&key)?
+            .ok_or(StoreError::Conflict("tool call does not exist"))?;
+        if call.resolved_at.is_none() && agent.tool_call_interrupt_intents.insert(call_id.clone()) {
+            records.change(
+                id,
+                records::TOOL_CALL,
+                call_id.as_bytes(),
+                Some(call.revision),
+                agent.revision,
+            )?;
+            call.revision = agent.revision;
+            records.put(&key, &call)?;
+        }
+    }
+    records.save_agent(&agent)?;
+    Ok((agent, true))
+}
+
+fn tool_call_interrupt_intents<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(
+    records: &Records<T>,
+    agent: &AgentRecord,
+) -> Result<BTreeSet<String>, StoreError> {
+    if agent.interrupt_intent && agent.interrupt_includes_async_tool_calls {
+        records
+            .prefix::<String>(&records::key(records::PENDING_TOOL, agent.agent.id, &[]))?
+            .collect()
+    } else {
+        Ok(agent.tool_call_interrupt_intents.clone())
+    }
 }
 
 impl ClientStore for Store {
@@ -307,11 +363,32 @@ impl ClientStore for Store {
         &self,
         idempotency_key: &str,
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<&Message>,
     ) -> Result<(), StoreError> {
         self.request(
             idempotency_key.into(),
-            Request::InterruptAgent(agent_id.into(), message.cloned().map(Into::into)),
+            Request::InterruptAgent(
+                agent_id.into(),
+                message.cloned().map(Into::into),
+                include_async_tool_calls,
+            ),
+        )
+        .await
+    }
+
+    async fn interrupt_tool_calls(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
+        call_ids: &[ToolCallId],
+    ) -> Result<(), StoreError> {
+        self.request(
+            idempotency_key.into(),
+            Request::InterruptToolCalls(
+                agent_id.into(),
+                call_ids.iter().cloned().map(Into::into).collect(),
+            ),
         )
         .await
     }
@@ -350,14 +427,24 @@ impl RuntimeStore for Store {
             .call(move |worker| {
                 let transaction = worker.database.begin_read()?;
                 let records = Records(transaction.open_table(records::RECORDS)?);
-                Ok(records
-                    .get::<AgentRecord>(&records::key(records::AGENT, agent_id.into(), &[]))?
-                    .map(|agent| AgentState {
-                        latest_event: agent.latest_event.map(Into::into),
-                        parked_at: agent.parked_at.map(Into::into),
-                        interrupt_intent: agent.interrupt_intent,
-                        has_pending_messages: agent.pending_messages != 0,
-                    }))
+                let Some(agent) = records.get::<AgentRecord>(&records::key(
+                    records::AGENT,
+                    agent_id.into(),
+                    &[],
+                ))?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(AgentState {
+                    latest_event: agent.latest_event.map(Into::into),
+                    parked_at: agent.parked_at.map(Into::into),
+                    interrupt_intent: agent.interrupt_intent,
+                    tool_call_interrupt_intents: tool_call_interrupt_intents(&records, &agent)?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    has_pending_messages: agent.pending_messages != 0,
+                }))
             })
             .await
     }
@@ -502,20 +589,34 @@ impl RuntimeStore for Store {
                     if !agent.interrupt_intent {
                         return Err(StoreError::Conflict("agent has no interrupt intent"));
                     }
+                    let intents = tool_call_interrupt_intents(records, agent)?;
                     let pending = records
                         .prefix::<String>(&records::key(
                             records::PENDING_TOOL,
                             agent_id.into(),
                             &[],
                         ))?
-                        .collect::<Result<BTreeSet<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut interrupted = BTreeSet::new();
+                    for id in pending {
+                        let call = records
+                            .get::<ToolCallRecord>(&records::key(
+                                records::TOOL_CALL,
+                                agent_id.into(),
+                                id.as_bytes(),
+                            ))?
+                            .expect("pending tool call exists");
+                        if !call.call.is_async || intents.contains(&id) {
+                            interrupted.insert(id);
+                        }
+                    }
                     let provided = results
                         .iter()
                         .map(|result| result.call_id.clone())
                         .collect::<BTreeSet<_>>();
-                    if provided.len() != results.len() || pending != provided {
+                    if provided.len() != results.len() || interrupted != provided {
                         return Err(StoreError::Conflict(
-                            "results must match all unresolved tool calls",
+                            "results must match all interrupted tool calls",
                         ));
                     }
                     for result in results {
@@ -526,6 +627,7 @@ impl RuntimeStore for Store {
                         data::EventPayload::TurnEnd(data::TurnEnd::Interrupted),
                     )?;
                     agent.interrupt_intent = false;
+                    agent.interrupt_includes_async_tool_calls = false;
                     agent.parked_at = agent.latest_event;
                     Ok(())
                 })

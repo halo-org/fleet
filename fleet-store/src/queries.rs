@@ -126,7 +126,10 @@ impl Queries for Store {
                     .collect::<Result<Vec<_>, StoreError>>()?
             };
             calls.sort_by(|a, b| a.call.id.cmp(&b.call.id));
-            Ok(calls.into_iter().map(Into::into).collect())
+            Ok(calls
+                .into_iter()
+                .map(|record| tool_call(&agent, record))
+                .collect())
         })
         .await
     }
@@ -275,12 +278,12 @@ impl Queries for Store {
                                     .get::<records::MessageRecord>(&key)?
                                     .expect("indexed message exists"),
                             ),
-                            records::TOOL_CALL => updates.tool_calls.push(
+                            records::TOOL_CALL => updates.tool_calls.push(tool_call(
+                                &agent,
                                 records
                                     .get::<records::ToolCallRecord>(&key)?
-                                    .expect("indexed tool call exists")
-                                    .into(),
-                            ),
+                                    .expect("indexed tool call exists"),
+                            )),
                             records::EVENT => updates.events.push(EventRecord::Settled(
                                 records
                                     .get::<records::EventRecord>(&key)?
@@ -391,13 +394,28 @@ fn changes_since(
 }
 
 const fn activity(agent: &AgentRecord) -> AgentActivity {
+    let activity = agent.activity();
     AgentActivity {
-        turn: if agent.turn_active {
+        turn: if activity.turn_active {
             TurnStatus::Active
         } else {
             TurnStatus::Idle
         },
-        interrupt_pending: agent.interrupt_intent,
+        interrupt_pending: activity.interrupt_pending,
+        interrupt_includes_async_tool_calls: activity.interrupt_includes_async_tool_calls,
+    }
+}
+
+fn tool_call(agent: &AgentRecord, record: records::ToolCallRecord) -> ToolCallRecord {
+    if record.resolved_at.is_some() {
+        ToolCallRecord::Resolved(record.call.id.into())
+    } else {
+        ToolCallRecord::Pending {
+            interrupt_pending: agent.tool_call_interrupt_intents.contains(&record.call.id),
+            id: record.call.id.into(),
+            tool: record.call.tool.into(),
+            is_async: record.call.is_async,
+        }
     }
 }
 
@@ -412,20 +430,6 @@ impl From<records::MessageRecord> for MessageRecord {
                 message: message.into(),
             },
             None => Self::Consumed(record.id.into()),
-        }
-    }
-}
-
-impl From<records::ToolCallRecord> for ToolCallRecord {
-    fn from(record: records::ToolCallRecord) -> Self {
-        if record.resolved_at.is_some() {
-            Self::Resolved(record.call.id.into())
-        } else {
-            Self::Pending {
-                id: record.call.id.into(),
-                tool: record.call.tool.into(),
-                is_async: record.call.is_async,
-            }
         }
     }
 }

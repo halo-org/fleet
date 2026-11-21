@@ -79,25 +79,21 @@ impl Store {
                         }
                         scope.closing = true;
                         let mut agent = records.agent(id)?;
-                        let interrupt = !agent.interrupt_intent
+                        let interrupt = !(agent.interrupt_intent
+                            && agent.interrupt_includes_async_tool_calls)
                             && (agent.turn_active || agent.pending_tool_calls != 0);
                         if interrupt || agent.pending_messages != 0 {
+                            let activity = agent.activity();
                             agent.revision = agent
                                 .revision
                                 .checked_add(1)
                                 .expect("revisions do not overflow");
                             withdraw_messages(&mut records, &mut agent)?;
                             if interrupt {
-                                records.change(
-                                    id,
-                                    records::ACTIVITY,
-                                    &[],
-                                    Some(agent.activity_revision),
-                                    agent.revision,
-                                )?;
                                 agent.interrupt_intent = true;
-                                agent.activity_revision = agent.revision;
+                                agent.interrupt_includes_async_tool_calls = true;
                             }
+                            records.update_activity(&mut agent, &activity)?;
                             records.save_agent(&agent)?;
                             crate::agents::sync_agent(
                                 &mut records,
@@ -410,10 +406,16 @@ fn scope_open<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(
     let mut visited = BTreeSet::new();
     loop {
         let record = records.agent(agent)?;
-        let pending = records
+        let Some(call_record) = records
             .get::<ToolCallRecord>(&records::key(records::TOOL_CALL, agent, call.as_bytes()))?
-            .is_some_and(|record| record.resolved_at.is_none());
-        if record.interrupt_intent || !pending {
+            .filter(|record| record.resolved_at.is_none())
+        else {
+            return Ok(false);
+        };
+        if record.tool_call_interrupt_intents.contains(&call)
+            || (record.interrupt_intent
+                && (record.interrupt_includes_async_tool_calls || !call_record.call.is_async))
+        {
             return Ok(false);
         }
         if !visited.insert(agent) {

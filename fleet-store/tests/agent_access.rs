@@ -9,7 +9,9 @@ use fleet_core::{
     ModelOutput, ModelProvenance, ModelResponse, ModelUsage, RuntimeStore as _, ToolCall,
     ToolOutput, ToolResult, TurnEnd,
 };
-use fleet_kit::{Agents as _, EventQuery, MessageRecord, Queries as _};
+use fleet_kit::{
+    AgentActivity, Agents as _, EventQuery, MessageRecord, Queries as _, QueryUpdate, TurnStatus,
+};
 use fleet_store::{Store, StoreError, WorkspaceRelease};
 
 fn role() -> Configured<fleet_core::RoleName> {
@@ -213,7 +215,10 @@ fn closure_withdraws_input_and_fences_late_nested_work() {
         let pending = nested.send("queued", grandchild, &[]).await.unwrap();
 
         let revision = store.messages(grandchild, None).await.unwrap().revision;
-        store.interrupt_agent("stop", 1.into(), None).await.unwrap();
+        store
+            .interrupt_agent("stop", 1.into(), true, None)
+            .await
+            .unwrap();
         let error = nested
             .create("late", &role(), &JsonObject::new())
             .await
@@ -230,6 +235,51 @@ fn closure_withdraws_input_and_fences_late_nested_work() {
         assert_eq!(messages.value, [MessageRecord::Deleted(pending)]);
         assert_matches!(error, StoreError::MessageNotFound);
         assert_eq!(state.parked_at, state.latest_event);
+    });
+}
+
+#[test]
+fn interrupts_close_scopes_of_interrupted_calls() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        root(&store).await;
+        let access = store.agent_access(1.into()).for_call("drive".into());
+
+        store
+            .interrupt_agent("stop turn", 1.into(), false, None)
+            .await
+            .unwrap();
+        let child = access
+            .create("child", &role(), &JsonObject::new())
+            .await
+            .unwrap();
+        access.send("start", child, &[]).await.unwrap();
+        answer(&store, child, vec![call("server")]).await;
+        store
+            .interrupt_agent("stop child turn", child, false, None)
+            .await
+            .unwrap();
+        let revision = store.activity(child, None).await.unwrap().revision;
+
+        store
+            .interrupt_tool_calls("stop call", 1.into(), &["drive".into()])
+            .await
+            .unwrap();
+        store.reconcile_agent_scopes().await.unwrap();
+        let error = access
+            .create("late", &role(), &JsonObject::new())
+            .await
+            .unwrap_err();
+        let activity = store.activity(child, Some(revision)).await.unwrap().value;
+        assert_matches!(error, StoreError::ScopeClosed);
+        assert_eq!(
+            activity,
+            QueryUpdate::Changed(AgentActivity {
+                turn: TurnStatus::Idle,
+                interrupt_pending: true,
+                interrupt_includes_async_tool_calls: true,
+            })
+        );
     });
 }
 
@@ -348,7 +398,7 @@ fn waiting_skips_unsolicited_turns_and_preserves_interruptions() {
             .await
             .unwrap();
         store
-            .interrupt_agent("interrupt", child, None)
+            .interrupt_agent("interrupt", child, true, None)
             .await
             .unwrap();
         let state = store.agent_state(child).await.unwrap().unwrap();
@@ -494,7 +544,7 @@ fn calls_can_use_images_held_by_their_agents() {
         assert_eq!(bytes, image);
 
         store
-            .interrupt_agent("interrupt", 1.into(), None)
+            .interrupt_agent("interrupt", 1.into(), true, None)
             .await
             .unwrap();
         store.reconcile_agent_scopes().await.unwrap();

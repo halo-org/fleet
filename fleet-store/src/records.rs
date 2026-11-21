@@ -1,6 +1,7 @@
 use crate::{StoreError, data};
 use redb::{ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeSet;
 
 pub const RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("records");
 pub const AGENT: u8 = 1;
@@ -24,6 +25,10 @@ pub struct AgentRecord {
     pub latest_event: Option<u128>,
     pub parked_at: Option<u128>,
     pub interrupt_intent: bool,
+    #[serde(default = "legacy_interrupt_includes_async_tool_calls")]
+    pub interrupt_includes_async_tool_calls: bool,
+    #[serde(default)]
+    pub tool_call_interrupt_intents: BTreeSet<String>,
     pub revision: u128,
     #[serde(default = "initial_metadata_revision")]
     pub metadata_revision: u128,
@@ -35,8 +40,20 @@ pub struct AgentRecord {
     pub synchronous_tool_calls: u64,
 }
 
+/// The state reported as an agent's activity.
+#[derive(PartialEq, Eq)]
+pub struct Activity {
+    pub turn_active: bool,
+    pub interrupt_pending: bool,
+    pub interrupt_includes_async_tool_calls: bool,
+}
+
 pub const fn initial_metadata_revision() -> u128 {
     1
+}
+
+pub const fn legacy_interrupt_includes_async_tool_calls() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,7 +93,12 @@ pub struct Change {
 pub enum Request {
     CreateAgent(data::Agent, Option<data::Message>),
     SendMessage(u128, data::Message),
-    InterruptAgent(u128, Option<data::Message>),
+    InterruptAgent(
+        u128,
+        Option<data::Message>,
+        #[serde(default = "legacy_interrupt_includes_async_tool_calls")] bool,
+    ),
+    InterruptToolCalls(u128, Vec<String>),
     SetTitle {
         id: u128,
         expected: u128,
@@ -258,6 +280,25 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
         Ok(true)
     }
 
+    /// Records an activity change if the agent's activity differs from `previous`.
+    pub fn update_activity(
+        &mut self,
+        agent: &mut AgentRecord,
+        previous: &Activity,
+    ) -> Result<(), StoreError> {
+        if agent.activity() != *previous {
+            self.change(
+                agent.agent.id,
+                ACTIVITY,
+                &[],
+                Some(agent.activity_revision),
+                agent.revision,
+            )?;
+            agent.activity_revision = agent.revision;
+        }
+        Ok(())
+    }
+
     pub fn save_agent(&mut self, agent: &AgentRecord) -> Result<(), StoreError> {
         let id = agent.agent.id;
         self.put(&key(AGENT, id, &[]), agent)?;
@@ -337,6 +378,15 @@ impl AgentRecord {
             && !self.interrupt_intent
             && self.pending_messages == 0
             && self.pending_tool_calls == 0
+    }
+
+    pub const fn activity(&self) -> Activity {
+        Activity {
+            turn_active: self.turn_active,
+            interrupt_pending: self.interrupt_intent,
+            interrupt_includes_async_tool_calls: self.interrupt_intent
+                && self.interrupt_includes_async_tool_calls,
+        }
     }
 
     pub fn check_latest_event(&self, expected: Option<u128>) -> Result<(), StoreError> {

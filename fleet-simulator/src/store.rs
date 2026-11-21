@@ -83,6 +83,8 @@ struct AgentRecord {
     pending_messages: Vec<Message>,
     parked_at: Option<EventCursor>,
     interrupt_intent: bool,
+    interrupt_includes_async_tool_calls: bool,
+    tool_call_interrupt_intents: BTreeSet<ToolCallId>,
     message_ids: BTreeSet<MessageId>,
     tool_call_ids: BTreeSet<ToolCallId>,
     unresolved_tool_calls: BTreeMap<ToolCallId, ToolCallSnapshot>,
@@ -97,7 +99,12 @@ enum ClientRequest {
     },
     InterruptAgent {
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<Message>,
+    },
+    InterruptToolCalls {
+        agent_id: AgentId,
+        call_ids: Vec<ToolCallId>,
     },
     SendMessage {
         agent_id: AgentId,
@@ -164,6 +171,7 @@ struct StoreSimulatorConfig {
     append_tool_result: WrapConfig,
     create_agent: WrapConfig,
     interrupt_agent: WrapConfig,
+    interrupt_tool_calls: WrapConfig,
     send_message: WrapConfig,
     wakes: TrySuspendConfig,
     wakes_repartition: Probability,
@@ -675,6 +683,7 @@ impl ClientStore for StoreSimulator<'_> {
         &self,
         idempotency_key: &str,
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<&Message>,
     ) -> Result<(), Self::Error> {
         self.scheduler
@@ -689,7 +698,35 @@ impl ClientStore for StoreSimulator<'_> {
                             idempotency_key,
                             ClientRequest::InterruptAgent {
                                 agent_id,
+                                include_async_tool_calls,
                                 message: message.cloned(),
+                            },
+                        )
+                    })
+                },
+            )
+            .await
+    }
+
+    async fn interrupt_tool_calls(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
+        call_ids: &[ToolCallId],
+    ) -> Result<(), Self::Error> {
+        self.scheduler
+            .wrap(
+                &self.config.interrupt_tool_calls,
+                StoreSimulatorError::random,
+                async {
+                    self.mutate(|state| {
+                        state.handle_request(
+                            self.scheduler,
+                            self.config.wakes_repartition,
+                            idempotency_key,
+                            ClientRequest::InterruptToolCalls {
+                                agent_id,
+                                call_ids: call_ids.to_vec(),
                             },
                         )
                     })
@@ -764,6 +801,7 @@ impl State {
     fn interrupt_agent(
         &mut self,
         agent_id: AgentId,
+        include_async_tool_calls: bool,
         message: Option<&Message>,
     ) -> Result<(), ClientError> {
         let agent = self
@@ -779,10 +817,42 @@ impl State {
             agent.push_pending_message(message.clone());
         }
 
-        agent.interrupt_intent = true;
+        if !agent.interrupt_intent {
+            agent.interrupt_intent = true;
+            agent.interrupt_includes_async_tool_calls = false;
+        }
+
+        agent.interrupt_includes_async_tool_calls |= include_async_tool_calls;
 
         if let Some(owner) = agent.wake_owner {
             self.enqueue_wake(owner, Wake::Interrupt(agent_id));
+        }
+
+        Ok(())
+    }
+
+    fn interrupt_tool_calls(
+        &mut self,
+        agent_id: AgentId,
+        call_ids: &[ToolCallId],
+    ) -> Result<(), ClientError> {
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
+
+        if call_ids.iter().any(|id| !agent.tool_call_ids.contains(id)) {
+            return Err(ClientError::conflict("tool call does not exist"));
+        }
+
+        for id in call_ids {
+            if agent.unresolved_tool_calls.contains_key(id) {
+                agent.tool_call_interrupt_intents.insert(id.clone());
+            }
+        }
+
+        if let Some(owner) = agent.wake_owner {
+            self.enqueue_wake(owner, Wake::Reconcile(agent_id));
         }
 
         Ok(())
@@ -829,15 +899,17 @@ impl State {
             .map(|result| &result.call_id)
             .collect::<BTreeSet<_>>();
 
-        let resolves_all_tool_calls = tool_call_ids.len() == tool_results.len()
-            && tool_call_ids.len() == agent.unresolved_tool_calls.len()
-            && tool_call_ids
-                .iter()
-                .all(|id| agent.unresolved_tool_calls.contains_key(*id));
+        let interrupt_intents = agent.tool_call_interrupt_intents();
+        let interrupted_tool_call_ids = agent
+            .unresolved_tool_calls
+            .iter()
+            .filter(|(id, call)| !call.is_async || interrupt_intents.contains(*id))
+            .map(|(id, _)| id)
+            .collect::<BTreeSet<_>>();
 
-        if !resolves_all_tool_calls {
+        if tool_call_ids.len() != tool_results.len() || tool_call_ids != interrupted_tool_call_ids {
             return Err(RuntimeError::conflict(
-                "results must match all unresolved tool calls exactly",
+                "results must match all interrupted tool calls exactly",
             ));
         }
 
@@ -847,6 +919,7 @@ impl State {
 
         agent.append_event(EventPayload::TurnEnd(TurnEnd::Interrupted));
         agent.interrupt_intent = false;
+        agent.interrupt_includes_async_tool_calls = false;
         agent.parked_at = agent.latest_event();
 
         Ok(())
@@ -1169,8 +1242,16 @@ impl State {
             ClientRequest::CreateAgent { agent, message } => {
                 self.create_agent(agent, message.as_ref())?;
             }
-            ClientRequest::InterruptAgent { agent_id, message } => {
-                self.interrupt_agent(*agent_id, message.as_ref())?;
+            ClientRequest::InterruptAgent {
+                agent_id,
+                include_async_tool_calls,
+                message,
+            } => {
+                self.interrupt_agent(*agent_id, *include_async_tool_calls, message.as_ref())?;
+                self.repartition_agent(scheduler, *agent_id, repartition_probability);
+            }
+            ClientRequest::InterruptToolCalls { agent_id, call_ids } => {
+                self.interrupt_tool_calls(*agent_id, call_ids)?;
                 self.repartition_agent(scheduler, *agent_id, repartition_probability);
             }
             ClientRequest::SendMessage { agent_id, message } => {
@@ -1296,6 +1377,8 @@ impl AgentRecord {
             pending_messages: Vec::new(),
             parked_at: None,
             interrupt_intent: false,
+            interrupt_includes_async_tool_calls: false,
+            tool_call_interrupt_intents: BTreeSet::new(),
             message_ids: BTreeSet::new(),
             tool_call_ids: BTreeSet::new(),
             unresolved_tool_calls: BTreeMap::new(),
@@ -1308,7 +1391,16 @@ impl AgentRecord {
             latest_event: self.latest_event(),
             parked_at: self.parked_at,
             interrupt_intent: self.interrupt_intent,
+            tool_call_interrupt_intents: self.tool_call_interrupt_intents(),
             has_pending_messages: !self.pending_messages.is_empty(),
+        }
+    }
+
+    fn tool_call_interrupt_intents(&self) -> BTreeSet<ToolCallId> {
+        if self.interrupt_intent && self.interrupt_includes_async_tool_calls {
+            self.unresolved_tool_calls.keys().cloned().collect()
+        } else {
+            self.tool_call_interrupt_intents.clone()
         }
     }
 
@@ -1357,6 +1449,7 @@ impl AgentRecord {
         self.unresolved_tool_calls
             .remove(&result.call_id)
             .expect("tool call is unresolved");
+        self.tool_call_interrupt_intents.remove(&result.call_id);
 
         self.append_event(EventPayload::ToolResult(result.clone()));
     }
@@ -1554,6 +1647,7 @@ impl StoreSimulatorConfig {
             events_suspend: Probability::generate(rng),
             events_error: Probability::generate_for_faults(rng),
             wakes_repartition: Probability::generate_for_faults(rng),
+            interrupt_tool_calls: WrapConfig::generate(rng),
         }
     }
 }
@@ -1761,7 +1855,7 @@ mod tests {
             .unwrap();
 
         store
-            .mutate(|state| state.interrupt_agent(0.into(), Some(&queued)))
+            .mutate(|state| state.interrupt_agent(0.into(), true, Some(&queued)))
             .unwrap();
 
         let snapshot = store.snapshot();
@@ -2159,7 +2253,7 @@ mod tests {
         );
 
         store
-            .mutate(|state| state.interrupt_agent(id, Some(&message(3))))
+            .mutate(|state| state.interrupt_agent(id, true, Some(&message(3))))
             .unwrap();
 
         assert!(
@@ -2445,7 +2539,7 @@ mod tests {
             .mutate(|state| state.send_message(0.into(), &message(0)))
             .unwrap();
         store
-            .mutate(|state| state.interrupt_agent(1.into(), None))
+            .mutate(|state| state.interrupt_agent(1.into(), true, None))
             .unwrap();
 
         let first = store.add_partition();
@@ -2793,7 +2887,7 @@ mod tests {
         );
 
         store
-            .mutate(|state| state.interrupt_agent(agent.id, None))
+            .mutate(|state| state.interrupt_agent(agent.id, true, None))
             .unwrap();
 
         assert!(first_flag.0.load(Ordering::Relaxed));
@@ -2891,7 +2985,12 @@ mod tests {
                 let recovery_message = message(1);
                 let apply = |key, message| {
                     if interrupt {
-                        future::Either::Left(store.interrupt_agent(key, 0.into(), Some(message)))
+                        future::Either::Left(store.interrupt_agent(
+                            key,
+                            0.into(),
+                            true,
+                            Some(message),
+                        ))
                     } else {
                         future::Either::Right(store.send_message(key, 0.into(), message))
                     }

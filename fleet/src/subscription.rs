@@ -270,6 +270,7 @@ mod tests {
                 "activity": {
                     "turn": "idle",
                     "interrupt_pending": false,
+                    "interrupt_includes_async_tool_calls": false,
                 },
                 "events": [
                     {

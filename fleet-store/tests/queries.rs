@@ -8,7 +8,9 @@ use fleet_core::{
     MessageMode, ModelOutput, ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage,
     RuntimeStore as _, ToolCall, ToolOutput, ToolResult, TurnEnd,
 };
-use fleet_kit::{MessageRecord, Preview, Queries as _, QueryUpdate};
+use fleet_kit::{
+    AgentActivity, MessageRecord, Preview, Queries as _, QueryUpdate, ToolCallRecord, TurnStatus,
+};
 use fleet_store::Store;
 use futures_util::{TryStreamExt as _, future};
 
@@ -45,6 +47,26 @@ fn response(output: Vec<ModelOutput>) -> ModelResponse {
             model_id: "model".into(),
         },
         continuation_token: None,
+    }
+}
+
+fn tool_call(id: &str, is_async: bool) -> ModelOutput {
+    ModelOutput::ToolCall(ToolCall {
+        id: id.into(),
+        tool: "shell".into(),
+        is_async,
+        input: JsonObject::new(),
+    })
+}
+
+fn tool_result(id: &str) -> ToolResult {
+    ToolResult {
+        call_id: id.into(),
+        output: ToolOutput {
+            content: vec![],
+            structured_content: None,
+            is_error: true,
+        },
     }
 }
 
@@ -189,7 +211,7 @@ fn compaction_notifications_are_transient_and_superseded() {
             })
         );
         store
-            .interrupt_agent("interrupt", agent.id, None)
+            .interrupt_agent("interrupt", agent.id, true, None)
             .await
             .unwrap();
         store
@@ -299,4 +321,107 @@ fn updates_resume_complete_revisions_after_reopening() {
     });
 
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn updates_report_pending_interrupts() {
+    let store = Store::memory().unwrap();
+    let agent = agent();
+    let pending = |id: &str, is_async, interrupt_pending| ToolCallRecord::Pending {
+        id: id.into(),
+        tool: "shell".into(),
+        is_async,
+        interrupt_pending,
+    };
+    let activity = |interrupt_pending, interrupt_includes_async_tool_calls| {
+        QueryUpdate::Changed(AgentActivity {
+            turn: TurnStatus::Active,
+            interrupt_pending,
+            interrupt_includes_async_tool_calls,
+        })
+    };
+
+    futures_executor::block_on(async {
+        store
+            .create_agent("create", &agent, Some(&message(1)))
+            .await
+            .unwrap();
+        store.consume_messages(agent.id, None, true).await.unwrap();
+        store
+            .append_model_response(
+                agent.id,
+                0.into(),
+                false,
+                &response(vec![tool_call("async", true), tool_call("sync", false)]),
+            )
+            .await
+            .unwrap();
+        let changes = async |since| {
+            let calls = store.tool_calls(agent.id, Some(since)).await.unwrap();
+            let activity = store.activity(agent.id, Some(since)).await.unwrap();
+            (calls.revision, calls.value, activity.value)
+        };
+        let start = store.tool_calls(agent.id, None).await.unwrap().revision;
+
+        store
+            .interrupt_tool_calls("call", agent.id, &["async".into()])
+            .await
+            .unwrap();
+        let (revision, calls, update) = changes(start).await;
+        assert_eq!(calls, [pending("async", true, true)]);
+        assert_eq!(update, QueryUpdate::Unchanged);
+        let calls = store.tool_calls(agent.id, None).await.unwrap().value;
+        assert_eq!(
+            calls,
+            [pending("async", true, true), pending("sync", false, false)]
+        );
+
+        store
+            .interrupt_tool_calls("call again", agent.id, &["async".into()])
+            .await
+            .unwrap();
+        let (revision, calls, update) = changes(revision).await;
+        assert_eq!(calls, []);
+        assert_eq!(update, QueryUpdate::Unchanged);
+
+        store
+            .interrupt_agent("turn", agent.id, false, None)
+            .await
+            .unwrap();
+        let (revision, calls, update) = changes(revision).await;
+        assert_eq!(calls, []);
+        assert_eq!(update, activity(true, false));
+
+        store
+            .interrupt_agent("everything", agent.id, true, None)
+            .await
+            .unwrap();
+        let (revision, calls, update) = changes(revision).await;
+        assert_eq!(calls, []);
+        assert_eq!(update, activity(true, true));
+
+        store
+            .settle_interrupt(
+                agent.id,
+                Some(1.into()),
+                &[tool_result("async"), tool_result("sync")],
+            )
+            .await
+            .unwrap();
+        let updates = store.updates(agent.id, revision).await.unwrap();
+        assert_eq!(
+            updates.activity,
+            QueryUpdate::Changed(AgentActivity::default())
+        );
+        assert_eq!(
+            updates.tool_calls,
+            [
+                ToolCallRecord::Resolved("async".into()),
+                ToolCallRecord::Resolved("sync".into()),
+            ]
+        );
+        assert_eq!(updates.events.len(), 3);
+        let superseded = store.updates(agent.id, start).await.unwrap();
+        assert_eq!(superseded, updates);
+    });
 }
