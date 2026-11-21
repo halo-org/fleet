@@ -16,10 +16,7 @@ use alloc::{
     collections::{BTreeMap, BTreeSet, btree_map},
     vec::Vec,
 };
-use core::{
-    mem,
-    pin::{Pin, pin},
-};
+use core::pin::{Pin, pin};
 use futures_util::{
     FutureExt as _, Stream, StreamExt as _, TryStreamExt as _,
     future::{self, Either},
@@ -67,9 +64,18 @@ struct Runtime<I, E, S, R, M, T> {
 
 struct ReconcileState {
     cursor: Option<EventCursor>,
-    tool_calls: BTreeMap<ToolCallId, ToolCall>,
-    tool_calls_to_start: BTreeSet<ToolCallId>,
+    tool_calls: BTreeMap<ToolCallId, ToolCallTask>,
     tool_results: BTreeMap<ToolCallId, ToolResult>,
+}
+
+struct ToolCallTask {
+    call: ToolCall,
+    status: ToolCallStatus,
+}
+
+enum ToolCallStatus {
+    NotStarted,
+    Executing,
 }
 
 enum ReconcileAction {
@@ -284,7 +290,6 @@ where
                 } => {
                     for tool_call_id in completed_tool_calls {
                         state.tool_calls.remove(&tool_call_id);
-                        state.tool_calls_to_start.remove(&tool_call_id);
                         state.tool_results.remove(&tool_call_id);
                     }
 
@@ -293,24 +298,24 @@ where
                     }
 
                     for tool_call in pending_tool_calls {
-                        if let btree_map::Entry::Vacant(entry) =
-                            state.tool_calls.entry(tool_call.id.clone())
-                        {
-                            state.tool_calls_to_start.insert(tool_call.id.clone());
-                            entry.insert(tool_call);
-                        }
+                        state
+                            .tool_calls
+                            .entry(tool_call.id.clone())
+                            .or_insert(ToolCallTask {
+                                call: tool_call,
+                                status: ToolCallStatus::NotStarted,
+                            });
                     }
 
                     state.cursor = Some(cursor);
                 }
                 ReconcileAction::StartToolCalls => {
-                    for tool_call_id in mem::take(&mut state.tool_calls_to_start) {
-                        let tool_call = state
-                            .tool_calls
-                            .get(&tool_call_id)
-                            .expect("call is awaiting execution")
-                            .clone();
-                        tool_call_futures.push(self.execute_tool_call(agent_id, tool_call));
+                    for task in state.tool_calls.values_mut() {
+                        if matches!(task.status, ToolCallStatus::NotStarted) {
+                            task.status = ToolCallStatus::Executing;
+                            tool_call_futures
+                                .push(self.execute_tool_call(agent_id, task.call.clone()));
+                        }
                     }
                 }
                 ReconcileAction::Continue => {}
@@ -369,11 +374,15 @@ where
             return self.reconcile_tool_results(agent_id, state).await;
         }
 
-        if !state.tool_calls_to_start.is_empty() {
+        if state
+            .tool_calls
+            .values()
+            .any(|task| matches!(task.status, ToolCallStatus::NotStarted))
+        {
             return ReconcileAction::StartToolCalls;
         }
 
-        if state.tool_calls.values().any(|call| !call.is_async) {
+        if state.tool_calls.values().any(|task| !task.call.is_async) {
             return ReconcileAction::Wait;
         }
 
@@ -721,7 +730,7 @@ where
 
         let mut results = Vec::new();
 
-        for call in state.tool_calls.values() {
+        for call in state.tool_calls.values().map(|task| &task.call) {
             if let Some(result) = state.tool_results.get(&call.id) {
                 results.push(result.clone());
                 continue;
@@ -952,7 +961,11 @@ where
                 let compaction = Compaction {
                     last_event: latest_event,
                     input: response.input,
-                    pending_tool_calls: state.tool_calls.values().cloned().collect(),
+                    pending_tool_calls: state
+                        .tool_calls
+                        .values()
+                        .map(|task| task.call.clone())
+                        .collect(),
                     usage: response.usage,
                 };
 
@@ -1192,7 +1205,6 @@ impl ReconcileState {
         Self {
             cursor: idle_cursor,
             tool_calls: BTreeMap::new(),
-            tool_calls_to_start: BTreeSet::new(),
             tool_results: BTreeMap::new(),
         }
     }
