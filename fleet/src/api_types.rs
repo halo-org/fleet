@@ -117,7 +117,6 @@ pub struct SetPinnedRequest {
 #[serde(deny_unknown_fields)]
 pub struct InterruptAgentRequest {
     /// Whether to interrupt async tool calls as well as the turn.
-    #[serde(default = "default_include_async_tool_calls")]
     pub include_async_tool_calls: bool,
     /// A message to send with the interrupt.
     pub message: Option<ApiMessage>,
@@ -1508,10 +1507,6 @@ const fn default_event_limit() -> NonZeroUsize {
     NonZeroUsize::new(100).expect("limit is positive")
 }
 
-const fn default_include_async_tool_calls() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1558,12 +1553,19 @@ mod tests {
             "role": "assistant",
         }))
         .unwrap();
-        let interrupt: InterruptAgentRequest = serde_json::from_value(json!({})).unwrap();
+        let interrupt: InterruptAgentRequest = serde_json::from_value(json!({
+            "include_async_tool_calls": false,
+        }))
+        .unwrap();
 
         assert!(request.parameters.is_empty());
         assert!(request.message.is_none());
-        assert!(interrupt.include_async_tool_calls);
         assert!(interrupt.message.is_none());
+    }
+
+    #[test]
+    fn deserialize_interrupt_rejects_missing_include_async_tool_calls() {
+        assert!(serde_json::from_value::<InterruptAgentRequest>(json!({})).is_err());
     }
 
     #[test]
