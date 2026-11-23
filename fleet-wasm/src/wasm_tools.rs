@@ -100,6 +100,12 @@ impl WasmTools {
                 .as_ref()
                 .map(|agents| agents.for_call(context.agent_id, context.call_id.clone())),
         );
+        store.data_mut().set_tool_calls(
+            self.environment
+                .tool_calls
+                .as_ref()
+                .map(|tool_calls| tool_calls.for_call(context.agent_id, context.call_id.clone())),
+        );
         store.data_mut().set_workspace_access(
             self.environment
                 .workspace_access

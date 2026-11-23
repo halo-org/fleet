@@ -1,0 +1,107 @@
+/// Tool calls of the calling agent, within its driving tool call.
+///
+/// Access closes once the driving call is absent, resolved or being interrupted. The driving call
+/// is not listed and cannot be interrupted.
+///
+/// Task handles let a model name its tool calls. A tool declares the input property that holds one
+/// with the `fleet.task_handle` extension. Handles are resolved within the driving call's context:
+/// the tool calls the model could see when it made the driving call. A call never sees later calls
+/// that reuse its handle, while calls in the same response see each other. Tools decide how to
+/// report duplicate and unknown handles.
+///
+/// While access is open, message counts never decrease. A completed handle stays completed unless
+/// the agent's role or the tool declarations change. Waits on these conditions do not depend on
+/// timing.
+interface tool-calls {
+    use types.{tool-alias, tool-call-id};
+
+    /// A revision of the agent's stored state.
+    record revision {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// An unresolved tool call.
+    record pending-tool-call {
+        /// The tool call ID.
+        id: tool-call-id,
+        /// The tool alias.
+        tool: tool-alias,
+        /// Whether the agent can continue before the call completes.
+        is-async: bool,
+        /// The task handle in the call's input.
+        task-handle: option<string>,
+    }
+
+    /// The status of a task handle in the driving call's context.
+    variant task-status {
+        /// No tool call has the handle.
+        unknown,
+        /// The tool call with the handle has no result yet.
+        pending(tool-call-id),
+        /// The tool call with the handle has a committed result.
+        completed(tool-call-id),
+        /// More than one tool call has the handle.
+        duplicate,
+    }
+
+    /// Message counts by mode.
+    record message-counts {
+        /// Steering messages.
+        steering: u64,
+        /// Queued messages.
+        queued: u64,
+    }
+
+    /// The state of an agent's tool calls, seen from the driving call.
+    record tool-calls-state {
+        /// The revision at which this state was read.
+        revision: revision,
+        /// The agent's other unresolved tool calls, ordered by ID.
+        pending-tool-calls: list<pending-tool-call>,
+        /// The status of each requested task handle.
+        task-handles: list<tuple<string, task-status>>,
+        /// Messages the agent had not seen when the driving call was made, including those sent
+        /// since. Consuming a message does not change these counts.
+        messages: message-counts,
+    }
+
+    /// The kind of error returned by tool call access.
+    enum tool-calls-error-kind {
+        /// The driving call is absent, resolved or being interrupted.
+        scope-closed,
+        /// State or operation arguments conflict.
+        conflict,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by tool call access.
+    record tool-calls-error {
+        /// The kind of error.
+        kind: tool-calls-error-kind,
+        /// A description of the error.
+        message: string,
+    }
+
+    /// Returns the state once it is newer than `after`.
+    ///
+    /// Without `after`, returns the current state. The state reports the requested task handles
+    /// in the driving call's context.
+    state: async func(after: option<revision>, task-handles: list<string>)
+        -> result<tool-calls-state, tool-calls-error>;
+
+    /// Interrupts unresolved tool calls of the agent.
+    ///
+    /// Resolved calls are ignored. Keys identify operations within the caller and driving call.
+    /// Retrying the same operation succeeds, even after access closes. Reusing a key with different
+    /// calls conflicts.
+    interrupt: async func(key: string, calls: list<tool-call-id>) -> result<_, tool-calls-error>;
+}
+
+/// A host that provides tool call access.
+world tool-call-host {
+    import tool-calls;
+}

@@ -23,6 +23,9 @@
 //! The `subagents` feature provides scoped `fleet_kit::Agents` access. Hosts must run
 //! `Store::reconcile_agent_scopes` on startup and after `Store::agent_scopes_changed` to stop
 //! execution whose driving call has ended. Scope records are preserved with all feature sets.
+//!
+//! The `tool-calls` feature provides `ToolCallAccess` to an agent's own tool calls. Consumed message
+//! counts are recorded with all feature sets.
 
 #[cfg(feature = "subagents")]
 mod agent_access;
@@ -47,6 +50,8 @@ mod roles;
 mod scope_records;
 mod store;
 mod store_error;
+#[cfg(feature = "tool-calls")]
+mod tool_call_access;
 mod worker;
 
 #[cfg(feature = "queries")]
@@ -60,6 +65,8 @@ pub use self::blobs::{AgentBlobs, MAX_BLOB_BYTES, MAX_UPLOAD_CHUNK_BYTES, Upload
 pub use self::notifications::NotificationClaim;
 #[cfg(feature = "queries")]
 pub use self::releases::{WorkspaceRelease, WorkspaceReleaseState};
+#[cfg(feature = "tool-calls")]
+pub use self::tool_call_access::{ToolCallAccess, ToolCallSnapshot};
 pub(crate) use self::{
     listeners::{Listeners, Topic},
     worker::WorkerHandle,

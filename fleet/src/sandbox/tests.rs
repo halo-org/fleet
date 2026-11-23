@@ -82,7 +82,7 @@ fn run_with(settings: Value, test: impl AsyncFnOnce(&Fleet, &WasmRegistry)) {
             let (fleet, providers) = open(config(settings), &directory()).await.unwrap();
             tokio::time::timeout(
                 Duration::from_secs(60),
-                future::join(fleet.run(&providers, &providers, &providers), async {
+                future::join(fleet.run(&*providers, &*providers, &*providers), async {
                     test(&fleet, &providers).await;
                     fleet.shutdown();
                 }),

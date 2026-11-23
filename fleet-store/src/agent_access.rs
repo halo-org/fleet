@@ -412,10 +412,7 @@ fn scope_open<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(
         else {
             return Ok(false);
         };
-        if record.tool_call_interrupt_intents.contains(&call)
-            || (record.interrupt_intent
-                && (record.interrupt_includes_async_tool_calls || !call_record.call.is_async))
-        {
+        if record.interrupts_tool_call(&call_record) {
             return Ok(false);
         }
         if !visited.insert(agent) {

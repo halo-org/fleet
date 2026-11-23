@@ -92,8 +92,8 @@ daemonize or leave the group. Existing `process.spawn` remains child-only.
 testing clients and changes. It reads `config.json` from the directory in the usual
 format and keeps every store in memory, so each start is fresh. Plugins must be
 local and may use only capabilities provided by Fleet: blobs, credentials, workers,
-roles, agents and workspace providers. HTTP, filesystem and process access are
-rejected. Push notifications are unavailable.
+roles, agents, tool calls and workspace providers. HTTP, filesystem and process
+access are rejected. Push notifications are unavailable.
 
 JSON files in the directory's `roles` subdirectory are stored as roles on startup,
 each named after its file. Without `FLEET_ADMIN_TOKEN`, Fleet generates an admin
@@ -355,6 +355,38 @@ scans agent `1`'s children; collection updates include them. Subagent execution 
 workspace resolution live above core, using kit contracts, the store's scope
 reconciler and `fleet-workspaces`. Plugins select workspace sources; the host
 loads current role instances and enforces its approved provider list.
+
+## Tool calls
+
+Approve `"tool_calls": true` in a plugin's capabilities and import
+`fleet:providers/tool-calls@0.0.0`. A tool call can read the state of its agent's other
+unresolved tool calls, wait for that state to change and interrupt them. The driving call is
+excluded. Access closes once the driving call is absent, resolved or being interrupted.
+
+A tool declares the input property that names its calls with the `fleet.task_handle`
+extension, for example `{"fleet.task_handle": "task_handle"}`. A call whose input holds a
+string in that property has that handle. Fleet resolves handles when the state is read, using
+the agent's current role and the declarations of its tools. Handles only need to be unique
+within the driving call's context: the pending calls of the latest compaction before the
+driving call's response, and the calls of the responses since, up to and including that
+response. A call never sees later calls that reuse its handle, so a tool can check that its
+own handle is unique when it runs. Calls in the same response see each other, and calls made
+after a duplicate see the handle as duplicate.
+
+The state reports each requested handle as unknown, pending, completed or duplicate. Fleet
+does not reject duplicates. A tool that declares a handle can read its own handle and return
+an error, and a tool that waits on or cancels handles reports duplicate and unknown handles in
+its own words. Handles are recomputed from stored history after a restart. Changing a role or
+updating a plugin can change how handles resolve, like any other change to a running agent's
+configuration, and does not wake waiting calls.
+
+The state also counts the messages the agent had not seen when the driving call was made,
+including those sent since. While access is open, the counts never decrease, even as messages
+are consumed, and completed handles stay completed unless the configuration changes. Waits on
+these conditions do not depend on timing. Waiting for input suits synchronous waits: a
+steering message is consumed once the wait returns, while queued messages still wait for the
+turn to end. For calls made before this version of Fleet, messages consumed before upgrading
+are not counted.
 
 ## Images and blobs
 

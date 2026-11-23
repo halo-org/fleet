@@ -244,6 +244,7 @@ pub fn apply_agent_request(
                 turn_active: false,
                 next_position: 0,
                 pending_messages: 0,
+                consumed_messages: records::MessageCounts::default(),
                 pending_tool_calls: 0,
                 synchronous_tool_calls: 0,
             };
@@ -694,6 +695,13 @@ impl RuntimeStore for Store {
                         let message_key =
                             records::key(records::MESSAGE, agent.agent.id, &id.to_be_bytes());
                         let message = record.message.take().expect("queued message is pending");
+                        let consumed = match message.mode {
+                            data::MessageMode::Steer => &mut agent.consumed_messages.steering,
+                            data::MessageMode::Queue => &mut agent.consumed_messages.queued,
+                        };
+                        *consumed = consumed
+                            .checked_add(1)
+                            .expect("message count does not overflow");
                         let cursor = records
                             .append_event(agent, data::EventPayload::Input(id, message.content))?;
                         records.change(
@@ -813,6 +821,7 @@ impl RuntimeStore for Store {
                                 resolved_at: None,
                                 prepared: false,
                                 revision: agent.revision,
+                                consumed_messages: agent.consumed_messages,
                             },
                         )?;
                         records.put(

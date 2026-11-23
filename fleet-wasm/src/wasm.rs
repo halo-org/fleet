@@ -1,7 +1,7 @@
 use crate::{
     WasmCapabilities, WasmError, WasmProvider, WasmState,
     bindings::workspace_host::fleet::providers::workspaces,
-    bindings::{agents, blobs, configuration, credentials, process, roles, workers},
+    bindings::{agents, blobs, configuration, credentials, process, roles, tool_calls, workers},
 };
 use fleet_core::JsonObject;
 use std::sync::Mutex;
@@ -187,6 +187,10 @@ impl Wasm {
         }
         if capabilities.agents.is_some() {
             agents::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+                .map_err(WasmError::runtime)?;
+        }
+        if capabilities.tool_calls.is_some() {
+            tool_calls::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
                 .map_err(WasmError::runtime)?;
         }
         Ok(linker)

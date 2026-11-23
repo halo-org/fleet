@@ -20,6 +20,7 @@ mod oauth;
 mod oauth_callback;
 mod oci;
 mod plugin_roles;
+mod plugin_tool_calls;
 mod plugins;
 mod roles;
 mod sandbox;
@@ -48,6 +49,7 @@ pub(crate) use self::{
     idle_handler::IdleHandler,
     notifications::Notifications,
     plugin_roles::PluginRoles,
+    plugin_tool_calls::{PluginToolCalls, TaskHandles},
     plugins::{PluginConfig, ProviderConfig},
     roles::RoleDefinition,
     sandbox_oauth::SandboxOAuth,
@@ -62,6 +64,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
 const ADMIN_TOKEN_VARIABLE: &str = "FLEET_ADMIN_TOKEN";
@@ -187,10 +190,10 @@ fn load_config(directory: &Path) -> io::Result<Config> {
 async fn serve(
     admin_token: AdminToken,
     fleet: Fleet,
-    providers: WasmRegistry,
+    providers: Arc<WasmRegistry>,
     address: SocketAddr,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let agents = fleet.run(&providers, &providers, &providers);
+    let agents = fleet.run(&*providers, &*providers, &*providers);
     let result = run(
         admin_token,
         fleet.clone(),
