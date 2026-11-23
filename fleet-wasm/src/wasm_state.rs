@@ -1,6 +1,6 @@
 use crate::{
-    WasmAgents, WasmBlobs, WasmCredentials, WasmOrigins, WasmWorkers, WasmWorkspaceAccess,
-    WasmWorkspaceHost,
+    WasmAgents, WasmBlobs, WasmCredentials, WasmOrigins, WasmToolCalls, WasmWorkers,
+    WasmWorkspaceAccess, WasmWorkspaceHost,
     bindings::{configuration, credentials},
     wasm_roles::WasmAgentRoles,
 };
@@ -22,11 +22,13 @@ pub struct WasmEnvironment {
     pub workspace_host: Option<WasmWorkspaceHost>,
     pub agents: Option<WasmAgents>,
     pub workspace_access: Option<WasmWorkspaceAccess>,
+    pub tool_calls: Option<WasmToolCalls>,
 }
 
 pub struct WasmState {
     agents: Option<WasmAgents>,
     workspace_access: Option<WasmWorkspaceAccess>,
+    tool_calls: Option<WasmToolCalls>,
     blobs: Option<WasmBlobs>,
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
@@ -50,6 +52,7 @@ impl WasmState {
             workspace_host,
             agents,
             workspace_access,
+            tool_calls,
         } = environment;
         let mut wasi = WasiCtx::default();
         *wasi.filesystem() = filesystem;
@@ -57,6 +60,7 @@ impl WasmState {
         Self {
             agents,
             workspace_access,
+            tool_calls,
             blobs: None,
             config,
             credentials,
@@ -89,6 +93,14 @@ impl WasmState {
 
     pub fn set_agents(&mut self, agents: Option<WasmAgents>) {
         self.agents = agents;
+    }
+
+    pub fn tool_calls(&self) -> Option<WasmToolCalls> {
+        self.tool_calls.clone()
+    }
+
+    pub fn set_tool_calls(&mut self, tool_calls: Option<WasmToolCalls>) {
+        self.tool_calls = tool_calls;
     }
 
     pub fn blobs(&self) -> Option<WasmBlobs> {

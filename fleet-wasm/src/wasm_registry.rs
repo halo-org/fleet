@@ -114,6 +114,7 @@ impl WasmProvider {
             workspace_host: capabilities.workspaces,
             agents: capabilities.agents,
             workspace_access: capabilities.workspace_access,
+            tool_calls: capabilities.tool_calls,
         };
         let blob_host = capabilities.blobs;
         let roles = capabilities.roles;

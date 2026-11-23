@@ -22,6 +22,7 @@
 //! Metadata lookups receive no blob capability. Role imports delegate to an agent-scoped
 //! [`fleet_kit::RoleStore`] through [`WasmRoles`] and are available only to tool calls.
 //! [`WasmAgents`] binds agent access to tool calls or metadata-only workspace resolution.
+//! [`WasmToolCalls`] binds access to an agent's own tool calls to its tool calls.
 //! [`WasmWorkspaceAccess`] binds role-driven workspace access to the acting agent. Workspace
 //! resolvers return references; the host resolves them through its authorized providers.
 //!
@@ -104,6 +105,7 @@ mod wasm_prompts;
 mod wasm_registry;
 mod wasm_roles;
 mod wasm_state;
+mod wasm_tool_calls;
 mod wasm_tools;
 mod wasm_worker_connection;
 mod wasm_workers;
@@ -122,6 +124,7 @@ pub use self::{
     wasm_http::WasmOrigin,
     wasm_registry::{WasmProvider, WasmRegistry},
     wasm_roles::WasmRoles,
+    wasm_tool_calls::WasmToolCalls,
     wasm_workspace_access::WasmWorkspaceAccess,
     wasm_workspace_host::WasmWorkspaceHost,
 };

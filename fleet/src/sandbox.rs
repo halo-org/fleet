@@ -5,7 +5,7 @@ use core::{
 };
 use fleet_store::Store;
 use fleet_wasm::WasmRegistry;
-use std::{ffi::OsStr, fs, io, path::Path};
+use std::{ffi::OsStr, fs, io, path::Path, sync::Arc};
 use url::Url;
 
 /// Opens a sandbox from its config and directory.
@@ -16,7 +16,7 @@ use url::Url;
 pub async fn open(
     config: Config,
     directory: &Path,
-) -> Result<(Fleet, WasmRegistry), Box<dyn Error + Send + Sync>> {
+) -> Result<(Fleet, Arc<WasmRegistry>), Box<dyn Error + Send + Sync>> {
     for (name, plugin) in &config.plugins {
         if let Some(access) = plugin.outside_access() {
             return Err(

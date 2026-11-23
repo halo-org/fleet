@@ -36,8 +36,17 @@ pub struct AgentRecord {
     pub turn_active: bool,
     pub next_position: u128,
     pub pending_messages: u64,
+    #[serde(default)]
+    pub consumed_messages: MessageCounts,
     pub pending_tool_calls: u64,
     pub synchronous_tool_calls: u64,
+}
+
+/// Message counts by mode.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+pub struct MessageCounts {
+    pub steering: u64,
+    pub queued: u64,
 }
 
 /// The state reported as an agent's activity.
@@ -80,6 +89,8 @@ pub struct ToolCallRecord {
     pub resolved_at: Option<u128>,
     pub prepared: bool,
     pub revision: u128,
+    #[serde(default)]
+    pub consumed_messages: MessageCounts,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -371,6 +382,14 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
 }
 
 impl AgentRecord {
+    /// Returns whether a pending interrupt covers the tool call.
+    #[cfg(any(feature = "subagents", feature = "tool-calls"))]
+    pub fn interrupts_tool_call(&self, call: &ToolCallRecord) -> bool {
+        self.tool_call_interrupt_intents.contains(&call.call.id)
+            || (self.interrupt_intent
+                && (self.interrupt_includes_async_tool_calls || !call.call.is_async))
+    }
+
     /// Returns whether the agent has no turn, interruption, input or tool call in progress.
     #[cfg(feature = "queries")]
     pub const fn idle(&self) -> bool {

@@ -1,9 +1,10 @@
-use crate::{Authentication, Config, Fleet, PluginRoles};
+use crate::{Authentication, Config, Fleet, PluginRoles, PluginToolCalls, TaskHandles};
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
     Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount,
-    WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmWorkspaceAccess, WasmWorkspaceHost,
+    WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmToolCalls, WasmWorkspaceAccess,
+    WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -12,6 +13,7 @@ use std::{
     fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 // === Configuration ===
@@ -75,6 +77,8 @@ pub struct PluginCapabilities {
     roles: RoleCapability,
     #[serde(default)]
     agents: bool,
+    #[serde(default)]
+    tool_calls: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +136,7 @@ pub async fn load(
     cache: Option<&Path>,
     authentication: &Authentication,
     fleet: &Fleet,
-) -> Result<WasmRegistry, Box<dyn Error + Send + Sync>> {
+) -> Result<Arc<WasmRegistry>, Box<dyn Error + Send + Sync>> {
     let order = provider_order(config)?;
     let wasm = Wasm::new()?;
     let lockfile = Lockfile::load(directory)?;
@@ -177,6 +181,7 @@ pub async fn load(
         components.insert(name, component);
     }
 
+    let task_handles = Arc::new(TaskHandles::new());
     let mut loaded = BTreeMap::<&str, WasmProvider>::new();
     for name in order {
         let provider = config.providers.get(name).expect("provider exists");
@@ -198,6 +203,7 @@ pub async fn load(
         let capabilities = capabilities_for(
             capabilities,
             workspaces,
+            &task_handles,
             fleet,
             name,
             directory,
@@ -221,12 +227,15 @@ pub async fn load(
     for (name, provider) in loaded {
         providers.insert(name, provider)?;
     }
+    let providers = Arc::new(providers);
+    task_handles.bind(&providers);
     Ok(providers)
 }
 
 fn capabilities_for(
     capabilities: &PluginCapabilities,
     workspaces: WasmRegistry,
+    task_handles: &Arc<TaskHandles<WasmRegistry>>,
     fleet: &Fleet,
     name: &str,
     directory: &Path,
@@ -282,6 +291,9 @@ fn capabilities_for(
             }
         },
         agents: capabilities.agents.then(|| agents(fleet)),
+        tool_calls: capabilities
+            .tool_calls
+            .then(|| tool_calls(fleet, task_handles)),
     })
 }
 
@@ -325,6 +337,14 @@ fn agents(fleet: &Fleet) -> WasmAgents {
             Some(call) => access.for_call(call),
             None => access,
         }
+    })
+}
+
+fn tool_calls(fleet: &Fleet, task_handles: &Arc<TaskHandles<WasmRegistry>>) -> WasmToolCalls {
+    let store = fleet.blob_store().clone();
+    let task_handles = task_handles.clone();
+    WasmToolCalls::new(move |agent, call| {
+        PluginToolCalls::new(store.clone(), agent, call, task_handles.clone())
     })
 }
 

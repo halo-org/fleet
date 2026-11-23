@@ -37,6 +37,16 @@ pub mod agent_host {
 
 pub use agent_host::fleet::providers::agents;
 
+pub mod tool_call_host {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "tool-call-host",
+        with: { "fleet:providers/types": super::types },
+    });
+}
+
+pub use tool_call_host::fleet::providers::tool_calls;
+
 pub mod authentication {
     wasmtime::component::bindgen!({
         path: "wit",

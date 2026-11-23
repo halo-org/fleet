@@ -15,7 +15,7 @@ aws-lc-rs = { workspace = true, features = ["aws-lc-sys"] }
 base64 = { workspace = true, features = ["alloc"] }
 fleet-core.workspace = true
 fleet-kit.workspace = true
-fleet-store = { workspace = true, features = ["queries", "blobs", "roles", "notifications", "subagents"] }
+fleet-store = { workspace = true, features = ["queries", "blobs", "roles", "notifications", "subagents", "tool-calls"] }
 fleet-workspaces.workspace = true
 fleet-wasm.workspace = true
 form_urlencoded = { workspace = true, features = ["alloc"] }
