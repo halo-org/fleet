@@ -11,6 +11,7 @@ pub(crate) use self::{
             agents::{self, AgentsError, EventDirection, EventPayload, EventQuery, TurnEnd},
             blobs::{self, BlobsErrorKind},
             roles,
+            tool_calls::{self, TaskStatus, ToolCallsErrorKind},
             types::{
                 AgentId, BlobId, Configured, ContentBlock, ModelOutput, Tool, ToolContext,
                 ToolOutput,
@@ -30,6 +31,7 @@ struct Agents;
 
 enum Error {
     Input(String),
+    Interrupted,
     Tools(ToolsError),
 }
 
@@ -43,6 +45,7 @@ struct Input {
     #[serde(default)]
     images: Vec<String>,
     title: Option<String>,
+    task: Option<String>,
 }
 
 impl Guest for Agents {
@@ -62,7 +65,8 @@ impl Guest for Agents {
                 "Delegate to agent in background",
                 "Runs a task in a new agent and continues without waiting. Its final response \
                  arrives as this call's result. The agent finishes when this call ends. Images \
-                 it mentions by reference are returned with the response.",
+                 it mentions by reference are returned with the response. Name the task to \
+                 wait for or cancel it with other tools.",
                 true,
             )),
             _ => None,
@@ -83,6 +87,7 @@ impl Guest for Agents {
         match oneshot(&context, &input).await {
             Ok(output) => Ok(output),
             Err(Error::Input(message)) => Ok(error_output(message)),
+            Err(Error::Interrupted) => Ok(interrupted_output()),
             Err(Error::Tools(error)) => Err(error),
         }
     }
@@ -92,15 +97,21 @@ impl Guest for Agents {
         _context: ToolContext,
         _input: String,
     ) -> Result<ToolOutput, ToolsError> {
-        Ok(error_output(
-            "The tool call was interrupted. Its remaining agent work is being stopped.",
-        ))
+        Ok(interrupted_output())
     }
 }
 
 async fn oneshot(context: &ToolContext, input: &str) -> Result<ToolOutput, Error> {
     let config = Config::load(context).map_err(Error::Tools)?;
-    let input: Input = serde_json::from_str(input)?;
+    let input: Map<String, Value> = serde_json::from_str(input)?;
+    let is_async = context.tool.name == "oneshot_agent_async";
+    if !is_async && input.contains_key("task") {
+        return Err(Error::Input("unknown field `task`".into()));
+    }
+    let input: Input = serde_json::from_value(Value::Object(input))?;
+    if let Some(task) = &input.task {
+        check_task(task).await?;
+    }
     let role = roles::get(input.role.clone())
         .await
         .map_err(|error| service_error("failed to read role", &error.message))?;
@@ -170,6 +181,28 @@ async fn oneshot(context: &ToolContext, input: &str) -> Result<ToolOutput, Error
         .await
         .map_err(|error| agents_error("failed to queue agent message", &error))?;
     response(agent, message).await
+}
+
+async fn check_task(task: &str) -> Result<(), Error> {
+    let state = tool_calls::state(None, vec![task.into()])
+        .await
+        .map_err(|error| match error.kind {
+            ToolCallsErrorKind::ScopeClosed => Error::Interrupted,
+            ToolCallsErrorKind::Conflict | ToolCallsErrorKind::Other => {
+                service_error("failed to read tool calls", &error.message)
+            }
+        })?;
+    if state
+        .task_handles
+        .iter()
+        .any(|(_, status)| matches!(status, TaskStatus::Duplicate))
+    {
+        return Err(Error::Input(format!(
+            "Another call in this conversation already uses the task name {task}. Choose a \
+             different name."
+        )));
+    }
+    Ok(())
 }
 
 async fn response(agent: AgentId, message: agents::MessageId) -> Result<ToolOutput, Error> {
@@ -310,6 +343,10 @@ fn service_error(context: &str, error: &impl core::fmt::Display) -> Error {
     })
 }
 
+fn interrupted_output() -> ToolOutput {
+    error_output("The tool call was interrupted. Its remaining agent work is being stopped.")
+}
+
 fn error_output(text: impl Into<String>) -> ToolOutput {
     ToolOutput {
         content: vec![ContentBlock::Text(text.into())],
@@ -319,47 +356,61 @@ fn error_output(text: impl Into<String>) -> ToolOutput {
 }
 
 fn metadata(name: &str, title: &str, description: &str, is_async: bool) -> Tool {
+    let mut properties = json!({
+        "role": {
+            "type": "string",
+            "description": "The role of the new agent.",
+        },
+        "parameters": {
+            "type": "object",
+            "description": "Values for the role's parameters.",
+        },
+        "prompt": {
+            "type": "string",
+            "description": "The complete task. The agent cannot see this conversation.",
+        },
+        "images": {
+            "type": "array",
+            "items": {
+                "type": "string",
+            },
+            "maxItems": IMAGE_COUNT_LIMIT,
+            "description": "Image references to attach after the prompt.",
+        },
+        "title": {
+            "type": "string",
+            "description": "A short title for the agent.",
+        },
+    });
+    let mut required = vec!["role", "prompt"];
+    let mut extensions = Map::from_iter([("fleet.title".into(), title.into())]);
+    if is_async {
+        properties
+            .as_object_mut()
+            .expect("properties are an object")
+            .insert(
+                "task".into(),
+                json!({
+                    "type": "string",
+                    "description": "A name for the task, unique in this conversation.",
+                }),
+            );
+        required.push("task");
+        extensions.insert("fleet.task_handle".into(), "task".into());
+    }
     Tool {
         name: name.into(),
         description: Some(description.into()),
         is_async,
         input_schema: json!({
             "type": "object",
-            "properties": {
-                "role": {
-                    "type": "string",
-                    "description": "The role of the new agent.",
-                },
-                "parameters": {
-                    "type": "object",
-                    "description": "Values for the role's parameters.",
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "The complete task. The agent cannot see this conversation.",
-                },
-                "images": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                    },
-                    "maxItems": IMAGE_COUNT_LIMIT,
-                    "description": "Image references to attach after the prompt.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "A short title for the agent.",
-                },
-            },
-            "required": ["role", "prompt"],
+            "properties": properties,
+            "required": required,
             "additionalProperties": false,
         })
         .to_string(),
         output_schema: None,
-        extensions: json!({
-            "fleet.title": title,
-        })
-        .to_string(),
+        extensions: Value::Object(extensions).to_string(),
     }
 }
 

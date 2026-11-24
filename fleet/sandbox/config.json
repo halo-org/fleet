@@ -6,7 +6,8 @@
       "capabilities": {
         "agents": true,
         "blobs": true,
-        "roles": "read"
+        "roles": "read",
+        "tool_calls": true
       }
     },
     "roles": {
@@ -20,6 +21,12 @@
       "capabilities": {
         "credentials": true,
         "workers": true
+      }
+    },
+    "tasks": {
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_tasks.wasm",
+      "capabilities": {
+        "tool_calls": true
       }
     },
     "tools": {
@@ -42,6 +49,9 @@
       "config": {
         "oauth": "http://127.0.0.1:1337/sandbox/oauth"
       }
+    },
+    "tasks": {
+      "plugin": "tasks"
     },
     "tools": {
       "plugin": "tools"

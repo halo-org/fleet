@@ -33,6 +33,7 @@
         "roles"
         "sandbox"
         "sprites"
+        "tasks"
         "tools"
       ];
 

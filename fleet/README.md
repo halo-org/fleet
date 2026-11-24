@@ -388,6 +388,10 @@ steering message is consumed once the wait returns, while queued messages still 
 turn to end. For calls made before this version of Fleet, messages consumed before upgrading
 are not counted.
 
+The [tasks plugin](../fleet-plugin-tasks) provides `wait` and `cancel` tools on this
+interface, and `oneshot_agent_async` in the [agents plugin](../fleet-plugin-agents) names its
+calls with a `task` handle.
+
 ## Images and blobs
 
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside

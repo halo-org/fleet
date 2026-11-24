@@ -13,14 +13,14 @@ use fleet_core::{
     ToolCall, ToolContext, ToolResult, Tools as _, ToolsErrorKind,
 };
 use fleet_kit::{
-    AgentCollection as _, AgentsQuery, Blobs as _, Queries as _, RoleStore as _, Workspace,
-    WorkspaceCommand, WorkspaceContext, WorkspaceName, WorkspaceOutput, WorkspaceResolution,
-    WorkspaceResolvers, WorkspaceWrite, Workspaces,
+    AgentCollection as _, AgentsQuery, Blobs as _, Queries as _, Revision, RoleStore as _,
+    ToolCalls, ToolCallsState, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceName,
+    WorkspaceOutput, WorkspaceResolution, WorkspaceResolvers, WorkspaceWrite, Workspaces,
 };
 use fleet_store::Store;
 use fleet_wasm::{
     Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmComponent, WasmError, WasmRegistry,
-    WasmRoles, WasmWorkspaceAccess,
+    WasmRoles, WasmToolCalls, WasmWorkspaceAccess,
 };
 use fleet_workspaces::AgentWorkspaces;
 use serde_json::json;
@@ -77,6 +77,9 @@ fn build() -> PathBuf {
     );
     target.join("wasm32-unknown-unknown/debug")
 }
+
+/// Tool call access that is never used, since these tests delegate synchronously.
+struct UnusedToolCalls;
 
 #[derive(Clone)]
 struct Providers {
@@ -155,6 +158,24 @@ impl Workspaces for Providers {
     }
 }
 
+impl ToolCalls for UnusedToolCalls {
+    type Error = Infallible;
+    fn state(
+        &self,
+        _: Option<Revision>,
+        _: &[String],
+    ) -> impl Future<Output = Result<ToolCallsState, Self::Error>> + Send {
+        core::future::pending()
+    }
+    fn interrupt(
+        &self,
+        _: &str,
+        _: &[fleet_core::ToolCallId],
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        core::future::pending()
+    }
+}
+
 fn object(value: serde_json::Value) -> JsonObject {
     let serde_json::Value::Object(object) = value else {
         panic!("expected an object")
@@ -220,6 +241,7 @@ fn providers(
                     WasmBlobs::new(store.clone())
                         .with_agents(move |id, call| blob_store.agent_blobs(id).for_call(call)),
                 ),
+                tool_calls: Some(WasmToolCalls::new(|_, _| UnusedToolCalls)),
                 ..WasmCapabilities::default()
             },
         )

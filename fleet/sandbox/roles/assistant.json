@@ -10,6 +10,9 @@
     "write": { "name": "tools:write" },
     "edit": { "name": "tools:edit" },
     "delegate": { "name": "agents:oneshot_agent" },
+    "delegate_async": { "name": "agents:oneshot_agent_async" },
+    "wait": { "name": "tasks:wait" },
+    "cancel": { "name": "tasks:cancel" },
     "read_role": { "name": "roles:read_role" }
   },
   "workspace": {

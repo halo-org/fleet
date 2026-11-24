@@ -2,8 +2,8 @@
 
 `oneshot_agent` and `oneshot_agent_async` run a task in a new child agent and
 return its response. `parent` resolves a workspace from the parent
-agent's current role. The plugin needs agent, blob and read-only role access;
-it does not need workspace I/O, process, filesystem or HTTP access.
+agent's current role. The plugin needs agent, blob, tool call and read-only role
+access; it does not need workspace I/O, process, filesystem or HTTP access.
 
 ## Calls and responses
 
@@ -19,6 +19,14 @@ returned as an error result, not skipped in favor of a later response. A final
 turn without text is reported explicitly. Async tools do not delay turn completion.
 `oneshot_agent_async` is an async tool, so its caller can continue while it waits.
 Neither tool steers the child.
+
+`oneshot_agent_async` also requires `task`, a name that tools such as the
+[tasks plugin](../fleet-plugin-tasks) use to wait for or cancel the call. It is
+declared as the call's task handle. A call whose name is already used by an
+earlier call the model can see, or by another call in the same response, returns
+an error without starting an agent. Calls made before `task` existed still run
+without a name. The plugin imports tool call access even when only
+`oneshot_agent` is used, so approve `tool_calls` for it.
 
 The driving tool call owns execution until its result is durably committed or
 it is interrupted. Ending a parent turn, retrying a call or dropping an attempt
@@ -58,7 +66,8 @@ With a `host` workspace provider configured:
       "capabilities": {
         "agents": true,
         "blobs": true,
-        "roles": "read"
+        "roles": "read",
+        "tool_calls": true
       }
     },
     "tools": {
