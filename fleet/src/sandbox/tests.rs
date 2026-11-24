@@ -645,3 +645,202 @@ fn plugins_reaching_outside_fleet_are_rejected() {
             }
         });
 }
+
+/// Puts a `broken` role whose `missing` tool does not exist, or the same role without it.
+async fn put_broken_role(fleet: &Fleet, fixed: bool) {
+    let mut role = json!({
+        "model": { "name": "sandbox:scripted" },
+        "tools": { "missing": { "name": "tools:missing" } },
+    });
+    let (status, current) = call(fleet, "GET", "/roles/broken", None).await;
+    let status = if status == StatusCode::OK {
+        assert!(fixed);
+        role["tools"] = json!({});
+        let version = format!("\"{}\"", current["version"].as_str().unwrap());
+        call_with(
+            fleet,
+            "PUT",
+            "/roles/broken",
+            &[("if-match", &version)],
+            Some(&role),
+        )
+        .await
+        .0
+    } else {
+        call_with(
+            fleet,
+            "PUT",
+            "/roles/broken",
+            &[("if-none-match", "*")],
+            Some(&role),
+        )
+        .await
+        .0
+    };
+    assert!(status.is_success());
+}
+
+/// Creates agent 1, which delegates to an assistant that delegates to a `broken` agent, and
+/// waits until the `broken` agent is stalled. Returns the IDs of the root's descendants.
+async fn start_stalled_chain(fleet: &Fleet) -> [String; 2] {
+    put_broken_role(fleet, false).await;
+    let delegate = |role: &str, prompt: &Value| {
+        json!({
+            "tool_calls": [{
+                "tool": "delegate",
+                "input": { "role": role, "prompt": prompt.to_string() },
+            }],
+        })
+    };
+    let child = json!({ "steps": [delegate("broken", &json!({})), { "text": "Child done." }] });
+    let root = json!({ "steps": [delegate("assistant", &child), { "text": "Root done." }] });
+    let agent = json!({ "id": "1", "role": "assistant", "message": message(1, &root) });
+    let (status, _) = call(fleet, "POST", "/agents", Some(&agent)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while call(fleet, "GET", "/agents/1/activity", None).await.1["stalled_descendants"] != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (_, children) = call(fleet, "GET", "/agents?parent=1", None).await;
+    let child = children["agents"][0]["id"].as_str().unwrap().to_owned();
+    let (_, children) = call(fleet, "GET", &format!("/agents?parent={child}"), None).await;
+    let grandchild = children["agents"][0]["id"].as_str().unwrap().to_owned();
+    [child, grandchild]
+}
+
+/// Returns each agent's own stall and its count of stalled descendants.
+async fn stalls(fleet: &Fleet, agents: &[&str]) -> Vec<(Value, Value)> {
+    let mut stalls = Vec::new();
+    for agent in agents {
+        let (_, activity) = call(fleet, "GET", &format!("/agents/{agent}/activity"), None).await;
+        stalls.push((
+            activity["stalled"].clone(),
+            activity["stalled_descendants"].clone(),
+        ));
+    }
+    stalls
+}
+
+fn event_types(events: &[Value]) -> Vec<&str> {
+    events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect()
+}
+
+/// Asserts that a stalled chain shows its stall only through activity and counts.
+async fn assert_stalled_chain(fleet: &Fleet, [child, grandchild]: &[String; 2]) {
+    let stalled = json!({
+        "kind": "tool_not_found",
+        "role": "broken",
+        "alias": "missing",
+        "tool": "tools:missing",
+    });
+    assert_eq!(
+        stalls(fleet, &["1", child, grandchild]).await,
+        [
+            (Value::Null, json!(1)),
+            (Value::Null, json!(1)),
+            (stalled, json!(0)),
+        ]
+    );
+    for agent in ["1", child] {
+        let events = events(fleet, agent).await;
+        assert_eq!(event_types(&events), ["input", "model_response"]);
+    }
+    assert_eq!(event_types(&events(fleet, grandchild).await), ["input"]);
+    let (_, agents) = call(fleet, "GET", "/agents", None).await;
+    assert_eq!(agents["agents"][0]["inbox"], "busy");
+    assert_eq!(agents["agents"][0]["stalled_descendants"], 1);
+}
+
+/// Fixes the `broken` role, resumes the root, and waits for the root's turn to end.
+async fn resume_stalled_chain(fleet: &Fleet, [child, grandchild]: &[String; 2]) {
+    put_broken_role(fleet, true).await;
+    let (status, _) = call(fleet, "POST", "/agents/1/resumes", Some(&json!({}))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let end = fleet.wait_for_turn_end(1.into(), 1.into()).await.unwrap();
+    assert_eq!(end.payload, TurnEnd::Completed);
+    assert_eq!(reply(fleet).await, "Root done.");
+    assert_eq!(
+        stalls(fleet, &["1", child, grandchild]).await,
+        vec![(Value::Null, json!(0)); 3]
+    );
+}
+
+#[test]
+fn resuming_a_root_resumes_its_stalled_subagents() {
+    run(async |fleet| {
+        let chain = start_stalled_chain(fleet).await;
+
+        assert_stalled_chain(fleet, &chain).await;
+        resume_stalled_chain(fleet, &chain).await;
+    });
+}
+
+#[test]
+fn stalled_subagents_stay_stalled_across_restarts() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::memory().unwrap();
+            let mut chain = None;
+
+            for restarted in [false, true] {
+                let (fleet, providers) = open_store(config(json!({})), &directory(), store.clone())
+                    .await
+                    .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    future::join(fleet.run(&*providers, &*providers, &*providers), async {
+                        if restarted {
+                            let chain = chain.as_ref().unwrap();
+                            assert_stalled_chain(&fleet, chain).await;
+                            resume_stalled_chain(&fleet, chain).await;
+                        } else {
+                            chain = Some(start_stalled_chain(&fleet).await);
+                        }
+                        fleet.shutdown();
+                    }),
+                )
+                .await
+                .unwrap();
+                providers.shutdown().await;
+            }
+        });
+}
+
+#[test]
+fn interrupting_a_root_stops_its_stalled_subagents() {
+    run(async |fleet| {
+        let [child, grandchild] = start_stalled_chain(fleet).await;
+        let interrupt = json!({ "include_async_tool_calls": false });
+
+        let (status, _) = call(fleet, "POST", "/agents/1/interrupts", Some(&interrupt)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let end = fleet.wait_for_turn_end(1.into(), 1.into()).await.unwrap();
+        assert_eq!(end.payload, TurnEnd::Interrupted);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while stalls(fleet, &["1", &child, &grandchild]).await
+                != vec![(Value::Null, json!(0)); 3]
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        for agent in [&child, &grandchild] {
+            let events = events(fleet, agent).await;
+            assert_eq!(events.last().unwrap()["type"], "turn_end");
+        }
+    });
+}

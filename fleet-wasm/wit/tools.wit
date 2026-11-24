@@ -10,6 +10,8 @@ interface tools {
     enum tools-error-kind {
         /// Retrying the tool call risks repeating effects of an earlier attempt.
         unsafe-to-retry,
+        /// The provider rejected the call and would reject it again if repeated.
+        rejected,
         /// An error not covered by any other kind.
         other,
     }

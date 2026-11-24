@@ -16,6 +16,8 @@ interface models {
         invalid-compaction,
         /// The context of the conversation exceeds the model's context window.
         context-too-long,
+        /// The provider rejected the call and would reject it again if repeated.
+        rejected,
         /// An error not covered by any other kind.
         other,
     }

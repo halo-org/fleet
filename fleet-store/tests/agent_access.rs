@@ -278,6 +278,7 @@ fn interrupts_close_scopes_of_interrupted_calls() {
                 turn: TurnStatus::Idle,
                 interrupt_pending: true,
                 interrupt_includes_async_tool_calls: true,
+                ..AgentActivity::default()
             })
         );
     });

@@ -60,6 +60,7 @@ impl Store {
             .call(|worker| {
                 let transaction = worker.database.begin_write()?;
                 let mut changed = Vec::new();
+                let mut ancestors = Vec::new();
                 let mut released = false;
                 let remaining = {
                     let mut records = Records(transaction.open_table(records::RECORDS)?);
@@ -77,12 +78,12 @@ impl Store {
                         {
                             continue;
                         }
-                        scope.closing = true;
+                        let closed = !core::mem::replace(&mut scope.closing, true);
                         let mut agent = records.agent(id)?;
                         let interrupt = !(agent.interrupt_intent
                             && agent.interrupt_includes_async_tool_calls)
                             && (agent.turn_active || agent.pending_tool_calls != 0);
-                        if interrupt || agent.pending_messages != 0 {
+                        if interrupt || closed || agent.pending_messages != 0 {
                             let activity = agent.activity();
                             agent.revision = agent
                                 .revision
@@ -92,6 +93,9 @@ impl Store {
                             if interrupt {
                                 agent.interrupt_intent = true;
                                 agent.interrupt_includes_async_tool_calls = true;
+                            }
+                            if interrupt || closed {
+                                ancestors.extend(crate::stalls::clear(&mut records, &mut agent)?);
                             }
                             records.update_activity(&mut agent, &activity)?;
                             records.save_agent(&agent)?;
@@ -122,6 +126,7 @@ impl Store {
                 if !changed.is_empty() {
                     worker.listeners.notify(Topic::Agents);
                 }
+                worker.notify_changed(&ancestors);
                 if released {
                     worker.listeners.notify(Topic::WorkspaceReleases);
                 }
@@ -216,7 +221,8 @@ impl AgentAccess {
                             }
                         }
                     }
-                    let (agent, wake) = crate::store::apply_agent_request(&mut records, &request)?;
+                    let (agent, wake, ancestors) =
+                        crate::store::apply_agent_request(&mut records, &request)?;
                     crate::agents::sync_agent(&mut records, &agent, crate::agents::now_millis())?;
                     scopes.insert(
                         id,
@@ -228,12 +234,14 @@ impl AgentAccess {
                         .as_slice(),
                     )?;
                     receipts.insert(key.as_str(), serde_json::to_vec(&request)?.as_slice())?;
-                    wake
+                    (wake, ancestors)
                 };
                 transaction.commit()?;
+                let (wake, ancestors) = wake;
                 worker.listeners.notify(Topic::Agent(id));
                 worker.listeners.notify(Topic::Agents);
                 worker.listeners.notify(Topic::AgentScopes);
+                worker.notify_changed(&ancestors);
                 if wake {
                     worker.notify_wake(id, false);
                 }

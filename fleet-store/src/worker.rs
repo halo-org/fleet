@@ -117,6 +117,19 @@ impl Worker {
         Ok(result)
     }
 
+    /// Notifies subscribers of agents whose activity and summary changed.
+    pub fn notify_changed<'a>(&self, agents: impl IntoIterator<Item = &'a u128>) {
+        let mut changed = false;
+        for id in agents {
+            self.listeners.notify(Topic::Agent(*id));
+            changed = true;
+        }
+        if changed {
+            self.listeners.notify(Topic::Agents);
+            self.listeners.notify(Topic::Snoozes);
+        }
+    }
+
     pub fn notify_wake(&mut self, agent_id: u128, interrupt: bool) {
         self.wake_sequence = self
             .wake_sequence

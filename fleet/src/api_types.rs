@@ -3,8 +3,8 @@ use core::{num::NonZeroUsize, str::FromStr};
 use fleet_core::{
     Agent, Compaction, Configured, ContentBlock, Event, EventPayload, JsonObject, Message,
     MessageMode, ModelCompaction, ModelInput, ModelOutput, ModelProvenance, ModelProviderToolCall,
-    ModelReasoning, ModelResponse, ModelUsage, Role, RoleParameterTarget, ToolCall, ToolOutput,
-    ToolResult, TurnEnd,
+    ModelReasoning, ModelResponse, ModelUsage, Role, RoleParameterTarget, StallReason, ToolCall,
+    ToolOutput, ToolResult, TurnEnd,
 };
 use fleet_kit::{
     AgentActivity, AgentMetadata, AgentUpdates, EventDirection, EventQuery, EventRecord,
@@ -129,6 +129,15 @@ pub struct InterruptToolCallsRequest {
     /// The IDs of the tool calls to interrupt.
     pub call_ids: Vec<String>,
 }
+
+/// A request to resume an agent and its stalled descendants.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "the request is an empty JSON object"
+)]
+pub struct ResumeAgentRequest {}
 
 /// A query for changes after a revision.
 #[derive(Debug, Default, Deserialize)]
@@ -327,6 +336,8 @@ pub struct ApiAgentSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     until: Option<u64>,
     interrupt_pending: bool,
+    stalled: Option<ApiStallReason>,
+    stalled_descendants: u64,
     position: String,
 }
 
@@ -344,6 +355,8 @@ impl From<fleet_kit::AgentSummary> for ApiAgentSummary {
             since: value.since,
             until: value.until,
             interrupt_pending: value.interrupt_pending,
+            stalled: value.stalled.map(Into::into),
+            stalled_descendants: value.stalled_descendants,
             position: agent_position(value.position),
         }
     }
@@ -453,6 +466,67 @@ pub struct ApiAgentActivity {
     pub interrupt_pending: bool,
     /// Whether the pending interrupt includes async tool calls.
     pub interrupt_includes_async_tool_calls: bool,
+    /// Why the agent is stalled, or null.
+    pub stalled: Option<ApiStallReason>,
+    /// How many of the agent's descendants are stalled.
+    pub stalled_descendants: u64,
+}
+
+/// Why an agent is stalled.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApiStallReason {
+    /// The agent's role does not exist.
+    RoleNotFound {
+        /// The role name.
+        role: String,
+    },
+    /// The role's model does not exist.
+    ModelNotFound {
+        /// The role name.
+        role: String,
+        /// The model name.
+        model: String,
+    },
+    /// A tool of the role does not exist.
+    ToolNotFound {
+        /// The role name.
+        role: String,
+        /// The alias the role gives the tool.
+        alias: String,
+        /// The tool name.
+        tool: String,
+    },
+    /// The agent's parameters cannot be applied to the role's model config.
+    InvalidModelParameters {
+        /// The role name.
+        role: String,
+    },
+    /// The agent's parameters cannot be applied to a tool config of the role.
+    InvalidToolParameters {
+        /// The role name.
+        role: String,
+    },
+    /// The agent's parameters cannot be applied to the role's extensions.
+    InvalidExtensionParameters {
+        /// The role name.
+        role: String,
+    },
+    /// The model's provider needs a change, such as signing in.
+    ModelError {
+        /// The model name.
+        model: String,
+    },
+    /// The tool's provider needs a change, such as signing in.
+    ToolError {
+        /// The tool name.
+        tool: String,
+    },
+    /// The tools provider needs a change to answer a call to a tool the role does not have.
+    UnknownToolError {
+        /// The alias the model called.
+        alias: String,
+    },
 }
 
 /// A turn's current status.
@@ -1386,6 +1460,41 @@ impl From<AgentActivity> for ApiAgentActivity {
             },
             interrupt_pending: activity.interrupt_pending,
             interrupt_includes_async_tool_calls: activity.interrupt_includes_async_tool_calls,
+            stalled: activity.stalled.map(Into::into),
+            stalled_descendants: activity.stalled_descendants,
+        }
+    }
+}
+
+impl From<StallReason> for ApiStallReason {
+    fn from(reason: StallReason) -> Self {
+        match reason {
+            StallReason::RoleNotFound { role } => Self::RoleNotFound { role: role.into() },
+            StallReason::ModelNotFound { role, model } => Self::ModelNotFound {
+                role: role.into(),
+                model: model.into(),
+            },
+            StallReason::ToolNotFound { role, alias, tool } => Self::ToolNotFound {
+                role: role.into(),
+                alias: alias.into(),
+                tool: tool.into(),
+            },
+            StallReason::InvalidModelParameters { role } => {
+                Self::InvalidModelParameters { role: role.into() }
+            }
+            StallReason::InvalidToolParameters { role } => {
+                Self::InvalidToolParameters { role: role.into() }
+            }
+            StallReason::InvalidExtensionParameters { role } => {
+                Self::InvalidExtensionParameters { role: role.into() }
+            }
+            StallReason::ModelError { model } => Self::ModelError {
+                model: model.into(),
+            },
+            StallReason::ToolError { tool } => Self::ToolError { tool: tool.into() },
+            StallReason::UnknownToolError { alias } => Self::UnknownToolError {
+                alias: alias.into(),
+            },
         }
     }
 }

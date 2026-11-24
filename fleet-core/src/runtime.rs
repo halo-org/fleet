@@ -8,8 +8,8 @@ use crate::{
     EventLog, EventPayload, IdleHandler, Model, ModelCompactionResponse, ModelContext,
     ModelContinuation, ModelInput, ModelOutput, ModelRequest, ModelResponse, ModelResponseChunk,
     ModelTool, Models, OperationError, ParametersError, Role, RoleInstance, Roles, RuntimeError,
-    RuntimeStore, RuntimeStoreErrorKind, Signal, SignalReceiver, SignalSender, ToolCall,
-    ToolCallId, ToolContext, ToolResult, Tools, ToolsErrorKind, Wake,
+    RuntimeStore, RuntimeStoreErrorKind, Signal, SignalReceiver, SignalSender, StallReason,
+    StallToken, ToolCall, ToolCallId, ToolContext, ToolResult, Tools, ToolsErrorKind, Wake,
 };
 use alloc::{
     boxed::Box,
@@ -72,6 +72,8 @@ struct ToolCallTask {
     call: ToolCall,
     abort_handle: AbortHandle,
     registration: Option<AbortRegistration>,
+    stall_token: Option<StallToken>,
+    stall_reason: Option<StallReason>,
 }
 
 enum ReconcileAction {
@@ -80,9 +82,12 @@ enum ReconcileAction {
         pending_tool_calls: Vec<ToolCall>,
         completed_tool_calls: Vec<ToolCallId>,
     },
-    StartToolCalls,
+    StartToolCalls {
+        stall_token: StallToken,
+    },
     Continue,
     Wait,
+    Stall,
     Stop,
 }
 
@@ -99,6 +104,11 @@ struct AgentRole {
 enum Outcome<T> {
     Completed(T),
     Obsolete,
+}
+
+struct ToolCallFailure {
+    call_id: ToolCallId,
+    reason: StallReason,
 }
 
 #[derive(Debug)]
@@ -123,6 +133,36 @@ macro_rules! retry {
                 if let Ok(value) = result {
                     break value;
                 }
+            }
+        }
+    };
+}
+
+// Retries like `retry!` until an error that retrying alone cannot fix, returning its stall reason.
+macro_rules! retry_or_stall {
+    ($runtime:expr, $agent_id:expr, $attempt:expr $(,)?) => {
+        async {
+            let mut backoff = Backoff::new(&($runtime).error_handler);
+
+            loop {
+                let error: OperationError<S::Error, R::Error, M::Error, T::Error> =
+                    match ($attempt).await {
+                        Ok(value) => break Ok(value),
+                        Err(error) => error,
+                    };
+
+                let Some(reason) = error.stall_reason() else {
+                    let result = Err::<(), _>(Self::error(Some($agent_id), error));
+                    backoff.handle_result(&result).await;
+                    continue;
+                };
+
+                ($runtime)
+                    .error_handler
+                    .handle_error(Self::error(Some($agent_id), error))
+                    .await;
+
+                break Err(reason);
             }
         }
     };
@@ -226,6 +266,10 @@ where
 
     // === Reconciliation ===
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "handles every reconcile action and task event in one loop"
+    )]
     async fn reconcile(
         &self,
         mut receiver: SignalReceiver,
@@ -236,7 +280,7 @@ where
         let mut tool_call_futures = FuturesUnordered::new();
 
         loop {
-            let mut tool_results = Vec::<ToolResult>::new();
+            let mut tool_outcomes = Vec::<Result<Outcome<ToolResult>, ToolCallFailure>>::new();
             let mut received_check = false;
 
             let action = {
@@ -264,12 +308,10 @@ where
                     };
 
                     match event {
-                        Either::Left(Outcome::Completed(tool_result)) => {
-                            tool_results.push(tool_result);
-                        }
-                        Either::Left(Outcome::Obsolete) | Either::Right(Signal::Recheck) => {
+                        Either::Left(Ok(Outcome::Obsolete)) | Either::Right(Signal::Recheck) => {
                             break ReconcileAction::Continue;
                         }
+                        Either::Left(tool_outcome) => tool_outcomes.push(tool_outcome),
                         Either::Right(Signal::Check) => {
                             received_check = true;
                             abort.set(self.abort_interrupted_tool_calls(agent_id, &state).fuse());
@@ -279,10 +321,10 @@ where
                 }
             };
 
-            let step_is_stale = received_check || !tool_results.is_empty();
+            let step_is_stale = received_check || !tool_outcomes.is_empty();
 
-            for tool_result in tool_results {
-                state.record_tool_result(tool_result);
+            for tool_outcome in tool_outcomes {
+                state.record_tool_outcome(tool_outcome);
             }
 
             match action {
@@ -309,9 +351,11 @@ where
 
                     state.cursor = Some(cursor);
                 }
-                ReconcileAction::StartToolCalls => {
+                ReconcileAction::StartToolCalls { stall_token } if !step_is_stale => {
                     for task in state.tool_calls.values_mut() {
                         if let Some(registration) = task.registration.take() {
+                            task.stall_token = Some(stall_token);
+                            task.stall_reason = None;
                             tool_call_futures.push(self.execute_interruptible_tool_call(
                                 agent_id,
                                 task.call.clone(),
@@ -320,7 +364,7 @@ where
                         }
                     }
                 }
-                ReconcileAction::Continue => {}
+                ReconcileAction::StartToolCalls { .. } | ReconcileAction::Continue => {}
                 ReconcileAction::Wait if step_is_stale => {}
                 ReconcileAction::Wait if tool_call_futures.is_empty() => {
                     match receiver.take_signal() {
@@ -331,13 +375,23 @@ where
                 }
                 ReconcileAction::Wait => {
                     match future::select(tool_call_futures.next(), receiver.signal()).await {
-                        Either::Left((Some(Outcome::Completed(tool_result)), _)) => {
-                            state.record_tool_result(tool_result);
+                        Either::Left((Some(tool_outcome), _)) => {
+                            state.record_tool_outcome(tool_outcome);
                         }
                         Either::Left((None, _)) => unreachable!("never empty in this branch"),
-                        Either::Left((Some(Outcome::Obsolete), _))
-                        | Either::Right((Signal::Check | Signal::Recheck, _)) => {}
+                        Either::Right((Signal::Check | Signal::Recheck, _)) => {}
                         Either::Right((Signal::Stop, _)) => return None,
+                    }
+                }
+                ReconcileAction::Stall => {
+                    state = ReconcileState::new(None);
+                    tool_call_futures.clear();
+
+                    if !received_check {
+                        match receiver.take_signal() {
+                            Some(Signal::Check | Signal::Recheck) => {}
+                            Some(Signal::Stop) | None => return None,
+                        }
                     }
                 }
                 ReconcileAction::Stop => return None,
@@ -357,6 +411,10 @@ where
         else {
             return ReconcileAction::Stop;
         };
+
+        if agent.is_stalled {
+            return ReconcileAction::Stall;
+        }
 
         if let Some(latest_event) = agent.latest_event
             && state.has_unread_events(latest_event)
@@ -380,12 +438,22 @@ where
             return self.reconcile_tool_results(agent_id, state).await;
         }
 
+        if let Some(reason) = state
+            .tool_calls
+            .values()
+            .find_map(|task| task.stall_reason(&agent))
+        {
+            return self.stall(agent_id, &agent, reason).await;
+        }
+
         if state
             .tool_calls
             .values()
             .any(|task| task.registration.is_some())
         {
-            return ReconcileAction::StartToolCalls;
+            return ReconcileAction::StartToolCalls {
+                stall_token: agent.stall_token,
+            };
         }
 
         if state.tool_calls.values().any(|task| !task.call.is_async) {
@@ -402,7 +470,7 @@ where
             return self.reconcile_parked(agent_id, None).await;
         };
 
-        self.reconcile_conversation(agent_id, state, latest_event, is_parked)
+        self.reconcile_conversation(agent_id, &agent, state, latest_event, is_parked)
             .await
     }
 
@@ -484,8 +552,14 @@ where
         let mut is_ready = true;
 
         for task in state.interrupted_tool_calls(agent) {
+            if let Some(reason) = task.stall_reason(agent) {
+                return self.stall(agent_id, agent, reason).await;
+            }
+
             if task.registration.is_some() {
-                return ReconcileAction::StartToolCalls;
+                return ReconcileAction::StartToolCalls {
+                    stall_token: agent.stall_token,
+                };
             }
 
             match state.tool_results.get(&task.call.id) {
@@ -564,6 +638,7 @@ where
     async fn reconcile_conversation(
         &self,
         agent_id: AgentId,
+        agent: &AgentState,
         state: &ReconcileState,
         latest_event: EventCursor,
         is_parked: bool,
@@ -589,7 +664,7 @@ where
             }
         }
 
-        retry!(self, agent_id, async {
+        let result = retry_or_stall!(self, agent_id, async {
             let Outcome::Completed(mut agent_role) = self.agent_role(agent_id).await? else {
                 return Ok(ReconcileAction::Stop);
             };
@@ -649,7 +724,12 @@ where
             self.append_model_result(&agent_role, latest_event, state, model_result)
                 .await
         })
-        .await
+        .await;
+
+        match result {
+            Ok(action) => action,
+            Err(reason) => self.stall(agent_id, agent, &reason).await,
+        }
     }
 
     // === Tools ===
@@ -659,24 +739,27 @@ where
         agent_id: AgentId,
         tool_call: ToolCall,
         registration: AbortRegistration,
-    ) -> Outcome<ToolResult> {
+    ) -> Result<Outcome<ToolResult>, ToolCallFailure> {
+        let call_id = tool_call.id.clone();
         let execution = Abortable::new(
             self.execute_tool_call(agent_id, tool_call.clone()),
             registration,
         );
 
-        match execution.await {
-            Ok(outcome) => outcome,
+        let result = match execution.await {
+            Ok(result) => result,
             Err(Aborted) => self.interrupt_tool_call(agent_id, tool_call).await,
-        }
+        };
+
+        result.map_err(|reason| ToolCallFailure { call_id, reason })
     }
 
     async fn execute_tool_call(
         &self,
         agent_id: AgentId,
         tool_call: ToolCall,
-    ) -> Outcome<ToolResult> {
-        self.retry(agent_id, async || {
+    ) -> Result<Outcome<ToolResult>, StallReason> {
+        retry_or_stall!(self, agent_id, async {
             let Outcome::Completed(agent_role) = self.agent_role(agent_id).await? else {
                 return Ok(Outcome::Obsolete);
             };
@@ -755,8 +838,8 @@ where
         &self,
         agent_id: AgentId,
         tool_call: ToolCall,
-    ) -> Outcome<ToolResult> {
-        self.retry(agent_id, async || {
+    ) -> Result<Outcome<ToolResult>, StallReason> {
+        retry_or_stall!(self, agent_id, async {
             let Outcome::Completed(agent_role) = self.agent_role(agent_id).await? else {
                 return Ok(Outcome::Obsolete);
             };
@@ -1135,6 +1218,29 @@ where
         RuntimeError::new(agent_id, source)
     }
 
+    async fn stall(
+        &self,
+        agent_id: AgentId,
+        agent: &AgentState,
+        reason: &StallReason,
+    ) -> ReconcileAction {
+        self.retry(agent_id, async || {
+            let result = self
+                .store
+                .stall(agent_id, agent.latest_event, agent.stall_token, reason)
+                .await;
+
+            match result {
+                Ok(()) => Ok(ReconcileAction::Stall),
+                Err(error) if error.kind() == RuntimeStoreErrorKind::Conflict => {
+                    Ok(ReconcileAction::Continue)
+                }
+                Err(error) => Err(OperationError::StallAgent(error)),
+            }
+        })
+        .await
+    }
+
     async fn retry<U, A>(&self, agent_id: AgentId, mut attempt: impl FnMut() -> A) -> U
     where
         A: Future<Output = Result<U, OperationError<S::Error, R::Error, M::Error, T::Error>>>,
@@ -1264,11 +1370,22 @@ impl ReconcileState {
         })
     }
 
-    fn record_tool_result(&mut self, result: ToolResult) {
-        if self.tool_calls.contains_key(&result.call_id) {
-            self.tool_results
-                .entry(result.call_id.clone())
-                .or_insert(result);
+    fn record_tool_outcome(&mut self, tool_outcome: Result<Outcome<ToolResult>, ToolCallFailure>) {
+        match tool_outcome {
+            Ok(Outcome::Completed(result)) if self.tool_calls.contains_key(&result.call_id) => {
+                self.tool_results
+                    .entry(result.call_id.clone())
+                    .or_insert(result);
+            }
+            Err(failure) => {
+                if let Some(task) = self.tool_calls.get_mut(&failure.call_id) {
+                    let (abort_handle, registration) = AbortHandle::new_pair();
+                    task.abort_handle = abort_handle;
+                    task.registration = Some(registration);
+                    task.stall_reason = Some(failure.reason);
+                }
+            }
+            Ok(Outcome::Completed(_) | Outcome::Obsolete) => {}
         }
     }
 }
@@ -1281,7 +1398,15 @@ impl ToolCallTask {
             call,
             abort_handle,
             registration: Some(registration),
+            stall_token: None,
+            stall_reason: None,
         }
+    }
+
+    fn stall_reason(&self, agent: &AgentState) -> Option<&StallReason> {
+        self.stall_reason
+            .as_ref()
+            .filter(|_| self.stall_token == Some(agent.stall_token))
     }
 }
 

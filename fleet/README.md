@@ -392,6 +392,62 @@ The [tasks plugin](../fleet-plugin-tasks) provides `wait` and `cancel` tools on 
 interface, and `oneshot_agent_async` in the [agents plugin](../fleet-plugin-agents) names its
 calls with a `task` handle.
 
+## Stalled agents
+
+Fleet retries failed work with backoff and logs each failure, since time often fixes it. Some
+errors need a change first, such as a role naming a missing model or tool, agent parameters
+the role cannot apply, or a provider that needs the user to sign in. These stall the agent
+instead. Fleet logs the error once, records why the agent is stalled, and stops working on it.
+Stalling adds no event and does not end the turn, so an agent waiting on a stalled subagent
+keeps waiting. Stalling does not change the inbox or itself send a notification. Stalled agents
+stay stalled when Fleet restarts.
+
+Sending a message to an agent, interrupting it or its tool calls, or resuming it clears its
+stall. Fleet then works on the agent again, and it stalls again if that work hits the same
+error. Changing roles, plugins, credentials, or configuration does not clear stalls. A subagent
+whose driving call ends has its stall cleared as its scope closes.
+
+Agent activity and summaries report `stalled`, the reason or `null`, and
+`stalled_descendants`, how many agents created by the agent's tool calls, and theirs, are
+stalled. Both update through the agent and collection subscriptions. A reason has a `kind`
+and the names involved, never a message:
+
+| `kind` | Fields |
+| --- | --- |
+| `role_not_found` | `role` |
+| `model_not_found` | `role`, `model` |
+| `tool_not_found` | `role`, `alias`, `tool` |
+| `invalid_model_parameters` | `role` |
+| `invalid_tool_parameters` | `role` |
+| `invalid_extension_parameters` | `role` |
+| `model_error` | `model` |
+| `tool_error` | `tool` |
+| `unknown_tool_error` | `alias` |
+
+For example, `GET /agents/1/activity` returns
+
+```json
+{
+  "turn": "active",
+  "interrupt_pending": false,
+  "interrupt_includes_async_tool_calls": false,
+  "stalled": {
+    "kind": "tool_not_found",
+    "role": "researcher",
+    "alias": "search",
+    "tool": "web:search"
+  },
+  "stalled_descendants": 0
+}
+```
+
+`POST /agents/1/resumes` with JSON `{}` and an `Idempotency-Key` resumes agent `1` and every
+stalled agent below it, returning 202. Fleet retries their outstanding work. Agents that
+aren't stalled are not woken, though their `stalled_descendants` counts update.
+
+Model and tool providers report these errors with the `rejected` error kind. Rebuild provider
+components against the updated WIT files before using this version.
+
 ## Images and blobs
 
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside

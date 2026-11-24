@@ -1,5 +1,6 @@
 use crate::api_types::{
-    AgentsReadQuery, ApiAgentsPage, SetInboxRequest, SetPinnedRequest, SetTitleRequest,
+    AgentsReadQuery, ApiAgentsPage, ResumeAgentRequest, SetInboxRequest, SetPinnedRequest,
+    SetTitleRequest,
 };
 use crate::{
     ApiAgent, ApiAgentActivity, ApiEvent, ApiMessage, ApiMessageRecord, ApiProvider, ApiRole,
@@ -116,6 +117,9 @@ where
         (&Method::POST, ["", "agents", agent_id, "tool-calls", "interrupts"]) => {
             interrupt_tool_calls(fleet, parse_id(agent_id)?, &parts.headers, body).await
         }
+        (&Method::POST, ["", "agents", agent_id, "resumes"]) => {
+            resume_agent(fleet, parse_id(agent_id)?, &parts.headers, body).await
+        }
         (&Method::GET, ["", "agents", agent_id]) => {
             agent(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
@@ -150,9 +154,11 @@ where
         (_, ["", "agents"] | ["", "agents", _, "messages"]) => {
             Err(ApiError::MethodNotAllowed("GET, POST"))
         }
-        (_, ["", "agents", _, "interrupts"] | ["", "agents", _, "tool-calls", "interrupts"]) => {
-            Err(ApiError::MethodNotAllowed("POST"))
-        }
+        (
+            _,
+            ["", "agents", _, "interrupts" | "resumes"]
+            | ["", "agents", _, "tool-calls", "interrupts"],
+        ) => Err(ApiError::MethodNotAllowed("POST")),
         (
             _,
             ["", "agents", _]
@@ -473,6 +479,27 @@ where
             agent_id,
             request.call_ids.into_iter().map(Into::into).collect(),
         )
+        .await
+        .map_err(ApiError::Fleet)?;
+
+    Ok(empty_response(StatusCode::ACCEPTED))
+}
+
+async fn resume_agent<B>(
+    fleet: &Fleet,
+    agent_id: AgentId,
+    headers: &HeaderMap,
+    body: B,
+) -> Result<Response<ResponseBody>, ApiError>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn Error + Send + Sync>>,
+{
+    let idempotency_key = idempotency_key(headers)?;
+    let ResumeAgentRequest {} = read_json(headers, body).await?;
+
+    fleet
+        .resume_subtree(idempotency_key, agent_id)
         .await
         .map_err(ApiError::Fleet)?;
 

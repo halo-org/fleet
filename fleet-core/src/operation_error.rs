@@ -1,4 +1,7 @@
-use crate::{EventCursor, ModelName, ParametersError, RoleName, ToolAlias, ToolCallId, ToolName};
+use crate::{
+    Error, EventCursor, ModelName, ModelsErrorKind, ParametersError, RoleName, StallReason,
+    ToolAlias, ToolCallId, ToolName, ToolsErrorKind,
+};
 use core::fmt;
 
 #[derive(Debug)]
@@ -12,6 +15,7 @@ pub enum OperationError<S, R, M, T> {
     LoadAgentState(S),
     ConsumeMessages(S),
     ParkAgent(S),
+    StallAgent(S),
     SettleInterrupt(S),
     PrepareToolCall {
         call_id: ToolCallId,
@@ -102,7 +106,87 @@ pub enum OperationError<S, R, M, T> {
     },
 }
 
+impl<S, R, M, T> OperationError<S, R, M, T>
+where
+    M: Error<ModelsErrorKind>,
+    T: Error<ToolsErrorKind>,
+{
+    pub fn stall_reason(&self) -> Option<StallReason> {
+        match self {
+            Self::RoleNotFound { role } => Some(StallReason::RoleNotFound { role: role.clone() }),
+            Self::ModelNotFound { role, model } => Some(StallReason::ModelNotFound {
+                role: role.clone(),
+                model: model.clone(),
+            }),
+            Self::ToolNotFound { role, alias, tool } => Some(StallReason::ToolNotFound {
+                role: role.clone(),
+                alias: alias.clone(),
+                tool: tool.clone(),
+            }),
+            Self::ApplyModelParameters { role, source: _ } => {
+                Some(StallReason::InvalidModelParameters { role: role.clone() })
+            }
+            Self::ApplyToolParameters { role, source: _ } => {
+                Some(StallReason::InvalidToolParameters { role: role.clone() })
+            }
+            Self::ApplyExtensionParameters { role, source: _ } => {
+                Some(StallReason::InvalidExtensionParameters { role: role.clone() })
+            }
+            Self::LoadModel { model, source }
+            | Self::GenerateModelResponse { model, source }
+            | Self::CompactModelInput { model, source }
+                if source.kind() == ModelsErrorKind::Rejected =>
+            {
+                Some(StallReason::ModelError {
+                    model: model.clone(),
+                })
+            }
+            Self::LoadTool { tool, source }
+            | Self::ExecuteTool { tool, source, .. }
+            | Self::ProduceInterruptedToolOutput { tool, source, .. }
+                if source.kind() == ToolsErrorKind::Rejected =>
+            {
+                Some(StallReason::ToolError { tool: tool.clone() })
+            }
+            Self::ProduceUnknownToolOutput { alias, source, .. }
+                if source.kind() == ToolsErrorKind::Rejected =>
+            {
+                Some(StallReason::UnknownToolError {
+                    alias: alias.clone(),
+                })
+            }
+            Self::ReadWakes(_)
+            | Self::ReadEvents { .. }
+            | Self::LoadAgent(_)
+            | Self::LoadAgentState(_)
+            | Self::ConsumeMessages(_)
+            | Self::ParkAgent(_)
+            | Self::StallAgent(_)
+            | Self::SettleInterrupt(_)
+            | Self::PrepareToolCall { .. }
+            | Self::AppendToolResult { .. }
+            | Self::AppendModelResponse { .. }
+            | Self::AppendCompaction { .. }
+            | Self::PublishModelResponseChunk { .. }
+            | Self::PublishCompactionStarted { .. }
+            | Self::LoadRole { .. }
+            | Self::LoadModel { .. }
+            | Self::LoadTool { .. }
+            | Self::GenerateModelResponse { .. }
+            | Self::CompactModelInput { .. }
+            | Self::ExecuteTool { .. }
+            | Self::ProduceInterruptedToolOutput { .. }
+            | Self::ProduceUnknownToolOutput { .. }
+            | Self::IncompleteModelResponse { .. } => None,
+        }
+    }
+}
+
 impl<S, R, M, T> fmt::Display for OperationError<S, R, M, T> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "describes every operation in one place"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadWakes(_) => f.write_str("could not read wakes from store"),
@@ -116,6 +200,7 @@ impl<S, R, M, T> fmt::Display for OperationError<S, R, M, T> {
             Self::LoadAgentState(_) => f.write_str("could not load agent state"),
             Self::ConsumeMessages(_) => f.write_str("could not consume messages"),
             Self::ParkAgent(_) => f.write_str("could not park agent"),
+            Self::StallAgent(_) => f.write_str("could not stall agent"),
             Self::SettleInterrupt(_) => f.write_str("could not settle interrupt"),
             Self::PrepareToolCall { call_id, source: _ } => {
                 write!(f, r#"could not prepare tool call "{call_id}""#)
@@ -222,6 +307,7 @@ where
             | Self::LoadAgentState(source)
             | Self::ConsumeMessages(source)
             | Self::ParkAgent(source)
+            | Self::StallAgent(source)
             | Self::SettleInterrupt(source)
             | Self::PrepareToolCall { source, .. }
             | Self::AppendToolResult { source, .. }

@@ -9,7 +9,7 @@
 
 use alloc::{string::String, vec::Vec};
 use core::{fmt, num::NonZeroUsize};
-use fleet_core::{AgentId, JsonObject, RoleName, ToolCallId};
+use fleet_core::{AgentId, JsonObject, RoleName, StallReason, ToolCallId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::{EventDirection, Extension, Revision};
@@ -122,6 +122,10 @@ pub struct AgentSummary {
     pub until: Option<u64>,
     /// Whether an agent-wide interrupt is pending.
     pub interrupt_pending: bool,
+    /// Why the agent is stalled, if it is.
+    pub stalled: Option<StallReason>,
+    /// How many of the agent's descendants are stalled.
+    pub stalled_descendants: u64,
     /// The position for subsequent scans.
     pub position: AgentPosition,
 }
@@ -253,6 +257,16 @@ pub trait AgentCollection {
         agent: AgentId,
         expected: CollectionRevision,
         action: InboxAction,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Resumes the agent and its stalled descendants.
+    ///
+    /// Descendants are the agents created by the agent's tool calls and theirs. Agents that aren't
+    /// stalled are not resumed, though their stalled descendant counts change.
+    fn resume_subtree(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 

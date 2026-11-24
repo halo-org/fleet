@@ -3,7 +3,7 @@
 #[cfg(feature = "queries")]
 use crate::{Store, Topic, records::Request};
 use crate::{
-    StoreError,
+    StoreError, data,
     records::{self, AgentRecord, Records},
 };
 #[cfg(feature = "queries")]
@@ -47,6 +47,10 @@ struct Summary {
     since: u64,
     until: Option<u64>,
     interrupt_pending: bool,
+    #[serde(default)]
+    stalled: Option<data::StallReason>,
+    #[serde(default)]
+    stalled_descendants: u64,
     order: u128,
 }
 
@@ -84,6 +88,8 @@ impl SummaryRecord {
             since: value.since,
             until: value.until,
             interrupt_pending: value.interrupt_pending,
+            stalled: value.stalled.map(Into::into),
+            stalled_descendants: value.stalled_descendants,
             position: AgentPosition {
                 inbox,
                 order: value.order,
@@ -121,7 +127,6 @@ fn index_key(parent: Option<u128>) -> Vec<u8> {
     )
 }
 
-#[cfg(any(feature = "blobs", feature = "subagents"))]
 pub fn children<T: ReadableTable<&'static [u8], &'static [u8]>>(
     records: &Records<T>,
     parent: u128,
@@ -305,6 +310,8 @@ pub fn sync_agent(
             since: now,
             until: None,
             interrupt_pending: agent.interrupt_intent,
+            stalled: None,
+            stalled_descendants: 0,
             order: 0,
         });
     let inbox = if agent.turn_active || agent.pending_messages != 0 {
@@ -329,6 +336,8 @@ pub fn sync_agent(
     value.pinned = crate::metadata::agent_pinned(&agent.agent.extensions);
     value.metadata_version = agent.metadata_revision;
     value.interrupt_pending = agent.interrupt_intent;
+    value.stalled.clone_from(&agent.stalled);
+    value.stalled_descendants = agent.stalled_descendants;
     write_summary(records, id, old.as_ref(), value)
 }
 
@@ -593,6 +602,15 @@ impl AgentCollection for Store {
             },
         )
         .await
+    }
+
+    async fn resume_subtree(
+        &self,
+        idempotency_key: &str,
+        agent: AgentId,
+    ) -> Result<(), StoreError> {
+        self.request(idempotency_key.into(), Request::ResumeSubtree(agent.into()))
+            .await
     }
 }
 

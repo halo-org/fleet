@@ -42,6 +42,10 @@ pub struct AgentState {
     pub tool_call_interrupt_intents: BTreeSet<ToolCallId>,
     /// Whether the agent has pending messages.
     pub has_pending_messages: bool,
+    /// Whether the agent is stalled.
+    pub is_stalled: bool,
+    /// The agent's current stall token.
+    pub stall_token: StallToken,
 }
 
 // === Roles ===
@@ -543,6 +547,77 @@ pub enum TurnEnd {
     Interrupted,
 }
 
+// === Stalls ===
+
+/// Why an agent is stalled.
+///
+/// A stalled agent cannot make progress until something changes, such as its role, its
+/// parameters, or a provider's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StallReason {
+    /// The agent's role does not exist.
+    RoleNotFound {
+        /// The missing role.
+        role: RoleName,
+    },
+    /// The role's model does not exist.
+    ModelNotFound {
+        /// The role that names the model.
+        role: RoleName,
+        /// The missing model.
+        model: ModelName,
+    },
+    /// A tool of the role does not exist.
+    ToolNotFound {
+        /// The role that names the tool.
+        role: RoleName,
+        /// The alias of the tool in the role.
+        alias: ToolAlias,
+        /// The missing tool.
+        tool: ToolName,
+    },
+    /// The agent's parameters cannot be applied to the role's model config.
+    InvalidModelParameters {
+        /// The agent's role.
+        role: RoleName,
+    },
+    /// The agent's parameters cannot be applied to a tool config of the role.
+    InvalidToolParameters {
+        /// The agent's role.
+        role: RoleName,
+    },
+    /// The agent's parameters cannot be applied to the role's extensions.
+    InvalidExtensionParameters {
+        /// The agent's role.
+        role: RoleName,
+    },
+    /// The model's provider rejected a call and would reject it again.
+    ModelError {
+        /// The model that failed.
+        model: ModelName,
+    },
+    /// The tool's provider rejected a call and would reject it again.
+    ToolError {
+        /// The tool that failed.
+        tool: ToolName,
+    },
+    /// The tools provider rejected a call to a tool the role does not have and would reject it
+    /// again.
+    UnknownToolError {
+        /// The alias the model called.
+        alias: ToolAlias,
+    },
+}
+
+/// A token that guards stalling an agent.
+///
+/// Stalling requires the agent's current token, so a stall decided on outdated state cannot undo
+/// a newer message, interrupt, or resume. Sending a message to an agent and interrupting it or
+/// its tool calls change its token, even when it isn't stalled. Resuming an agent changes its
+/// token only when it is stalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StallToken(u128);
+
 // === Events ===
 
 /// An immutable agent event.
@@ -662,4 +737,5 @@ impl_newtype!(ToolCallId, String);
 impl_newtype!(PromptName, String);
 impl_newtype!(BlobId, u128);
 impl_newtype!(MessageId, u128);
+impl_newtype!(StallToken, u128);
 impl_newtype!(EventCursor, u128);

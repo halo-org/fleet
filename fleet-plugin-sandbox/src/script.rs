@@ -58,6 +58,7 @@ pub enum FailureKind {
     InvalidContinuation,
     InvalidCompaction,
     ContextTooLong,
+    Rejected,
     #[default]
     Other,
 }
@@ -91,6 +92,7 @@ impl From<FailureKind> for ModelsErrorKind {
             FailureKind::InvalidContinuation => Self::InvalidContinuation,
             FailureKind::InvalidCompaction => Self::InvalidCompaction,
             FailureKind::ContextTooLong => Self::ContextTooLong,
+            FailureKind::Rejected => Self::Rejected,
             FailureKind::Other => Self::Other,
         }
     }
