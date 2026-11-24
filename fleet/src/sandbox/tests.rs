@@ -39,7 +39,8 @@ fn build() -> PathBuf {
             "profile.dev.opt-level=1",
         ])
         .args(["-p", "fleet-plugin-agents", "-p", "fleet-plugin-roles"])
-        .args(["-p", "fleet-plugin-sandbox", "-p", "fleet-plugin-tools"])
+        .args(["-p", "fleet-plugin-sandbox", "-p", "fleet-plugin-tasks"])
+        .args(["-p", "fleet-plugin-tools"])
         .arg("--target-dir")
         .arg(&target)
         .output()
@@ -298,6 +299,91 @@ fn delegated_agents_share_the_parent_workspace() {
             .unwrap();
         assert_eq!(delegated["output"]["content"][0]["text"], "Read the notes.");
         assert_eq!(reply(fleet).await, "Delegated.");
+    });
+}
+
+#[test]
+fn delegated_tasks_can_be_awaited_and_cancelled() {
+    run(async |fleet| {
+        let delegate = |task: &str, step: Value| {
+            json!({
+                "tool": "delegate_async",
+                "input": {
+                    "role": "helper",
+                    "prompt": json!({ "steps": [step] }).to_string(),
+                    "task": task,
+                },
+            })
+        };
+        let wait = json!({ "tool": "wait", "input": { "tasks": ["fast"] } });
+        let script = json!({
+            "steps": [
+                {
+                    "tool_calls": [
+                        delegate("slow", json!({ "text": "Too late.", "delay_ms": 30000 })),
+                        delegate("fast", json!({ "text": "Helped." })),
+                        wait.clone(),
+                    ],
+                },
+                { "tool_calls": [{ "tool": "cancel", "input": { "tasks": ["slow", "missing"] } }] },
+                { "tool_calls": [{ "tool": "cancel", "input": { "tasks": ["slow", "fast"] } }] },
+                { "tool_calls": [delegate("fast", json!({ "text": "Again." })), wait] },
+                { "text": "Done." },
+            ],
+        });
+
+        start(fleet, "assistant", &script).await;
+
+        let results = loop {
+            let results: Vec<_> = events(fleet, "1")
+                .await
+                .into_iter()
+                .filter(|event| event["type"] == "tool_result")
+                .map(|event| {
+                    let output = &event["output"];
+                    (
+                        output["content"][0]["text"].as_str().unwrap().to_owned(),
+                        output["is_error"].as_bool().unwrap(),
+                    )
+                })
+                .collect();
+            if results.len() == 7 {
+                break results;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let interrupted = (
+            "The tool call was interrupted. Its remaining agent work is being stopped.".into(),
+            true,
+        );
+        let stopped = ("Stopped: slow.\nAlready finished: fast.".into(), false);
+        let position = |result| results.iter().position(|other| other == result).unwrap();
+        assert!(position(&interrupted) < position(&stopped));
+        let mut results = results;
+        results.sort();
+        assert_eq!(
+            results,
+            [
+                (
+                    "Another call in this conversation already uses the task name fast. Choose \
+                     a different name."
+                        .into(),
+                    true,
+                ),
+                ("Finished: fast.".into(), false),
+                ("Helped.".into(), false),
+                (
+                    "More than one call in this conversation uses these task names: fast.".into(),
+                    true,
+                ),
+                (
+                    "No call in this conversation uses these task names: missing.".into(),
+                    true,
+                ),
+                stopped,
+                interrupted,
+            ]
+        );
     });
 }
 

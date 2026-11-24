@@ -6,6 +6,7 @@ world plugin {
     import fleet:providers/blobs@0.0.0;
     import fleet:providers/configuration@0.0.0;
     import fleet:providers/roles@0.0.0;
+    import fleet:providers/tool-calls@0.0.0;
     export fleet:providers/tools@0.0.0;
     export fleet:providers/workspace-resolvers@0.0.0;
 }
