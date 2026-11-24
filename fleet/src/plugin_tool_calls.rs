@@ -108,18 +108,8 @@ impl<T: Tools<Error: Send> + Send + Sync> ToolCalls for PluginToolCalls<T> {
             .iter()
             .map(|handle| (handle.clone(), TaskStatus::Unknown))
             .collect::<BTreeMap<_, _>>();
-        let mut pending_tool_calls = Vec::new();
-        if statuses.is_empty() && snapshot.pending_tool_calls.is_empty() {
-            return Ok(ToolCallsState {
-                revision: snapshot.revision,
-                pending_tool_calls,
-                task_handles: statuses,
-                messages: snapshot.messages,
-            });
-        }
-        let role = self.role().await?;
-
         if !statuses.is_empty() {
+            let role = self.role().await?;
             let pending = snapshot
                 .pending_tool_calls
                 .iter()
@@ -143,18 +133,17 @@ impl<T: Tools<Error: Send> + Send + Sync> ToolCalls for PluginToolCalls<T> {
             }
         }
 
-        for call in snapshot.pending_tool_calls {
-            pending_tool_calls.push(PendingToolCall {
-                task_handle: self.task_handles.get(&role, &call).await?,
-                id: call.id,
-                tool: call.tool,
-                is_async: call.is_async,
-            });
-        }
-
         Ok(ToolCallsState {
             revision: snapshot.revision,
-            pending_tool_calls,
+            pending_tool_calls: snapshot
+                .pending_tool_calls
+                .into_iter()
+                .map(|call| PendingToolCall {
+                    id: call.id,
+                    tool: call.tool,
+                    is_async: call.is_async,
+                })
+                .collect(),
             task_handles: statuses,
             messages: snapshot.messages,
         })
@@ -507,20 +496,6 @@ mod tests {
                     ("second".into(), TaskStatus::Duplicate),
                     ("third".into(), TaskStatus::Unknown),
                 ])
-            );
-            let pending = early
-                .pending_tool_calls
-                .iter()
-                .map(|call| (call.id.as_ref(), call.task_handle.as_deref()))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                pending,
-                [
-                    ("b", Some("second")),
-                    ("c", None),
-                    ("d", Some("second")),
-                    ("late", None),
-                ]
             );
         });
     }

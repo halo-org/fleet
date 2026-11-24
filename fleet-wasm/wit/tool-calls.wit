@@ -31,8 +31,6 @@ interface tool-calls {
         tool: tool-alias,
         /// Whether the agent can continue before the call completes.
         is-async: bool,
-        /// The task handle in the call's input.
-        task-handle: option<string>,
     }
 
     /// The status of a task handle in the driving call's context.

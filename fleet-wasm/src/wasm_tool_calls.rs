@@ -145,7 +145,6 @@ impl From<ToolCallsState> for tool_calls::ToolCallsState {
                     id: call.id.into(),
                     tool: call.tool.into(),
                     is_async: call.is_async,
-                    task_handle: call.task_handle,
                 })
                 .collect(),
             task_handles: value
