@@ -445,8 +445,9 @@ For example, `GET /agents/1/activity` returns
 stalled agent below it, returning 202. Fleet retries their outstanding work. Agents that
 aren't stalled are not woken, though their `stalled_descendants` counts update.
 
-Model and tool providers report these errors with the `rejected` error kind. Rebuild provider
-components against the updated WIT files before using this version.
+Model and tool providers report these errors with the `rejected` error kind. The OpenAI
+plugin does so while no one has signed in with ChatGPT. Rebuild provider components against
+the updated WIT files before using this version.
 
 ## Images and blobs
 
