@@ -338,6 +338,7 @@ fn updates_report_pending_interrupts() {
             turn: TurnStatus::Active,
             interrupt_pending,
             interrupt_includes_async_tool_calls,
+            ..AgentActivity::default()
         })
     };
 

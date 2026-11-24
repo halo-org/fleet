@@ -31,8 +31,9 @@ step can be sent without `steps`. Steps accept:
 - `refresh`, which first rejects the current OAuth token so Fleet refreshes it, then
   describes the credential.
 - `error`, with a `message` and an optional `kind` of `invalid_continuation`,
-  `invalid_compaction`, `context_too_long` or `other`. Scripts are stateless, so
-  retries fail again until the agent is interrupted or steered with another script.
+  `invalid_compaction`, `context_too_long`, `rejected`, or `other`. Scripts are stateless, so
+  retries fail again until the agent is interrupted or steered with another script. A
+  `rejected` error stalls the agent instead, and resuming it stalls it again.
 - `delay_ms`, the pause before each streamed chunk.
 
 An invalid script is answered with a description of the problem. Usage counts

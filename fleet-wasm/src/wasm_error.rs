@@ -91,6 +91,7 @@ impl WasmError {
                 }
                 models::ModelsErrorKind::InvalidCompaction => ModelsErrorKind::InvalidCompaction,
                 models::ModelsErrorKind::ContextTooLong => ModelsErrorKind::ContextTooLong,
+                models::ModelsErrorKind::Rejected => ModelsErrorKind::Rejected,
                 models::ModelsErrorKind::Other => ModelsErrorKind::Other,
             },
             message: error.message,
@@ -101,6 +102,7 @@ impl WasmError {
         Self(Kind::Tool {
             kind: match error.kind {
                 tools::ToolsErrorKind::UnsafeToRetry => ToolsErrorKind::UnsafeToRetry,
+                tools::ToolsErrorKind::Rejected => ToolsErrorKind::Rejected,
                 tools::ToolsErrorKind::Other => ToolsErrorKind::Other,
             },
             message: error.message,

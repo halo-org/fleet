@@ -1,8 +1,9 @@
 use crate::{
     Agent, AgentId, AgentState, Compaction, Event, EventCursor, JsonObject, Message, Model,
     ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelName, ModelResponse,
-    ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName, Tool,
-    ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, Wake,
+    ModelResponseChunk, Prompt, PromptContext, PromptName, PromptResponse, Role, RoleName,
+    StallReason, StallToken, Tool, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput,
+    ToolResult, Wake,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
@@ -37,7 +38,11 @@ pub trait Models {
     ///
     /// # Errors
     ///
-    /// Returns an error when the provider fails to perform the lookup.
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Rejected`](ModelsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
+    /// - [`Other`](ModelsErrorKind::Other) when there are any other provider specific errors.
     fn get(
         &self,
         name: &ModelName,
@@ -58,6 +63,8 @@ pub trait Models {
     ///   compaction state that this model cannot use.
     /// - [`ContextTooLong`](ModelsErrorKind::ContextTooLong) when the context of the conversation
     ///   exceeds the model's maximum context window.
+    /// - [`Rejected`](ModelsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
     /// - [`Other`](ModelsErrorKind::Other) when there are any other provider specific errors.
     ///
     /// An error terminates the stream.
@@ -87,6 +94,8 @@ pub trait Models {
     ///   compaction state that this model cannot use.
     /// - [`ContextTooLong`](ModelsErrorKind::ContextTooLong) when the context of the conversation
     ///   exceeds the model's maximum context window.
+    /// - [`Rejected`](ModelsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
     /// - [`Other`](ModelsErrorKind::Other) when there are any other provider specific errors.
     fn compact(
         &self,
@@ -108,6 +117,8 @@ pub enum ModelsErrorKind {
     InvalidCompaction,
     /// The context of the conversation exceeds the model's context window.
     ContextTooLong,
+    /// The provider rejected the call and would reject it again if repeated.
+    Rejected,
     /// An error not covered by any other kind.
     Other,
 }
@@ -123,7 +134,11 @@ pub trait Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the provider fails to perform the lookup.
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Rejected`](ToolsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
+    /// - [`Other`](ToolsErrorKind::Other) when there are any other provider specific errors.
     fn get(
         &self,
         name: &ToolName,
@@ -139,6 +154,8 @@ pub trait Tools {
     /// Returns errors with the following error kinds:
     ///
     /// - [`UnsafeToRetry`](ToolsErrorKind::UnsafeToRetry) when a retry cannot be executed safely.
+    /// - [`Rejected`](ToolsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
     /// - [`Other`](ToolsErrorKind::Other) when there are any other provider specific errors.
     ///
     /// Note that tool outputs can signal their own errors via [`ToolOutput::is_error`]. These are
@@ -157,7 +174,11 @@ pub trait Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the provider fails to build the tool output.
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Rejected`](ToolsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
+    /// - [`Other`](ToolsErrorKind::Other) when there are any other provider specific errors.
     fn interrupted_output(
         &self,
         context: &ToolContext,
@@ -168,7 +189,11 @@ pub trait Tools {
     ///
     /// # Errors
     ///
-    /// Returns an error when the provider fails to build the tool output.
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Rejected`](ToolsErrorKind::Rejected) when the provider rejects the call and would
+    ///   reject it again if repeated.
+    /// - [`Other`](ToolsErrorKind::Other) when there are any other provider specific errors.
     fn unknown_tool_output(
         &self,
         agent_id: AgentId,
@@ -181,6 +206,8 @@ pub trait Tools {
 pub enum ToolsErrorKind {
     /// The tool call cannot be retried safely because it risks repeating effects of an earlier attempt.
     UnsafeToRetry,
+    /// The provider rejected the call and would reject it again if repeated.
+    Rejected,
     /// An error not covered by any other kind.
     Other,
 }
@@ -282,7 +309,8 @@ pub trait RuntimeStore {
     /// unresolved tool calls, or an interrupt intent for the agent.
     ///
     /// New activity is caused by mutations made by the corresponding [`ClientStore`]. Mutations
-    /// made by the runtime do not trigger new wakes.
+    /// made by the runtime do not trigger new wakes. A stalled agent has no outstanding work, so it
+    /// is only woken by the client mutations that clear the stall.
     ///
     /// # Partitioning
     ///
@@ -362,6 +390,30 @@ pub trait RuntimeStore {
         &self,
         agent_id: AgentId,
         expected_latest_event: Option<EventCursor>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Stalls the agent.
+    ///
+    /// A stalled agent has no outstanding work until a client clears the stall by sending it a
+    /// message, interrupting it or its tool calls, or resuming it. Stalling does not change the
+    /// event log. Stalling an agent that is already stalled replaces its reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`Conflict`](RuntimeStoreErrorKind::Conflict) when:
+    ///   - there is no agent with the provided ID.
+    ///   - the event log's latest event doesn't match `expected_latest_event`.
+    ///   - the agent's [`stall_token`](AgentState::stall_token) doesn't match
+    ///     `expected_stall_token`.
+    /// - [`Other`](RuntimeStoreErrorKind::Other) when there are any other provider specific errors.
+    fn stall(
+        &self,
+        agent_id: AgentId,
+        expected_latest_event: Option<EventCursor>,
+        expected_stall_token: StallToken,
+        reason: &StallReason,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Moves pending messages into the agent's event log.
@@ -570,7 +622,7 @@ pub trait ClientStore {
     ///
     /// Sets the agent's interrupt intent and, if provided, adds the message to its pending messages
     /// atomically. Existing pending messages are preserved. Pending messages are consumed after the
-    /// runtime settles the interrupt.
+    /// runtime settles the interrupt. Interrupting an agent clears a stall.
     ///
     /// Synchronous tool calls are interrupted with the turn. When `include_async_tool_calls` is
     /// true, so are async tool calls that are unresolved when the interrupt settles, including
@@ -600,7 +652,7 @@ pub trait ClientStore {
     /// Sets interrupt intents on the provided tool calls. Calls that are already resolved are
     /// ignored. Unless another result is committed first, a call's interrupted output becomes its
     /// result. The agent continues as it would after any other tool result, and in-flight model
-    /// requests are not aborted.
+    /// requests are not aborted. Interrupting tool calls clears a stall.
     ///
     /// # Errors
     ///
@@ -621,7 +673,8 @@ pub trait ClientStore {
 
     /// Sends a message to an agent.
     ///
-    /// The message remains pending until the runtime consumes it according to its mode.
+    /// The message remains pending until the runtime consumes it according to its mode. Sending a
+    /// message clears a stall.
     ///
     /// # Errors
     ///
@@ -638,6 +691,25 @@ pub trait ClientStore {
         idempotency_key: &str,
         agent_id: AgentId,
         message: &Message,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Resumes a stalled agent.
+    ///
+    /// The runtime retries the agent's outstanding work. Resuming an agent that isn't stalled
+    /// succeeds without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`IdempotencyConflict`](ClientStoreErrorKind::IdempotencyConflict) when the key was used
+    ///   with a different method or arguments.
+    /// - [`AgentNotFound`](ClientStoreErrorKind::AgentNotFound) when the agent does not exist.
+    /// - [`Other`](ClientStoreErrorKind::Other) when there are any other provider specific errors.
+    fn resume_agent(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
@@ -879,6 +951,21 @@ macro_rules! impl_runtime_store_for_pointer {
                 (**self).park(agent_id, expected_latest_event)
             }
 
+            fn stall(
+                &self,
+                agent_id: AgentId,
+                expected_latest_event: Option<EventCursor>,
+                expected_stall_token: StallToken,
+                reason: &StallReason,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).stall(
+                    agent_id,
+                    expected_latest_event,
+                    expected_stall_token,
+                    reason,
+                )
+            }
+
             fn consume_messages(
                 &self,
                 agent_id: AgentId,
@@ -994,6 +1081,14 @@ macro_rules! impl_client_store_for_pointer {
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
                 (**self).send_message(idempotency_key, agent_id, message)
             }
+
+            fn resume_agent(
+                &self,
+                idempotency_key: &str,
+                agent_id: AgentId,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).resume_agent(idempotency_key, agent_id)
+            }
         }
     };
 }
@@ -1054,6 +1149,7 @@ impl fmt::Display for ModelsErrorKind {
             Self::InvalidContinuation => f.write_str("invalid continuation"),
             Self::InvalidCompaction => f.write_str("invalid compaction"),
             Self::ContextTooLong => f.write_str("context too long"),
+            Self::Rejected => f.write_str("rejected"),
             Self::Other => f.write_str("other error"),
         }
     }
@@ -1063,6 +1159,7 @@ impl fmt::Display for ToolsErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsafeToRetry => f.write_str("unsafe to retry"),
+            Self::Rejected => f.write_str("rejected"),
             Self::Other => f.write_str("other error"),
         }
     }

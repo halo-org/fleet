@@ -139,6 +139,40 @@ pub enum TurnEnd {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StallReason {
+    RoleNotFound {
+        role: String,
+    },
+    ModelNotFound {
+        role: String,
+        model: String,
+    },
+    ToolNotFound {
+        role: String,
+        alias: String,
+        tool: String,
+    },
+    InvalidModelParameters {
+        role: String,
+    },
+    InvalidToolParameters {
+        role: String,
+    },
+    InvalidExtensionParameters {
+        role: String,
+    },
+    ModelError {
+        model: String,
+    },
+    ToolError {
+        tool: String,
+    },
+    UnknownToolError {
+        alias: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     pub name: String,
     pub parameters: BTreeMap<String, RoleParameter>,
@@ -584,6 +618,74 @@ impl From<TurnEnd> for fleet_core::TurnEnd {
         match value {
             TurnEnd::Completed => Self::Completed,
             TurnEnd::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
+impl From<fleet_core::StallReason> for StallReason {
+    fn from(value: fleet_core::StallReason) -> Self {
+        use fleet_core::StallReason as Reason;
+
+        match value {
+            Reason::RoleNotFound { role } => Self::RoleNotFound { role: role.into() },
+            Reason::ModelNotFound { role, model } => Self::ModelNotFound {
+                role: role.into(),
+                model: model.into(),
+            },
+            Reason::ToolNotFound { role, alias, tool } => Self::ToolNotFound {
+                role: role.into(),
+                alias: alias.into(),
+                tool: tool.into(),
+            },
+            Reason::InvalidModelParameters { role } => {
+                Self::InvalidModelParameters { role: role.into() }
+            }
+            Reason::InvalidToolParameters { role } => {
+                Self::InvalidToolParameters { role: role.into() }
+            }
+            Reason::InvalidExtensionParameters { role } => {
+                Self::InvalidExtensionParameters { role: role.into() }
+            }
+            Reason::ModelError { model } => Self::ModelError {
+                model: model.into(),
+            },
+            Reason::ToolError { tool } => Self::ToolError { tool: tool.into() },
+            Reason::UnknownToolError { alias } => Self::UnknownToolError {
+                alias: alias.into(),
+            },
+        }
+    }
+}
+
+impl From<StallReason> for fleet_core::StallReason {
+    fn from(value: StallReason) -> Self {
+        match value {
+            StallReason::RoleNotFound { role } => Self::RoleNotFound { role: role.into() },
+            StallReason::ModelNotFound { role, model } => Self::ModelNotFound {
+                role: role.into(),
+                model: model.into(),
+            },
+            StallReason::ToolNotFound { role, alias, tool } => Self::ToolNotFound {
+                role: role.into(),
+                alias: alias.into(),
+                tool: tool.into(),
+            },
+            StallReason::InvalidModelParameters { role } => {
+                Self::InvalidModelParameters { role: role.into() }
+            }
+            StallReason::InvalidToolParameters { role } => {
+                Self::InvalidToolParameters { role: role.into() }
+            }
+            StallReason::InvalidExtensionParameters { role } => {
+                Self::InvalidExtensionParameters { role: role.into() }
+            }
+            StallReason::ModelError { model } => Self::ModelError {
+                model: model.into(),
+            },
+            StallReason::ToolError { tool } => Self::ToolError { tool: tool.into() },
+            StallReason::UnknownToolError { alias } => Self::UnknownToolError {
+                alias: alias.into(),
+            },
         }
     }
 }

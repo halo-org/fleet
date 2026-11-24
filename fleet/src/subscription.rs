@@ -271,6 +271,8 @@ mod tests {
                     "turn": "idle",
                     "interrupt_pending": false,
                     "interrupt_includes_async_tool_calls": false,
+                    "stalled": null,
+                    "stalled_descendants": 0,
                 },
                 "events": [
                     {

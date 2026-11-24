@@ -51,6 +51,17 @@ impl<'sim> RolesSimulator<'sim> {
     pub fn role_names(&self) -> Vec<RoleName> {
         self.roles.keys().cloned().collect()
     }
+
+    /// Returns the role with the given name.
+    #[must_use]
+    pub fn role(&self, name: &RoleName) -> Option<&Role> {
+        self.roles.get(name)
+    }
+
+    /// Adds or replaces a role.
+    pub fn insert(&mut self, role: Role) {
+        self.roles.insert(role.name.clone(), role);
+    }
 }
 
 impl Roles for RolesSimulator<'_> {

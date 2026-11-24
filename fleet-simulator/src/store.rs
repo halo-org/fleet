@@ -7,7 +7,8 @@ use fastrand::Rng;
 use fleet_core::{
     Agent, AgentId, AgentState, ClientStore, ClientStoreErrorKind, Compaction, Event, EventCursor,
     EventPayload, Message, MessageId, MessageMode, ModelOutput, ModelResponse, ModelResponseChunk,
-    RuntimeStore, RuntimeStoreErrorKind, ToolCallId, ToolResult, TurnEnd, Wake,
+    RuntimeStore, RuntimeStoreErrorKind, StallReason, StallToken, ToolCallId, ToolResult, TurnEnd,
+    Wake,
 };
 use futures_util::{Stream, StreamExt as _, future, stream};
 use std::{
@@ -56,6 +57,8 @@ pub struct AgentSnapshot {
     pub parked_at: Option<EventCursor>,
     /// Whether the agent has an interrupt intent.
     pub interrupt_intent: bool,
+    /// Why the agent is stalled, if it is.
+    pub stalled: Option<StallReason>,
 }
 
 /// The state of an unresolved tool call in the store simulator.
@@ -89,6 +92,8 @@ struct AgentRecord {
     tool_call_ids: BTreeSet<ToolCallId>,
     unresolved_tool_calls: BTreeMap<ToolCallId, ToolCallSnapshot>,
     response_stream: Option<ResponseStreamState>,
+    stalled: Option<StallReason>,
+    stall_token: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +114,9 @@ enum ClientRequest {
     SendMessage {
         agent_id: AgentId,
         message: Message,
+    },
+    ResumeAgent {
+        agent_id: AgentId,
     },
 }
 
@@ -162,6 +170,7 @@ struct StoreSimulatorConfig {
     agent_state: WrapConfig,
     settle_interrupt: WrapConfig,
     park: WrapConfig,
+    stall: WrapConfig,
     consume_messages: WrapConfig,
     publish_model_response_chunk: WrapConfig,
     publish_compaction_started: WrapConfig,
@@ -173,6 +182,7 @@ struct StoreSimulatorConfig {
     interrupt_agent: WrapConfig,
     interrupt_tool_calls: WrapConfig,
     send_message: WrapConfig,
+    resume_agent: WrapConfig,
     wakes: TrySuspendConfig,
     wakes_repartition: Probability,
     events_suspend: Probability,
@@ -286,6 +296,7 @@ impl<'sim> StoreSimulator<'sim> {
                     unresolved_tool_calls: record.unresolved_tool_calls.clone(),
                     parked_at: record.parked_at,
                     interrupt_intent: record.interrupt_intent,
+                    stalled: record.stalled.clone(),
                 };
 
                 (*id, snapshot)
@@ -488,6 +499,32 @@ impl RuntimeStore for StorePartition<'_, '_> {
                 async {
                     self.store
                         .mutate(|state| state.park(agent_id, expected_latest_event))
+                },
+            )
+            .await
+    }
+
+    async fn stall(
+        &self,
+        agent_id: AgentId,
+        expected_latest_event: Option<EventCursor>,
+        expected_stall_token: StallToken,
+        reason: &StallReason,
+    ) -> Result<(), Self::Error> {
+        self.store
+            .scheduler
+            .wrap(
+                &self.store.config.stall,
+                StoreSimulatorError::random,
+                async {
+                    self.store.mutate(|state| {
+                        state.stall(
+                            agent_id,
+                            expected_latest_event,
+                            expected_stall_token,
+                            reason,
+                        )
+                    })
                 },
             )
             .await
@@ -761,6 +798,29 @@ impl ClientStore for StoreSimulator<'_> {
             )
             .await
     }
+
+    async fn resume_agent(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
+    ) -> Result<(), Self::Error> {
+        self.scheduler
+            .wrap(
+                &self.config.resume_agent,
+                StoreSimulatorError::random,
+                async {
+                    self.mutate(|state| {
+                        state.handle_request(
+                            self.scheduler,
+                            self.config.wakes_repartition,
+                            idempotency_key,
+                            ClientRequest::ResumeAgent { agent_id },
+                        )
+                    })
+                },
+            )
+            .await
+    }
 }
 
 impl State {
@@ -823,6 +883,7 @@ impl State {
         }
 
         agent.interrupt_includes_async_tool_calls |= include_async_tool_calls;
+        agent.clear_stall();
 
         if let Some(owner) = agent.wake_owner {
             self.enqueue_wake(owner, Wake::Interrupt(agent_id));
@@ -851,6 +912,8 @@ impl State {
             }
         }
 
+        agent.clear_stall();
+
         if let Some(owner) = agent.wake_owner {
             self.enqueue_wake(owner, Wake::Reconcile(agent_id));
         }
@@ -869,9 +932,31 @@ impl State {
         }
 
         agent.push_pending_message(message.clone());
+        agent.clear_stall();
 
         if let Some(owner) = agent.wake_owner {
             self.enqueue_wake(owner, Wake::Reconcile(agent_id));
+        }
+
+        Ok(())
+    }
+
+    fn resume_agent(&mut self, agent_id: AgentId) -> Result<(), ClientError> {
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| ClientError::agent_not_found("agent does not exist"))?;
+
+        if agent.stalled.is_none() {
+            return Ok(());
+        }
+
+        agent.clear_stall();
+
+        if let Some(owner) = agent.wake_owner
+            && let Some(wake) = agent.initial_wake()
+        {
+            self.enqueue_wake(owner, wake);
         }
 
         Ok(())
@@ -937,6 +1022,29 @@ impl State {
 
         agent.check_latest_event(expected_latest_event)?;
         agent.parked_at = agent.latest_event();
+
+        Ok(())
+    }
+
+    fn stall(
+        &mut self,
+        agent_id: AgentId,
+        expected_latest_event: Option<EventCursor>,
+        expected_stall_token: StallToken,
+        reason: &StallReason,
+    ) -> Result<(), RuntimeError> {
+        let agent = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| RuntimeError::conflict("agent does not exist"))?;
+
+        agent.check_latest_event(expected_latest_event)?;
+
+        if agent.stall_token != u128::from(expected_stall_token) {
+            return Err(RuntimeError::conflict("stall token does not match"));
+        }
+
+        agent.stalled = Some(reason.clone());
 
         Ok(())
     }
@@ -1258,6 +1366,10 @@ impl State {
                 self.send_message(*agent_id, message)?;
                 self.repartition_agent(scheduler, *agent_id, repartition_probability);
             }
+            ClientRequest::ResumeAgent { agent_id } => {
+                self.resume_agent(*agent_id)?;
+                self.repartition_agent(scheduler, *agent_id, repartition_probability);
+            }
         }
 
         self.idempotency_keys
@@ -1383,6 +1495,8 @@ impl AgentRecord {
             tool_call_ids: BTreeSet::new(),
             unresolved_tool_calls: BTreeMap::new(),
             response_stream: None,
+            stalled: None,
+            stall_token: 0,
         }
     }
 
@@ -1393,6 +1507,8 @@ impl AgentRecord {
             interrupt_intent: self.interrupt_intent,
             tool_call_interrupt_intents: self.tool_call_interrupt_intents(),
             has_pending_messages: !self.pending_messages.is_empty(),
+            is_stalled: self.stalled.is_some(),
+            stall_token: self.stall_token.into(),
         }
     }
 
@@ -1424,13 +1540,21 @@ impl AgentRecord {
     }
 
     fn initial_wake(&self) -> Option<Wake> {
-        if self.is_idle() {
+        if self.stalled.is_some() || self.is_idle() {
             None
         } else if self.interrupt_intent {
             Some(Wake::Interrupt(self.agent.id))
         } else {
             Some(Wake::Reconcile(self.agent.id))
         }
+    }
+
+    fn clear_stall(&mut self) {
+        self.stalled = None;
+        self.stall_token = self
+            .stall_token
+            .checked_add(1)
+            .expect("tokens never overflow");
     }
 
     fn push_pending_message(&mut self, message: Message) {
@@ -1648,6 +1772,8 @@ impl StoreSimulatorConfig {
             events_error: Probability::generate_for_faults(rng),
             wakes_repartition: Probability::generate_for_faults(rng),
             interrupt_tool_calls: WrapConfig::generate(rng),
+            stall: WrapConfig::generate(rng),
+            resume_agent: WrapConfig::generate(rng),
         }
     }
 }
@@ -1898,6 +2024,7 @@ mod tests {
                 ]),
                 parked_at: Some(1.into()),
                 interrupt_intent: true,
+                stalled: None,
             }
         );
 
@@ -1925,6 +2052,7 @@ mod tests {
                 )]),
                 parked_at: None,
                 interrupt_intent: false,
+                stalled: None,
             }
         );
     }
@@ -2289,6 +2417,49 @@ mod tests {
                 .mutate(|state| state.append_tool_result(id, &tool_result("a")))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn stall_lifecycle() {
+        let scheduler = Scheduler::new(0);
+        let store = populated_store(&scheduler);
+        let id = AgentId::from(0);
+        let reason = StallReason::RoleNotFound {
+            role: "test".into(),
+        };
+        let resume = |key: &str| {
+            store.mutate(|state| {
+                state.handle_request(
+                    &scheduler,
+                    Probability::NEVER,
+                    key,
+                    ClientRequest::ResumeAgent { agent_id: id },
+                )
+            })
+        };
+
+        resume("resume-idle").unwrap();
+        let state = store.state.lock().unwrap().agents[&id].state();
+        let error = store
+            .mutate(|state| state.stall(id, None, state.agents[&id].state().stall_token, &reason))
+            .unwrap_err();
+        assert_eq!(error.kind(), RuntimeStoreErrorKind::Conflict);
+        store
+            .mutate(|store| store.stall(id, state.latest_event, state.stall_token, &reason))
+            .unwrap();
+        assert!(store.state.lock().unwrap().agents[&id].state().is_stalled);
+        assert_eq!(store.state.lock().unwrap().agents[&id].initial_wake(), None);
+
+        resume("resume").unwrap();
+        let resumed = store.state.lock().unwrap().agents[&id].state();
+        assert!(!resumed.is_stalled);
+        assert_ne!(resumed.stall_token, state.stall_token);
+
+        let error = store
+            .mutate(|store| store.stall(id, state.latest_event, state.stall_token, &reason))
+            .unwrap_err();
+        assert_eq!(error.kind(), RuntimeStoreErrorKind::Conflict);
+        assert_eq!(store.snapshot()[&id].stalled, None);
     }
 
     #[test]

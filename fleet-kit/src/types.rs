@@ -1,8 +1,8 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{fmt, num::NonZeroUsize};
 use fleet_core::{
-    Agent, Event, EventCursor, Message, MessageId, ModelProviderToolName, ToolAlias, ToolCallId,
-    TurnEnd,
+    Agent, Event, EventCursor, Message, MessageId, ModelProviderToolName, StallReason, ToolAlias,
+    ToolCallId, TurnEnd,
 };
 
 // === Queries ===
@@ -72,6 +72,10 @@ pub struct AgentActivity {
     ///
     /// Synchronous tool calls are always included. This is false when no interrupt is pending.
     pub interrupt_includes_async_tool_calls: bool,
+    /// Why the agent is stalled, if it is.
+    pub stalled: Option<StallReason>,
+    /// How many of the agent's descendants are stalled.
+    pub stalled_descendants: u64,
 }
 
 /// A turn's current status.

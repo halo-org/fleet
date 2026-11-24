@@ -40,6 +40,12 @@ pub struct AgentRecord {
     pub consumed_messages: MessageCounts,
     pub pending_tool_calls: u64,
     pub synchronous_tool_calls: u64,
+    #[serde(default)]
+    pub stalled: Option<data::StallReason>,
+    #[serde(default)]
+    pub stall_token: u128,
+    #[serde(default)]
+    pub stalled_descendants: u64,
 }
 
 /// Message counts by mode.
@@ -55,6 +61,8 @@ pub struct Activity {
     pub turn_active: bool,
     pub interrupt_pending: bool,
     pub interrupt_includes_async_tool_calls: bool,
+    pub stalled: Option<data::StallReason>,
+    pub stalled_descendants: u64,
 }
 
 pub const fn initial_metadata_revision() -> u128 {
@@ -110,6 +118,8 @@ pub enum Request {
         #[serde(default = "legacy_interrupt_includes_async_tool_calls")] bool,
     ),
     InterruptToolCalls(u128, Vec<String>),
+    ResumeAgent(u128),
+    ResumeSubtree(u128),
     SetTitle {
         id: u128,
         expected: u128,
@@ -313,10 +323,11 @@ impl Records<Table<'_, &'static [u8], &'static [u8]>> {
     pub fn save_agent(&mut self, agent: &AgentRecord) -> Result<(), StoreError> {
         let id = agent.agent.id;
         self.put(&key(AGENT, id, &[]), agent)?;
-        let ready = agent.latest_event != agent.parked_at
-            || agent.interrupt_intent
-            || agent.pending_messages != 0
-            || agent.pending_tool_calls != 0;
+        let ready = agent.stalled.is_none()
+            && (agent.latest_event != agent.parked_at
+                || agent.interrupt_intent
+                || agent.pending_messages != 0
+                || agent.pending_tool_calls != 0);
         if ready {
             self.put(&key(READY, id, &[]), &(id, agent.interrupt_intent))?;
         } else {
@@ -399,12 +410,14 @@ impl AgentRecord {
             && self.pending_tool_calls == 0
     }
 
-    pub const fn activity(&self) -> Activity {
+    pub fn activity(&self) -> Activity {
         Activity {
             turn_active: self.turn_active,
             interrupt_pending: self.interrupt_intent,
             interrupt_includes_async_tool_calls: self.interrupt_intent
                 && self.interrupt_includes_async_tool_calls,
+            stalled: self.stalled.clone(),
+            stalled_descendants: self.stalled_descendants,
         }
     }
 

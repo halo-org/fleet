@@ -30,6 +30,7 @@ impl From<fleet_models::OpenAiError> for ModelsError {
                 Kind::InvalidContinuation => ModelsErrorKind::InvalidContinuation,
                 Kind::InvalidCompaction => ModelsErrorKind::InvalidCompaction,
                 Kind::ContextTooLong => ModelsErrorKind::ContextTooLong,
+                Kind::Rejected => ModelsErrorKind::Rejected,
                 Kind::Other => ModelsErrorKind::Other,
             },
             message: error_chain(&error),

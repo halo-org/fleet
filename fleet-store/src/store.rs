@@ -4,7 +4,8 @@ use crate::{
 };
 use fleet_core::{
     Agent, AgentId, AgentState, ClientStore, Compaction, Event, EventCursor, Message,
-    ModelResponse, ModelResponseChunk, RuntimeStore, ToolCallId, ToolResult, Wake,
+    ModelResponse, ModelResponseChunk, RuntimeStore, StallReason, StallToken, ToolCallId,
+    ToolResult, Wake,
 };
 use futures_util::{Stream, stream};
 use redb::ReadableDatabase as _;
@@ -110,6 +111,16 @@ impl Store {
                         transaction.commit()?;
                         return Ok(());
                     }
+                    if let Some(resumed) = apply_resume_request(&mut records, &request)? {
+                        records.put(&request_key, &request)?;
+                        drop(records);
+                        transaction.commit()?;
+                        worker.notify_changed(&resumed.changed);
+                        for (id, interrupt) in resumed.agents {
+                            worker.notify_wake(id, interrupt);
+                        }
+                        return Ok(());
+                    }
                     let edit = apply_collection_request(&mut records, &request)?;
                     if let Some((id, changed, summary_changed)) = edit {
                         records.put(&request_key, &request)?;
@@ -132,7 +143,7 @@ impl Store {
                     {
                         return Err(StoreError::AgentDenied);
                     }
-                    let (agent, wake) = apply_agent_request(&mut records, &request)?;
+                    let (agent, wake, ancestors) = apply_agent_request(&mut records, &request)?;
                     let id = agent.agent.id;
                     let summary_changed = crate::agents::sync_agent(
                         &mut records,
@@ -140,13 +151,20 @@ impl Store {
                         crate::agents::now_millis(),
                     )?;
                     records.put(&request_key, &request)?;
-                    (id, agent.interrupt_intent, wake, summary_changed)
+                    (
+                        id,
+                        agent.interrupt_intent,
+                        wake,
+                        (summary_changed, ancestors),
+                    )
                 };
                 transaction.commit()?;
+                let (summary_changed, ancestors) = summary_changed;
                 if summary_changed {
                     worker.listeners.notify(Topic::Agents);
                     worker.listeners.notify(Topic::Snoozes);
                 }
+                worker.notify_changed(&ancestors);
                 worker.listeners.notify(Topic::Agent(agent_id));
                 worker.listeners.notify(Topic::AgentScopes);
                 if interrupt {
@@ -211,6 +229,8 @@ fn apply_collection_request(
         | Request::SendMessage(..)
         | Request::InterruptAgent(..)
         | Request::InterruptToolCalls(..)
+        | Request::ResumeAgent(..)
+        | Request::ResumeSubtree(..)
         | Request::PutRole { .. }
         | Request::DeleteRole { .. } => {
             return Ok(None);
@@ -219,10 +239,30 @@ fn apply_collection_request(
     Ok(Some((id, changed, summary_changed)))
 }
 
+fn apply_resume_request(
+    records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
+    request: &Request,
+) -> Result<Option<crate::stalls::Resumed>, StoreError> {
+    let (id, subtree) = match request {
+        Request::ResumeAgent(id) => (*id, false),
+        Request::ResumeSubtree(id) => (*id, true),
+        Request::CreateAgent(..)
+        | Request::SendMessage(..)
+        | Request::InterruptAgent(..)
+        | Request::InterruptToolCalls(..)
+        | Request::SetTitle { .. }
+        | Request::SetPinned { .. }
+        | Request::SetInbox { .. }
+        | Request::PutRole { .. }
+        | Request::DeleteRole { .. } => return Ok(None),
+    };
+    crate::stalls::resume_agents(records, id, subtree).map(Some)
+}
+
 pub fn apply_agent_request(
     records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
     request: &Request,
-) -> Result<(AgentRecord, bool), StoreError> {
+) -> Result<(AgentRecord, bool, Vec<u128>), StoreError> {
     let (mut agent, message, interrupt, include_async_tool_calls, create) = match request {
         Request::CreateAgent(agent, message) => {
             if records
@@ -247,6 +287,9 @@ pub fn apply_agent_request(
                 consumed_messages: records::MessageCounts::default(),
                 pending_tool_calls: 0,
                 synchronous_tool_calls: 0,
+                stalled: None,
+                stall_token: 0,
+                stalled_descendants: 0,
             };
             (agent, message.as_ref(), false, false, true)
         }
@@ -263,7 +306,9 @@ pub fn apply_agent_request(
         Request::InterruptToolCalls(id, call_ids) => {
             return interrupt_tool_calls(records, *id, call_ids);
         }
-        Request::SetTitle { .. }
+        Request::ResumeAgent(..)
+        | Request::ResumeSubtree(..)
+        | Request::SetTitle { .. }
         | Request::SetPinned { .. }
         | Request::SetInbox { .. }
         | Request::PutRole { .. }
@@ -283,6 +328,11 @@ pub fn apply_agent_request(
         records.change(id, records::AGENT, &[], None, agent.revision)?;
         records.change(id, records::ACTIVITY, &[], None, agent.revision)?;
     }
+    let ancestors = if create {
+        crate::stalls::count_children(records, &mut agent)?
+    } else {
+        crate::stalls::clear(records, &mut agent)?
+    };
     if let Some(message) = message {
         records.push_message(&mut agent, message)?;
     }
@@ -297,19 +347,21 @@ pub fn apply_agent_request(
         records.update_activity(&mut agent, &activity)?;
     }
     records.save_agent(&agent)?;
-    Ok((agent, interrupt || message.is_some()))
+    Ok((agent, interrupt || message.is_some(), ancestors))
 }
 
 fn interrupt_tool_calls(
     records: &mut Records<redb::Table<'_, &'static [u8], &'static [u8]>>,
     id: u128,
     call_ids: &[String],
-) -> Result<(AgentRecord, bool), StoreError> {
+) -> Result<(AgentRecord, bool, Vec<u128>), StoreError> {
     let mut agent = records.agent(id)?;
+    let activity = agent.activity();
     agent.revision = agent
         .revision
         .checked_add(1)
         .expect("revisions do not overflow");
+    let ancestors = crate::stalls::clear(records, &mut agent)?;
     for call_id in call_ids {
         let key = records::key(records::TOOL_CALL, id, call_id.as_bytes());
         let mut call = records
@@ -327,8 +379,9 @@ fn interrupt_tool_calls(
             records.put(&key, &call)?;
         }
     }
+    records.update_activity(&mut agent, &activity)?;
     records.save_agent(&agent)?;
-    Ok((agent, true))
+    Ok((agent, true, ancestors))
 }
 
 fn tool_call_interrupt_intents<T: redb::ReadableTable<&'static [u8], &'static [u8]>>(
@@ -406,6 +459,18 @@ impl ClientStore for Store {
         )
         .await
     }
+
+    async fn resume_agent(
+        &self,
+        idempotency_key: &str,
+        agent_id: AgentId,
+    ) -> Result<(), StoreError> {
+        self.request(
+            idempotency_key.into(),
+            Request::ResumeAgent(agent_id.into()),
+        )
+        .await
+    }
 }
 
 impl RuntimeStore for Store {
@@ -445,6 +510,8 @@ impl RuntimeStore for Store {
                         .map(Into::into)
                         .collect(),
                     has_pending_messages: agent.pending_messages != 0,
+                    is_stalled: agent.stalled.is_some(),
+                    stall_token: agent.stall_token.into(),
                 }))
             })
             .await
@@ -648,6 +715,29 @@ impl RuntimeStore for Store {
                     agent.parked_at = agent.latest_event;
                     Ok(())
                 })
+            })
+            .await
+    }
+
+    async fn stall(
+        &self,
+        agent_id: AgentId,
+        expected_latest_event: Option<EventCursor>,
+        expected_stall_token: StallToken,
+        reason: &StallReason,
+    ) -> Result<(), StoreError> {
+        let reason: data::StallReason = reason.clone().into();
+        self.worker()
+            .call(move |worker| {
+                let ancestors = worker.mutate(agent_id.into(), |records, agent| {
+                    agent.check_latest_event(expected_latest_event.map(Into::into))?;
+                    if agent.stall_token != u128::from(expected_stall_token) {
+                        return Err(StoreError::Conflict("stall token does not match"));
+                    }
+                    crate::stalls::stall(records, agent, reason)
+                })?;
+                worker.notify_changed(&ancestors);
+                Ok(())
             })
             .await
     }

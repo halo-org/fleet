@@ -17,6 +17,14 @@ pub async fn open(
     config: Config,
     directory: &Path,
 ) -> Result<(Fleet, Arc<WasmRegistry>), Box<dyn Error + Send + Sync>> {
+    open_store(config, directory, Store::memory()?).await
+}
+
+async fn open_store(
+    config: Config,
+    directory: &Path,
+    store: Store,
+) -> Result<(Fleet, Arc<WasmRegistry>), Box<dyn Error + Send + Sync>> {
     for (name, plugin) in &config.plugins {
         if let Some(access) = plugin.outside_access() {
             return Err(
@@ -25,7 +33,7 @@ pub async fn open(
         }
     }
     let provider = SandboxOAuth::new(oauth_base(config.listen));
-    let fleet = Fleet::new(Store::memory()?, None);
+    let fleet = Fleet::new(store, None);
     let authentication =
         Authentication::sandbox(provider.clone(), fleet.idle_handler().clone()).await?;
     let providers = crate::plugins::load(&config, directory, None, &authentication, &fleet).await?;

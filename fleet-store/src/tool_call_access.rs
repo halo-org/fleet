@@ -124,20 +124,23 @@ impl ToolCallAccess {
                             "the driving call cannot be interrupted",
                         ));
                     }
-                    let (agent, _) = crate::store::apply_agent_request(&mut records, &request)?;
+                    let (agent, _, ancestors) =
+                        crate::store::apply_agent_request(&mut records, &request)?;
                     let summary_changed = crate::agents::sync_agent(
                         &mut records,
                         &agent,
                         crate::agents::now_millis(),
                     )?;
                     receipts.insert(receipt.as_str(), serde_json::to_vec(&request)?.as_slice())?;
-                    (agent.interrupt_intent, summary_changed)
+                    (agent.interrupt_intent, (summary_changed, ancestors))
                 };
                 transaction.commit()?;
+                let (summary_changed, ancestors) = summary_changed;
                 if summary_changed {
                     worker.listeners.notify(Topic::Agents);
                     worker.listeners.notify(Topic::Snoozes);
                 }
+                worker.notify_changed(&ancestors);
                 worker.listeners.notify(Topic::Agent(agent_id));
                 worker.listeners.notify(Topic::AgentScopes);
                 worker.notify_wake(agent_id, interrupt);

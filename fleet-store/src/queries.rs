@@ -393,7 +393,7 @@ fn changes_since(
     records.range(&start, &end)?.collect()
 }
 
-const fn activity(agent: &AgentRecord) -> AgentActivity {
+fn activity(agent: &AgentRecord) -> AgentActivity {
     let activity = agent.activity();
     AgentActivity {
         turn: if activity.turn_active {
@@ -403,6 +403,8 @@ const fn activity(agent: &AgentRecord) -> AgentActivity {
         },
         interrupt_pending: activity.interrupt_pending,
         interrupt_includes_async_tool_calls: activity.interrupt_includes_async_tool_calls,
+        stalled: activity.stalled.map(Into::into),
+        stalled_descendants: activity.stalled_descendants,
     }
 }
 

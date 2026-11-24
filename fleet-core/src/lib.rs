@@ -42,7 +42,8 @@ pub use self::{
         ModelName, ModelOutput, ModelProvenance, ModelProviderToolCall, ModelProviderToolName,
         ModelReasoning, ModelResponse, ModelResponseChunk, ModelTool, ModelUsage, Prompt,
         PromptContext, PromptName, PromptOutput, PromptResponse, Role, RoleCompaction, RoleName,
-        RoleParameter, RoleParameterName, RoleParameterTarget, Tool, ToolAlias, ToolCall,
-        ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, TurnEnd, Wake,
+        RoleParameter, RoleParameterName, RoleParameterTarget, StallReason, StallToken, Tool,
+        ToolAlias, ToolCall, ToolCallId, ToolContext, ToolName, ToolOutput, ToolResult, TurnEnd,
+        Wake,
     },
 };

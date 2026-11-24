@@ -48,6 +48,7 @@ mod role_records;
 #[cfg(feature = "roles")]
 mod roles;
 mod scope_records;
+mod stalls;
 mod store;
 mod store_error;
 #[cfg(feature = "tool-calls")]

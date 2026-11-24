@@ -48,6 +48,8 @@ pub fn apply(
         | Request::SendMessage(..)
         | Request::InterruptAgent(..)
         | Request::InterruptToolCalls(..)
+        | Request::ResumeAgent(..)
+        | Request::ResumeSubtree(..)
         | Request::SetTitle { .. }
         | Request::SetPinned { .. }
         | Request::SetInbox { .. } => return Ok(false),

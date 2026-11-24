@@ -4,7 +4,7 @@ use core::assert_matches;
 use fleet_core::{
     Agent, ClientStore as _, ClientStoreErrorKind, Configured, ContentBlock, Error as _,
     EventPayload, JsonObject, Message, MessageMode, ModelOutput, ModelProvenance, ModelResponse,
-    ModelUsage, RoleName, RuntimeStore as _, ToolCall, TurnEnd,
+    ModelUsage, RoleName, RuntimeStore as _, StallReason, ToolCall, ToolsErrorKind, TurnEnd,
 };
 use fleet_simulator::{Scheduler, Simulator};
 use std::collections::{BTreeMap, BTreeSet};
@@ -318,6 +318,175 @@ fn run_interrupts_a_turn_without_its_async_tool_calls() {
         assert_matches!(
             &snapshot.events[4].payload,
             EventPayload::ToolResult(result) if result.call_id == "async".into()
+        );
+    }
+}
+
+#[test]
+fn run_stalls_agents_on_errors_that_retrying_cannot_fix() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let agent = agent("missing".into());
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&message(0, MessageMode::Queue)))
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_eq!(
+            snapshot.stalled,
+            Some(StallReason::RoleNotFound {
+                role: "missing".into()
+            })
+        );
+    }
+}
+
+#[test]
+fn run_retries_stalled_agents_only_after_they_are_resumed() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let mut simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let agent = agent("missing".into());
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&message(0, MessageMode::Queue)))
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let stalled = simulator.store.snapshot().remove(&agent.id).unwrap();
+        let name = simulator.roles.role_names()[0].clone();
+        let mut role = simulator.roles.role(&name).unwrap().clone();
+        role.name = "missing".into();
+        simulator.roles.insert(role);
+
+        scheduler.run(simulator.run(partition));
+        assert_eq!(simulator.store.snapshot()[&agent.id], stalled);
+
+        scheduler.run(async {
+            simulator
+                .store
+                .resume_agent("resume", agent.id)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_eq!(snapshot.stalled, None);
+        assert_eq!(
+            snapshot.events.last().unwrap().payload,
+            EventPayload::TurnEnd(TurnEnd::Completed)
+        );
+    }
+}
+
+#[test]
+fn run_stalls_agents_on_tool_errors_until_they_are_resumed() {
+    for seed in 0..10 {
+        println!("seed: {seed}");
+
+        let scheduler = Scheduler::new(seed);
+        scheduler.disable_faults();
+        let mut simulator = Simulator::new(&scheduler, seed);
+        let partition = simulator.store.add_partition();
+        let store = simulator.store.partition(partition);
+        let Some(tool) = simulator.tools.tool_names().first().cloned() else {
+            continue;
+        };
+        let agent = agent(simulator.roles.role_names()[0].clone());
+        let mut role = simulator.roles.role(&agent.role.name).unwrap().clone();
+        let tool_config = Configured {
+            name: tool.clone(),
+            config: JsonObject::new(),
+        };
+        role.tools.insert("tool".into(), tool_config);
+        simulator.roles.insert(role);
+        let response = ModelResponse {
+            output: vec![ModelOutput::ToolCall(ToolCall {
+                id: "call".into(),
+                tool: "tool".into(),
+                is_async: false,
+                input: JsonObject::from_iter([("input".into(), "input".into())]),
+            })],
+            usage: ModelUsage {
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            provenance: ModelProvenance {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            continuation_token: None,
+        };
+        simulator
+            .tools
+            .set_error(&tool, Some(ToolsErrorKind::Rejected));
+
+        scheduler.run(async {
+            simulator
+                .store
+                .create_agent("create", &agent, Some(&message(0, MessageMode::Queue)))
+                .await
+                .unwrap();
+            store.consume_messages(agent.id, None, true).await.unwrap();
+            store
+                .append_model_response(agent.id, 0.into(), false, &response)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_eq!(
+            snapshot.stalled,
+            Some(StallReason::ToolError { tool: tool.clone() })
+        );
+        assert_eq!(snapshot.events.len(), 2);
+
+        simulator.tools.set_error(&tool, None);
+        scheduler.run(async {
+            simulator
+                .store
+                .resume_agent("resume", agent.id)
+                .await
+                .unwrap();
+
+            simulator.run(partition).await;
+        });
+
+        let snapshot = simulator.store.snapshot().remove(&agent.id).unwrap();
+        assert_matches!(
+            &snapshot.events[2].payload,
+            EventPayload::ToolResult(result) if result.call_id == "call".into()
+        );
+        assert_eq!(
+            snapshot.events.last().unwrap().payload,
+            EventPayload::TurnEnd(TurnEnd::Completed)
         );
     }
 }

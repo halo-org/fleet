@@ -653,6 +653,12 @@ impl Fleet {
         .await
     }
 
+    /// Resumes an agent and its stalled descendants.
+    pub async fn resume_subtree(&self, key: String, agent: AgentId) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| fleet.state.store.resume_subtree(&key, agent).await)
+            .await
+    }
+
     /// Begins shutdown.
     pub fn shutdown(&self) {
         self.state.idle_handler.shutdown();
@@ -974,7 +980,7 @@ mod tests {
     use fleet_core::{
         Compaction, Configured, ContentBlock, JsonObject, MessageMode, ModelOutput,
         ModelProvenance, ModelResponse, ModelResponseChunk, ModelUsage, RuntimeStore as _,
-        ToolCall, ToolOutput, ToolResult,
+        StallReason, ToolCall, ToolOutput, ToolResult,
     };
     use http_body_util::{BodyExt as _, Full};
     use hyper::{
@@ -2350,6 +2356,79 @@ mod tests {
     }
 
     #[test]
+    fn stalled_agents_report_their_reason_until_resumed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let resume = |path: &str, key: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("idempotency-key", key)
+                .body(Full::new(Bytes::from_static(b"{}")))
+                .unwrap()
+        };
+        let read = async |fleet: &Fleet, path: &str| {
+            let response = crate::api::handle(fleet.clone(), request(path))
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        };
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+            let store = &fleet.state.store;
+            let state = store.agent_state(1.into()).await.unwrap().unwrap();
+            let reason = StallReason::ToolNotFound {
+                role: "role-0".into(),
+                alias: "bash".into(),
+                tool: "tools:bash".into(),
+            };
+            store
+                .stall(1.into(), state.latest_event, state.stall_token, &reason)
+                .await
+                .unwrap();
+
+            let stalled = json!({
+                "kind": "tool_not_found",
+                "role": "role-0",
+                "alias": "bash",
+                "tool": "tools:bash",
+            });
+            let activity = read(&fleet, "/agents/1/activity").await;
+            assert_eq!(activity["stalled"], stalled);
+            assert_eq!(activity["stalled_descendants"], 0);
+            let page = read(&fleet, "/agents").await;
+            assert_eq!(page["agents"][0]["stalled"], stalled);
+            assert_eq!(page["agents"][0]["stalled_descendants"], 0);
+
+            let response = crate::api::handle(fleet.clone(), resume("/agents/1/resumes", "resume"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let activity = read(&fleet, "/agents/1/activity").await;
+            assert_eq!(activity["stalled"], Value::Null);
+
+            let response =
+                crate::api::handle(fleet.clone(), resume("/agents/2/resumes", "missing"))
+                    .await
+                    .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let mut subtree = resume("/agents/1/resumes", "subtree");
+            *subtree.body_mut() = Full::new(Bytes::from_static(br#"{"subtree":false}"#));
+            let response = crate::api::handle(fleet.clone(), subtree).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let response = crate::api::handle(fleet, request("/agents/1/resumes"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        });
+    }
+
+    #[test]
     fn tool_call_queries_return_pending_or_changed_records() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -2503,6 +2582,8 @@ mod tests {
                     "turn": "idle",
                     "interrupt_pending": false,
                     "interrupt_includes_async_tool_calls": false,
+                    "stalled": null,
+                    "stalled_descendants": 0,
                 })
             );
             let current = fleet.tool_calls(1.into(), None).await.unwrap();

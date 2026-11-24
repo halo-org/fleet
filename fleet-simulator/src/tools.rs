@@ -25,6 +25,7 @@ pub struct ToolsSimulator<'sim> {
 struct State {
     rng: Rng,
     tools: BTreeMap<ToolName, ToolState>,
+    errors: BTreeMap<ToolName, ToolsErrorKind>,
     non_retry_calls: BTreeSet<(AgentId, ToolCallId)>,
 }
 
@@ -73,6 +74,7 @@ impl<'sim> ToolsSimulator<'sim> {
             state: Mutex::new(State {
                 rng,
                 tools,
+                errors: BTreeMap::new(),
                 non_retry_calls: BTreeSet::new(),
             }),
         }
@@ -89,6 +91,16 @@ impl<'sim> ToolsSimulator<'sim> {
             .collect()
     }
 
+    /// Makes executions of a tool fail with the given kind, or succeed again.
+    pub fn set_error(&self, name: &ToolName, kind: Option<ToolsErrorKind>) {
+        let errors = &mut self.state.lock().expect("never poisoned").errors;
+
+        match kind {
+            Some(kind) => errors.insert(name.clone(), kind),
+            None => errors.remove(name),
+        };
+    }
+
     #[expect(
         clippy::unused_async,
         clippy::unused_async_trait_impl,
@@ -100,6 +112,18 @@ impl<'sim> ToolsSimulator<'sim> {
         is_retry: bool,
         input: &JsonObject,
     ) -> Result<ToolOutput, ToolsSimulatorError> {
+        if let Some(kind) = self
+            .state
+            .lock()
+            .expect("never poisoned")
+            .errors
+            .get(&context.tool.name)
+        {
+            return Err(ToolsSimulatorError {
+                inner: ToolsSimulatorErrorInner::Kind(*kind, "configured error"),
+            });
+        }
+
         let (is_safe_to_retry, supports_structured_output) = self
             .state
             .lock()
