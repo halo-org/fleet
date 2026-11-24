@@ -8,13 +8,24 @@ use crate::{
         fleet::providers::credentials::{self, Credential},
     },
 };
+use core::fmt;
 use fleet_models::Credentials;
 use http::{HeaderMap, HeaderValue, header};
-use std::io;
 
 const CONNECTION: &str = "chatgpt";
 
 pub struct HostCredentials;
+
+/// An error getting credentials from the host.
+#[derive(Debug)]
+pub enum CredentialsError {
+    /// The user has not signed in.
+    SignedOut,
+    /// The host could not provide or refresh credentials.
+    Host(String),
+    /// The access token cannot be used in a header.
+    InvalidToken(header::InvalidHeaderValue),
+}
 
 impl Guest for OpenAi {
     #[expect(clippy::unused_async_trait_impl, reason = "matches the WIT export")]
@@ -60,19 +71,19 @@ impl Guest for OpenAi {
 }
 
 impl Credentials for HostCredentials {
-    type Error = io::Error;
+    type Error = CredentialsError;
 
     async fn get(&self) -> Result<HeaderMap, Self::Error> {
         let credential = credentials::get(CONNECTION.into())
             .await
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other("Sign in with ChatGPT in Fleet connections"))?;
+            .map_err(CredentialsError::Host)?
+            .ok_or(CredentialsError::SignedOut)?;
         let token = match credential {
             Credential::Oauth(token) => token.access_token,
             Credential::ApiKey(key) => key,
         };
-        let mut value =
-            HeaderValue::from_str(&format!("Bearer {token}")).map_err(io::Error::other)?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(CredentialsError::InvalidToken)?;
         value.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value);
@@ -89,6 +100,25 @@ impl Credentials for HostCredentials {
         };
         credentials::refresh(CONNECTION.into(), token.into())
             .await
-            .map_err(io::Error::other)
+            .map_err(CredentialsError::Host)
+    }
+}
+
+impl fmt::Display for CredentialsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SignedOut => f.write_str("Sign in with ChatGPT in Fleet connections"),
+            Self::Host(message) => f.write_str(message),
+            Self::InvalidToken(_) => f.write_str("the access token is not a valid header value"),
+        }
+    }
+}
+
+impl core::error::Error for CredentialsError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::InvalidToken(error) => Some(error),
+            Self::SignedOut | Self::Host(_) => None,
+        }
     }
 }
