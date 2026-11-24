@@ -68,8 +68,6 @@ pub struct PendingToolCall {
     pub tool: ToolAlias,
     /// Whether the agent can continue before the call completes.
     pub is_async: bool,
-    /// The task handle in the call's input.
-    pub task_handle: Option<String>,
 }
 
 /// The status of a task handle in the driving call's context.
