@@ -35,6 +35,10 @@ struct WakeStream {
 impl Store {
     /// Opens a store, creating it if needed.
     ///
+    /// Format 5 databases are upgraded transactionally to format 6, which indexes the agents
+    /// holding each blob and the request receipts of each agent. Older binaries cannot reopen an
+    /// upgraded database.
+    ///
     /// # Errors
     ///
     /// Returns [`UnsupportedFormat`](StoreError::UnsupportedFormat) for databases in another
@@ -60,8 +64,13 @@ impl Store {
         {
             let mut records = Records(transaction.open_table(records::RECORDS)?);
             match records.get::<u32>(&[])? {
-                Some(5) => {}
-                None => records.put(&[], &5_u32)?,
+                Some(6) => {}
+                None => records.put(&[], &6_u32)?,
+                Some(5) => {
+                    crate::blob_records::index_holders(&mut records)?;
+                    records.index_requests()?;
+                    records.put(&[], &6_u32)?;
+                }
                 Some(_) => return Err(StoreError::UnsupportedFormat),
             }
             crate::agents::expire(&mut records, crate::agents::now_millis())?;
@@ -105,14 +114,23 @@ impl Store {
                             Err(StoreError::IdempotencyConflict)
                         };
                     }
+                    let fingerprint_key =
+                        records::key(records::FINGERPRINT, 0, idempotency_key.as_bytes());
+                    if let Some(previous) = records.get::<[u8; 32]>(&fingerprint_key)? {
+                        return if previous == request.fingerprint()? {
+                            Ok(())
+                        } else {
+                            Err(StoreError::IdempotencyConflict)
+                        };
+                    }
                     if crate::role_records::apply(&transaction, &mut records, &request)? {
-                        records.put(&request_key, &request)?;
+                        records.put_request(&idempotency_key, &request)?;
                         drop(records);
                         transaction.commit()?;
                         return Ok(());
                     }
                     if let Some(resumed) = apply_resume_request(&mut records, &request)? {
-                        records.put(&request_key, &request)?;
+                        records.put_request(&idempotency_key, &request)?;
                         drop(records);
                         transaction.commit()?;
                         worker.notify_changed(&resumed.changed);
@@ -123,7 +141,7 @@ impl Store {
                     }
                     let edit = apply_collection_request(&mut records, &request)?;
                     if let Some((id, changed, summary_changed)) = edit {
-                        records.put(&request_key, &request)?;
+                        records.put_request(&idempotency_key, &request)?;
                         drop(records);
                         transaction.commit()?;
                         if changed {
@@ -150,7 +168,7 @@ impl Store {
                         &agent,
                         crate::agents::now_millis(),
                     )?;
-                    records.put(&request_key, &request)?;
+                    records.put_request(&idempotency_key, &request)?;
                     (
                         id,
                         agent.interrupt_intent,
@@ -270,6 +288,9 @@ pub fn apply_agent_request(
                 .is_some()
             {
                 return Err(StoreError::Conflict("agent already exists"));
+            }
+            if crate::agents::deleted(records, agent.id)? {
+                return Err(StoreError::Conflict("agent was deleted"));
             }
             let agent = AgentRecord {
                 agent: agent.clone(),

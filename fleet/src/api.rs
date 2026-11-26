@@ -123,6 +123,13 @@ where
         (&Method::GET, ["", "agents", agent_id]) => {
             agent(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
+        (&Method::DELETE, ["", "agents", agent_id]) => {
+            fleet
+                .delete_agent(parse_id(agent_id)?)
+                .await
+                .map_err(ApiError::Fleet)?;
+            Ok(empty_response(StatusCode::NO_CONTENT))
+        }
         (&Method::GET, ["", "agents", agent_id, "messages"]) => {
             messages(fleet, parse_id(agent_id)?, parse_query(parts.uri.query())?).await
         }
@@ -159,10 +166,10 @@ where
             ["", "agents", _, "interrupts" | "resumes"]
             | ["", "agents", _, "tool-calls", "interrupts"],
         ) => Err(ApiError::MethodNotAllowed("POST")),
+        (_, ["", "agents", _]) => Err(ApiError::MethodNotAllowed("GET, DELETE")),
         (
             _,
-            ["", "agents", _]
-            | ["", "providers" | "roles"]
+            ["", "providers" | "roles"]
             | [
                 "",
                 "agents",

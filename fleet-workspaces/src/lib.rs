@@ -1,7 +1,7 @@
 //! Role-driven workspace resolution and directory views.
 
 use core::{error::Error, fmt};
-use fleet_core::{AgentId, Configured, RoleInstance, Roles};
+use fleet_core::{Agent, AgentId, Configured, RoleInstance, RoleName, Roles};
 use fleet_kit::{
     Agents, Extension as _, RoleWorkspace, WorkspaceAccess, WorkspaceBinding, WorkspaceCommand,
     WorkspaceContext, WorkspaceOutput, WorkspaceResolvers, WorkspaceSource, WorkspaceWrite,
@@ -60,7 +60,20 @@ where
     ///
     /// Returns an error when the role or its workspace cannot be loaded.
     pub async fn owned_environment(&self) -> Result<Option<WorkspaceContext>, WorkspaceError> {
-        let Some(workspace) = self.workspace(self.agent).await? else {
+        let agent = self.agent(self.agent).await?;
+        self.role_environment(&agent.role).await
+    }
+
+    /// Resolves the environment the agent owns under a role, such as one it had before deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the role or its workspace cannot be loaded.
+    pub async fn role_environment(
+        &self,
+        role: &Configured<RoleName>,
+    ) -> Result<Option<WorkspaceContext>, WorkspaceError> {
+        let Some(workspace) = self.role_workspace(role).await? else {
             return Ok(None);
         };
         if workspace.id.is_some() {
@@ -80,19 +93,29 @@ where
         }))
     }
 
-    async fn workspace(&self, subject: AgentId) -> Result<Option<RoleWorkspace>, WorkspaceError> {
-        let agent = self
-            .agents
+    async fn agent(&self, subject: AgentId) -> Result<Agent, WorkspaceError> {
+        self.agents
             .get(subject)
             .await
-            .map_err(|source| failure("could not read workspace agent", source))?;
-        let role = self
+            .map_err(|source| failure("could not read workspace agent", source))
+    }
+
+    async fn workspace(&self, subject: AgentId) -> Result<Option<RoleWorkspace>, WorkspaceError> {
+        let agent = self.agent(subject).await?;
+        self.role_workspace(&agent.role).await
+    }
+
+    async fn role_workspace(
+        &self,
+        role: &Configured<RoleName>,
+    ) -> Result<Option<RoleWorkspace>, WorkspaceError> {
+        let definition = self
             .roles
-            .get(&agent.role.name)
+            .get(&role.name)
             .await
             .map_err(|source| failure("could not load workspace role", source))?
             .ok_or_else(|| invalid("workspace role does not exist"))?;
-        let extensions = RoleInstance::new(&role, &agent.role.config)
+        let extensions = RoleInstance::new(&definition, &role.config)
             .extensions()
             .map_err(|source| failure("could not configure workspace role", source))?;
         RoleWorkspace::get(&extensions)

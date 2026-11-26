@@ -347,6 +347,11 @@ impl Fleet {
             let now = crate::fleet::now();
             let deadline = match self.state.store.workspace_releases(now, settled_for).await {
                 Ok((due, deadline)) => {
+                    for release in &due {
+                        if release.deleted_role().is_some() {
+                            self.state.workspace_locks.delete(release.agent());
+                        }
+                    }
                     for release in due {
                         if releasing.insert(release.agent()) {
                             releases.push(self.release_workspace(workspaces, release));
@@ -407,7 +412,7 @@ impl Fleet {
             let Some(guard) = self.state.idle_handler.track_mutation() else {
                 return agent;
             };
-            let result = self.try_release_workspace(workspaces, release).await;
+            let result = self.try_release_workspace(workspaces, &release).await;
             drop(guard);
             let wait = match result {
                 Ok(ReleaseAttempt::Finished) => return agent,
@@ -432,18 +437,28 @@ impl Fleet {
     async fn try_release_workspace(
         &self,
         workspaces: &(impl Workspaces<Error: Send> + WorkspaceResolvers<Error: Send> + Clone + Sync),
-        release: WorkspaceRelease,
+        release: &WorkspaceRelease,
     ) -> Result<ReleaseAttempt, Box<dyn Error + Send>> {
         let agent = release.agent();
         let store = &self.state.store;
-        let owned = AgentWorkspaces::new(
+        if store
+            .workspace_release_state(release)
+            .await
+            .map_err(boxed)?
+            == WorkspaceReleaseState::Cancelled
+        {
+            return Ok(ReleaseAttempt::Finished);
+        }
+        let agent_workspaces = AgentWorkspaces::new(
             agent,
             store.agent_access(agent),
             store.clone(),
             workspaces.clone(),
-        )
-        .owned_environment()
-        .await;
+        );
+        let owned = match release.deleted_role() {
+            Some(role) => agent_workspaces.role_environment(role).await,
+            None => agent_workspaces.owned_environment().await,
+        };
         let context = match owned {
             Ok(context) => context,
             Err(error) if error.kind() == WorkspacesErrorKind::InvalidConfiguration => {
@@ -656,6 +671,14 @@ impl Fleet {
     /// Resumes an agent and its stalled descendants.
     pub async fn resume_subtree(&self, key: String, agent: AgentId) -> Result<(), FleetError> {
         self.mutate(async move |fleet| fleet.state.store.resume_subtree(&key, agent).await)
+            .await
+    }
+
+    /// Deletes a root agent with its subagents, history and the blobs only they hold.
+    ///
+    /// Their workspaces are released afterwards. Deleting an absent agent succeeds.
+    pub async fn delete_agent(&self, agent: AgentId) -> Result<(), FleetError> {
+        self.mutate(async move |fleet| fleet.state.store.delete_agent(agent).await)
             .await
     }
 
@@ -1236,6 +1259,70 @@ mod tests {
     }
 
     #[test]
+    fn deleting_an_agent_removes_it_from_subscriptions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let fleet = fleet().await;
+            let revision = fleet.collection_revision().await.unwrap();
+            let mut subscription = request("/agents/subscription");
+            subscription
+                .headers_mut()
+                .insert("last-event-id", revision.to_string().parse().unwrap());
+            let mut collection = crate::api::handle(fleet.clone(), subscription)
+                .await
+                .unwrap()
+                .into_body();
+            let mut subscription = request("/agents/1/subscription");
+            subscription
+                .headers_mut()
+                .insert("last-event-id", "1".parse().unwrap());
+            let mut updates = crate::api::handle(fleet.clone(), subscription)
+                .await
+                .unwrap()
+                .into_body();
+            let subscription = request("/agents/1/preview/subscription");
+            let mut previews = crate::api::handle(fleet.clone(), subscription)
+                .await
+                .unwrap()
+                .into_body();
+            next_frame(&mut previews).await;
+
+            let delete = async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                for _ in 0..2 {
+                    assert_eq!(delete(&fleet, 1).await, StatusCode::NO_CONTENT);
+                }
+            };
+            let (frame, agent_frame, preview_frame, ()) = future::join4(
+                next_frame(&mut collection),
+                updates.frame(),
+                previews.frame(),
+                delete,
+            )
+            .await;
+
+            let update: Value =
+                serde_json::from_str(frame.split_once("data: ").unwrap().1).unwrap();
+            assert_eq!(
+                update,
+                json!({
+                    "removed": ["1"],
+                })
+            );
+            assert!(agent_frame.is_none());
+            assert!(preview_frame.is_none());
+            let response = crate::api::handle(fleet, request("/agents/1"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        });
+    }
+
+    #[test]
     fn set_title_checks_preconditions_and_retries() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1776,12 +1863,21 @@ mod tests {
             }))
             .unwrap(),
         );
-        let Value::Object(extensions) = json!({ "fleet.workspace": { "name": "fake:default" } })
-        else {
+        put_role(
+            &fleet,
+            "role-0",
+            json!({ "fleet.workspace": { "name": "fake:default" } }),
+        )
+        .await;
+        fleet
+    }
+
+    async fn put_role(fleet: &Fleet, name: &str, extensions: Value) {
+        let Value::Object(extensions) = extensions else {
             unreachable!()
         };
         let role = Role {
-            name: "role-0".into(),
+            name: name.into(),
             parameters: BTreeMap::new(),
             model: Configured {
                 name: "model".into(),
@@ -1792,8 +1888,19 @@ mod tests {
             compaction: None,
             extensions,
         };
-        fleet.put_role("role".into(), role, None).await.unwrap();
-        fleet
+        fleet.put_role(name.into(), role, None).await.unwrap();
+    }
+
+    async fn delete(fleet: &Fleet, agent: u128) -> StatusCode {
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/agents/{agent}"))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        crate::api::handle(fleet.clone(), request)
+            .await
+            .unwrap()
+            .status()
     }
 
     async fn set_inbox(fleet: &Fleet, key: &str, agent: u128, action: InboxAction) {
@@ -1895,6 +2002,132 @@ mod tests {
         });
     }
 
+    #[test]
+    fn deleting_an_agent_releases_the_workspaces_its_tree_owns() {
+        use fleet_kit::Agents as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(0).await;
+            put_role(&fleet, "plain", json!({})).await;
+            let store = &fleet.state.store;
+            let root = Agent {
+                id: 2.into(),
+                role: Configured {
+                    name: "role-0".into(),
+                    config: JsonObject::new(),
+                },
+                extensions: JsonObject::new(),
+            };
+            let message = Message {
+                id: 1.into(),
+                mode: MessageMode::Queue,
+                content: vec![ContentBlock::Text("Hello".into())],
+            };
+            fleet
+                .create_agent("root".into(), root, Some(message))
+                .await
+                .unwrap();
+            store.consume_messages(2.into(), None, true).await.unwrap();
+            let mut response = model_response("Working");
+            response.output.push(ModelOutput::ToolCall(ToolCall {
+                id: "drive".into(),
+                tool: "delegate".into(),
+                is_async: true,
+                input: JsonObject::new(),
+            }));
+            let latest = store.agent_state(2.into()).await.unwrap().unwrap();
+            store
+                .append_model_response(2.into(), latest.latest_event.unwrap(), true, &response)
+                .await
+                .unwrap();
+            let access = store.agent_access(2.into()).for_call("drive".into());
+            let mut children = Vec::new();
+            for name in ["role-0", "plain", "missing"] {
+                let role = Configured {
+                    name: name.into(),
+                    config: JsonObject::new(),
+                };
+                children.push(
+                    access
+                        .create(name, &role, &JsonObject::new())
+                        .await
+                        .unwrap(),
+                );
+            }
+            let releases = Releases::default();
+            let paused = releases.paused.clone().write_owned().await;
+
+            future::join(fleet.run_workspace_releases(&releases), async {
+                assert_eq!(delete(&fleet, 2).await, StatusCode::NO_CONTENT);
+                releases.entered.notified().await;
+                assert_eq!(delete(&fleet, 2).await, StatusCode::NO_CONTENT);
+                drop(paused);
+                tokio::time::timeout(Duration::from_secs(5), wait_for_releases(&fleet))
+                    .await
+                    .unwrap();
+                assert_eq!(delete(&fleet, 2).await, StatusCode::NO_CONTENT);
+                fleet.shutdown();
+            })
+            .await;
+            let mut agents = releases.released.lock().unwrap().clone();
+            agents.sort();
+            assert_eq!(agents, [AgentId::from(2), children[0]]);
+        });
+    }
+
+    #[test]
+    fn deleted_agents_release_their_workspaces_after_restarts_and_failures() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fleet-deletion-release-{}.redb",
+            std::process::id()
+        ));
+        runtime.block_on(async {
+            {
+                let fleet = Fleet::new(Store::open(&path).unwrap(), None);
+                put_role(
+                    &fleet,
+                    "role-0",
+                    json!({ "fleet.workspace": { "name": "fake:default" } }),
+                )
+                .await;
+                let agent = Agent {
+                    id: 1.into(),
+                    role: Configured {
+                        name: "role-0".into(),
+                        config: JsonObject::new(),
+                    },
+                    extensions: JsonObject::new(),
+                };
+                fleet
+                    .create_agent("create".into(), agent, None)
+                    .await
+                    .unwrap();
+                fleet.delete_agent(1.into()).await.unwrap();
+            }
+            let fleet = Fleet::new(Store::open(&path).unwrap(), None);
+            let releases = Releases::default();
+            releases.failures.lock().unwrap().insert(1.into(), 2);
+
+            future::join(fleet.run_workspace_releases(&releases), async {
+                tokio::time::timeout(Duration::from_secs(5), wait_for_releases(&fleet))
+                    .await
+                    .unwrap();
+                fleet.shutdown();
+            })
+            .await;
+            assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+        });
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn environment(agent: u128) -> fleet_kit::WorkspaceContext {
         fleet_kit::WorkspaceContext {
             workspace: Configured {
@@ -1965,12 +2198,39 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            let busy = fleet.try_release_workspace(&releases, due[0]).await;
+            let busy = fleet.try_release_workspace(&releases, &due[0]).await;
             drop(borrower);
-            let finished = fleet.try_release_workspace(&releases, due[0]).await;
+            let finished = fleet.try_release_workspace(&releases, &due[0]).await;
 
             assert!(matches!(busy, Ok(ReleaseAttempt::Busy)));
             assert!(matches!(finished, Ok(ReleaseAttempt::Finished)));
+            assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
+        });
+    }
+
+    #[test]
+    fn deleted_agents_cannot_use_environments_once_released() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fleet = releasing_fleet(0).await;
+            let releases = Releases::default();
+            let borrower = fleet.workspace_locks().wrap(releases.clone());
+            fleet.delete_agent(1.into()).await.unwrap();
+
+            future::join(fleet.run_workspace_releases(&releases), async {
+                tokio::time::timeout(Duration::from_secs(5), wait_for_releases(&fleet))
+                    .await
+                    .unwrap();
+                let context = environment(1);
+                let mut open = pin!(Workspaces::open(&borrower, &context));
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(futures_util::FutureExt::now_or_never(open.as_mut()).is_none());
+                fleet.shutdown();
+            })
+            .await;
             assert_eq!(*releases.released.lock().unwrap(), [AgentId::from(1)]);
         });
     }

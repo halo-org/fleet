@@ -569,6 +569,27 @@ fn settled_agents_release_their_workspace_and_reopen_it_when_used() {
 }
 
 #[test]
+fn deleted_agents_release_their_workspace() {
+    run_with(json!({}), async |fleet, providers| {
+        let write = json!({
+            "tool_calls": [{ "tool": "write", "input": { "path": "notes.txt", "content": "kept" } }],
+        });
+        start(fleet, "assistant", &write).await;
+        assert!(workspace_file(providers, "1", "notes.txt").await.is_some());
+
+        let (status, _) = call(fleet, "DELETE", "/agents/1", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_release(providers, "1", "notes.txt"),
+        )
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
 fn scripts_continue_across_compaction() {
     run(async |fleet| {
         let role = json!({
@@ -874,6 +895,29 @@ fn stalled_subagents_stay_stalled_across_restarts() {
                 providers.shutdown().await;
             }
         });
+}
+
+#[test]
+fn deleting_a_running_root_stops_its_subagents() {
+    run(async |fleet| {
+        let [child, grandchild] = start_stalled_chain(fleet).await;
+
+        let (status, _) = call(fleet, "DELETE", "/agents/1", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for agent in ["1", &child, &grandchild] {
+            let (status, _) = call(fleet, "GET", &format!("/agents/{agent}"), None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        let script = json!({ "steps": [{ "text": "Done." }] });
+        let agent = json!({ "id": "2", "role": "assistant", "message": message(1, &script) });
+        let (status, _) = call(fleet, "POST", "/agents", Some(&agent)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let end = fleet.wait_for_turn_end(2.into(), 1.into()).await.unwrap();
+        assert_eq!(end.payload, TurnEnd::Completed);
+        let (_, page) = call(fleet, "GET", "/agents", None).await;
+        assert_eq!(page["agents"].as_array().unwrap().len(), 1);
+    });
 }
 
 #[test]

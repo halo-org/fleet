@@ -12,8 +12,10 @@ use tokio::sync::watch;
 type Environment = (WorkspaceName, WorkspaceId);
 
 /// Keeps workspace environments in use from being released, and their use waiting for releases.
+///
+/// Deleted agents wait to use environments until their tool calls are dropped.
 #[derive(Clone)]
-pub struct WorkspaceLocks(watch::Sender<BTreeMap<Environment, Lock>>);
+pub struct WorkspaceLocks(watch::Sender<Locks>);
 
 /// Holds an environment for its release until dropped.
 pub struct ReleaseLock {
@@ -29,6 +31,12 @@ pub struct LockingWorkspaces<W> {
 }
 
 #[derive(Default)]
+struct Locks {
+    environments: BTreeMap<Environment, Lock>,
+    deleted: BTreeSet<AgentId>,
+}
+
+#[derive(Default)]
 struct Lock {
     uses: usize,
     releasing: bool,
@@ -37,14 +45,19 @@ struct Lock {
 impl WorkspaceLocks {
     /// Creates locks for environments that are not in use.
     pub fn new() -> Self {
-        Self(watch::Sender::new(BTreeMap::new()))
+        Self(watch::Sender::new(Locks::default()))
+    }
+
+    /// Keeps a deleted agent from using environments. Call this before releasing its workspace.
+    pub fn delete(&self, agent: AgentId) {
+        self.0.send_if_modified(|locks| locks.deleted.insert(agent));
     }
 
     /// Locks an environment for its release unless it is in use or already being released.
     pub fn try_release(&self, context: &WorkspaceContext) -> Option<ReleaseLock> {
         let environment = (context.workspace.name.clone(), context.id);
         let locked = self.0.send_if_modified(|locks| {
-            let lock = locks.entry(environment.clone()).or_default();
+            let lock = locks.environments.entry(environment.clone()).or_default();
             let available = lock.uses == 0 && !lock.releasing;
             lock.releasing |= available;
             available
@@ -64,17 +77,25 @@ impl WorkspaceLocks {
         }
     }
 
-    async fn use_environment(&self, environment: &Environment) {
+    async fn use_environment(&self, environment: &Environment, agent: AgentId) {
+        let available = |locks: &Locks| {
+            !locks.deleted.contains(&agent)
+                && locks
+                    .environments
+                    .get(environment)
+                    .is_none_or(|lock| !lock.releasing)
+        };
         let mut changes = self.0.subscribe();
         while !self.0.send_if_modified(|locks| {
-            let lock = locks.entry(environment.clone()).or_default();
-            if !lock.releasing {
+            let available = available(locks);
+            if available {
+                let lock = locks.environments.entry(environment.clone()).or_default();
                 lock.uses = lock.uses.checked_add(1).expect("uses do not overflow");
             }
-            !lock.releasing
+            available
         }) {
             changes
-                .wait_for(|locks| locks.get(environment).is_none_or(|lock| !lock.releasing))
+                .wait_for(available)
                 .await
                 .expect("sender outlives receiver");
         }
@@ -89,11 +110,12 @@ impl WorkspaceLocks {
     fn update(&self, environment: &Environment, update: impl FnOnce(&mut Lock)) {
         self.0.send_modify(|locks| {
             let lock = locks
+                .environments
                 .get_mut(environment)
                 .expect("a held environment is locked");
             update(lock);
             if lock.uses == 0 && !lock.releasing {
-                locks.remove(environment);
+                locks.environments.remove(environment);
             }
         });
     }
@@ -112,7 +134,9 @@ impl<W: Sync> LockingWorkspaces<W> {
         if self.used().contains(&environment) {
             return;
         }
-        self.locks.use_environment(&environment).await;
+        self.locks
+            .use_environment(&environment, context.agent_id)
+            .await;
         if !self.used().insert(environment.clone()) {
             self.locks.unuse(&environment);
         }

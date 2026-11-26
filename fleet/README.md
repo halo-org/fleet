@@ -309,8 +309,8 @@ settled for `release_settled_workspaces_after_ms`:
 ```
 
 The time counts from when the agent settled, so a changed setting also applies to
-agents that are already settled. Without the setting, root agents' workspaces are
-never released. Restoring an agent to pending, snoozing it or sending it a message
+agents that are already settled. Without the setting, settling never releases a root
+agent's workspace, and only [deleting](#deleting-agents) it does. Restoring an agent to pending, snoozing it or sending it a message
 cancels its pending release, and settling it again starts a new one. Settling and
 unsettling only change `fleet.db` and never call a workspace provider. The agent
 stays settled after the release, and its next tool call opens the workspace again.
@@ -449,12 +449,48 @@ Model and tool providers report these errors with the `rejected` error kind. The
 plugin does so while no one has signed in with ChatGPT. Rebuild provider components against
 the updated WIT files before using this version.
 
+## Deleting agents
+
+`DELETE /agents/1` deletes root agent `1` and the agents its tool calls created, recursively,
+and returns 204. It takes no body or `Idempotency-Key`, and deleting an agent that does not
+exist also returns 204. A subagent is deleted with its root. Deleting one directly returns 403.
+
+One transaction removes the agents' records, events, messages, tool calls, stalls, notifications
+and scopes from `fleet.db`. Client idempotency receipts of requests about them are replaced by a
+SHA-256 fingerprint, so a retry still succeeds without effect and a reused key still conflicts.
+Receipts of requests their tool calls made are removed. The transaction also deletes the images
+only these agents hold. An agent holds an image that appears in its messages, events or
+compactions, or that a tool created for it. Images another agent also holds are kept, as are
+completed uploads never attached to an agent. Indexes keep image and receipt cleanup proportional
+to what the deleted agents hold rather than to the database.
+
+In-flight model requests and tool calls, including async ones, are dropped. A dropped tool call
+may still have had external effects. The transaction replaces the agents' pending workspace
+releases with one for each agent, which keeps the role name and config the agent had. Each
+agent's own environment is then [released](#workspaces) under the current definition of that
+role once no tool call is using it, and tool calls of deleted agents cannot use it again. The
+releases survive restarts and are retried with backoff while the provider fails. A release whose
+role was deleted is logged and dropped, and one whose role no longer configures an owned
+workspace does nothing. Agents that use a parent's workspace or a shared `id` release nothing.
+Releasing a subagent's environment that was already released when its scope closed succeeds
+without effect.
+
+Collection reads omit deleted agents, and the collection subscription reports them in `removed`.
+Fleet keeps each agent's ID and the collection revision of its deletion, so a resumed subscription
+cannot restore the agent. Creating an agent with that ID returns 409. Agent and preview
+subscriptions end, and reads of a deleted agent return 404.
+
+The deleted rows are removed, not hidden. The database does not overwrite freed pages, so their
+bytes can remain in `fleet.db` until the pages are reused.
+
 ## Images and blobs
 
 Messages and tool results can contain `{"type":"image","blob_id":"123"}` blocks alongside
 text. Blob IDs, like agent IDs, are decimal strings. Image bytes are immutable and stored in
 separate raw tables in `fleet.db`; events contain references, not base64 payloads. The database
-uses format 5. Older Fleet binaries cannot open it.
+uses format 6. Fleet upgrades a format 5 database the first time it opens it by indexing the
+agents holding each blob and the request receipts of each agent. Older Fleet binaries cannot
+open it afterwards.
 
 Image uploads accept PNG, JPEG, GIF, and WebP, up to 10 MiB per image. The server validates the
 actual format and decodes with resource limits (8,192 pixels per edge and 32 million pixels).
@@ -482,8 +518,9 @@ requests.
 `DELETE /uploads/123` discards staging data or a completion receipt, never a published blob.
 Sessions survive server restarts and expire after 24 hours. Expired sessions are reclaimed when
 new uploads are created. The store permits 64 unfinished sessions and reserves at most 256 MiB
-for their declared lengths. Published blobs are retained; automatic blob collection is not yet
-implemented. This is a Fleet upload protocol, not a tus-compatible endpoint.
+for their declared lengths. Published blobs are retained until every agent holding them is
+[deleted](#deleting-agents). Blobs no agent holds are not collected. This is a Fleet upload
+protocol, not a tus-compatible endpoint.
 
 ### Plugin access
 

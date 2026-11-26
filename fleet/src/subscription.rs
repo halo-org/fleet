@@ -7,6 +7,7 @@ use crate::{ApiAgentUpdates, ApiPreview, ApiPreviewKind, ApiPreviewSelection, Fl
 use core::{fmt::Write as _, pin::pin, time::Duration};
 use fleet_core::AgentId;
 use fleet_kit::{AgentUpdates, Preview, PreviewContent, Revision};
+use fleet_store::StoreError;
 use futures_util::{
     Stream, StreamExt as _,
     future::{self, Either},
@@ -99,8 +100,10 @@ fn keep_alive(
                 }
             };
             let frame = match result {
+                Ok(None | Some(Err(FleetError::Query(StoreError::AgentNotFound)))) => {
+                    return Ok(None);
+                }
                 Ok(Some(frame)) => frame?,
-                Ok(None) => return Ok(None),
                 Err(_) => Frame::data(Bytes::from_static(b": keep-alive\n\n")),
             };
             Ok(Some((frame, (fleet, updates))))
