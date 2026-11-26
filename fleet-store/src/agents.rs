@@ -18,7 +18,10 @@ use fleet_kit::{
 use redb::ReadableDatabase as _;
 use redb::{ReadableTable, Table};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const META: u8 = 13;
 const SUMMARY: u8 = 14;
@@ -258,6 +261,58 @@ fn write_summary(
     records.put(&change_key(version, id), &id)?;
     records.put(&[META], &version)?;
     Ok(true)
+}
+
+/// Replaces the summaries of deleted agents with deletions in one collection revision.
+///
+/// Settled root agents' releases are cancelled.
+pub fn delete(
+    records: &mut Records<Table<'_, &'static [u8], &'static [u8]>>,
+    ids: &BTreeSet<u128>,
+) -> Result<(), StoreError> {
+    let version = revision(records)?
+        .checked_add(1)
+        .expect("collection revisions do not overflow");
+    for &id in ids {
+        let key = records::key(SUMMARY, id, &[]);
+        if let Some(old) = records.get::<SummaryRecord>(&key)? {
+            records.remove(&change_key(old.version, id))?;
+            if let Some(previous) = &old.value {
+                records.remove(&inbox_key(id, previous))?;
+                if let Some(until) = previous.until {
+                    records.remove(&snooze_key(until, id))?;
+                }
+                if previous.inbox == SETTLED && previous.parent.is_none() {
+                    crate::release_records::cancel(
+                        records,
+                        crate::release_records::SETTLED,
+                        previous.since,
+                        id,
+                    )?;
+                }
+            }
+        }
+        records.put(
+            &key,
+            &SummaryRecord {
+                id,
+                version,
+                value: None,
+            },
+        )?;
+        records.put(&change_key(version, id), &id)?;
+    }
+    records.put(&[META], &version)
+}
+
+/// Returns whether the agent was deleted.
+pub fn deleted<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    records: &Records<T>,
+    id: u128,
+) -> Result<bool, StoreError> {
+    Ok(records
+        .get::<SummaryRecord>(&records::key(SUMMARY, id, &[]))?
+        .is_some_and(|row| row.value.is_none()))
 }
 
 /// Schedules releases for root agents settled before releases were indexed.
@@ -827,37 +882,8 @@ mod tests {
             let store = Store::memory().unwrap();
             store.create_agent("create", &agent(), None).await.unwrap();
             let delayed_page = store.agents(AgentsQuery::default()).await.unwrap();
-            // There is no public agent deletion operation yet. Exercise the
-            // persisted tombstone representation used by the collection stream.
-            store
-                .worker()
-                .call(|worker| {
-                    let tx = worker.database.begin_write()?;
-                    {
-                        let mut records = Records(tx.open_table(records::RECORDS)?);
-                        let old = records
-                            .get::<SummaryRecord>(&records::key(SUMMARY, 1, &[]))?
-                            .unwrap();
-                        let version = revision(&records)? + 1;
-                        records.remove(&inbox_key(1, old.value.as_ref().unwrap()))?;
-                        records.remove(&change_key(old.version, 1))?;
-                        records.remove(&records::key(records::AGENT, 1, &[]))?;
-                        records.put(
-                            &records::key(SUMMARY, 1, &[]),
-                            &SummaryRecord {
-                                id: 1,
-                                version,
-                                value: None,
-                            },
-                        )?;
-                        records.put(&change_key(version, 1), &1_u128)?;
-                        records.put(&[META], &version)?;
-                    }
-                    tx.commit()?;
-                    Ok(())
-                })
-                .await
-                .unwrap();
+            store.delete_agent(1.into()).await.unwrap();
+            store.delete_agent(1.into()).await.unwrap();
             let deleted = store.agents_updates(delayed_page.revision).await.unwrap();
             assert_eq!(deleted.removed, vec![1.into()]);
             assert!(deleted.revision > delayed_page.agents[0].version);
@@ -869,6 +895,17 @@ mod tests {
                 store.agents(AgentsQuery::default()).await.unwrap().agents,
                 []
             );
+            assert_eq!(store.collection_revision().await.unwrap(), deleted.revision);
+
+            store.create_agent("create", &agent(), None).await.unwrap();
+            let error = store
+                .create_agent("other", &agent(), None)
+                .await
+                .unwrap_err();
+            assert_matches!(error, StoreError::Conflict(_));
+            let error = store.resume_agent("create", 1.into()).await.unwrap_err();
+            assert_matches!(error, StoreError::IdempotencyConflict);
+            assert_eq!(store.collection_revision().await.unwrap(), deleted.revision);
         });
     }
 }

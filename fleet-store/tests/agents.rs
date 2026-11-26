@@ -442,11 +442,11 @@ fn settling_schedules_a_release_that_unsettling_cancels() {
             .unwrap();
         assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
         assert_matches!(
-            store.workspace_release_state(due[0]).await,
+            store.workspace_release_state(&due[0]).await,
             Ok(WorkspaceReleaseState::Cancelled)
         );
         let resettled = settle(&store, "settle-again").await;
-        store.complete_workspace_release(due[0]).await.unwrap();
+        store.complete_workspace_release(&due[0]).await.unwrap();
         let (replaced, next) = releases(&store, resettled.since).await;
         assert_eq!(replaced, []);
         assert_eq!(next, Some(resettled.since + 60_000));
@@ -493,7 +493,7 @@ fn releases_wait_for_tool_calls_and_keep_agents_settled() {
         settle(&store, "settle").await;
         let (due, _) = releases(&store, u64::MAX).await;
         assert_matches!(
-            store.workspace_release_state(due[0]).await,
+            store.workspace_release_state(&due[0]).await,
             Ok(WorkspaceReleaseState::Busy)
         );
 
@@ -512,7 +512,7 @@ fn releases_wait_for_tool_calls_and_keep_agents_settled() {
             .await
             .unwrap();
         assert_matches!(
-            store.workspace_release_state(due[0]).await,
+            store.workspace_release_state(&due[0]).await,
             Ok(WorkspaceReleaseState::Cancelled)
         );
         let state = store.agent_state(1.into()).await.unwrap().unwrap();
@@ -528,11 +528,11 @@ fn releases_wait_for_tool_calls_and_keep_agents_settled() {
         settle(&store, "settle-idle").await;
         let (due, _) = releases(&store, u64::MAX).await;
         assert_matches!(
-            store.workspace_release_state(due[0]).await,
+            store.workspace_release_state(&due[0]).await,
             Ok(WorkspaceReleaseState::Ready)
         );
-        store.complete_workspace_release(due[0]).await.unwrap();
-        store.complete_workspace_release(due[0]).await.unwrap();
+        store.complete_workspace_release(&due[0]).await.unwrap();
+        store.complete_workspace_release(&due[0]).await.unwrap();
         assert_eq!(releases(&store, u64::MAX).await, (vec![], None));
         assert_eq!(summary(&store, 1).await.inbox, InboxState::Settled);
     });

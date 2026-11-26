@@ -5,7 +5,8 @@
 //!
 //! The `blobs` feature implements `fleet_kit::Blobs` and resumable image uploads. Payloads
 //! are raw values in separate tables, not embedded in event JSON. Published blobs are immutable
-//! and retained; image-reference validation and agent grants are maintained with all feature sets.
+//! and retained until the agents holding them are deleted. Image-reference validation and agent
+//! grants are maintained with all feature sets.
 //!
 //! The `queries` feature enables the `fleet-kit` query and collection interfaces,
 //! including title/inbox mutations and the store's snooze-management methods.
@@ -34,6 +35,7 @@ mod blob_records;
 #[cfg(feature = "blobs")]
 mod blobs;
 mod data;
+mod deletion;
 mod listeners;
 mod metadata;
 mod notification_records;

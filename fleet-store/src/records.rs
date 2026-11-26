@@ -1,6 +1,7 @@
 use crate::{StoreError, data};
 use redb::{ReadableTable, Table, TableDefinition};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 
 pub const RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("records");
@@ -16,6 +17,10 @@ pub const CHANGE: u8 = 9;
 pub const REQUEST: u8 = 10;
 pub const ACTIVITY: u8 = 11;
 pub const RESOURCE_CHANGE: u8 = 12;
+/// The fingerprint of a request receipt removed with its agent.
+pub const FINGERPRINT: u8 = 22;
+/// A request receipt, keyed by the agent it applies to.
+pub const AGENT_REQUEST: u8 = 24;
 
 pub struct Records<T>(pub T);
 
@@ -146,6 +151,29 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// Returns a fingerprint that identifies the request without its contents.
+    pub fn fingerprint(&self) -> Result<[u8; 32], StoreError> {
+        Ok(Sha256::digest(serde_json::to_vec(self)?).into())
+    }
+
+    /// Returns the agent the request applies to.
+    pub const fn agent(&self) -> Option<u128> {
+        match self {
+            Self::CreateAgent(agent, _) => Some(agent.id),
+            Self::SendMessage(id, _)
+            | Self::InterruptAgent(id, ..)
+            | Self::InterruptToolCalls(id, _)
+            | Self::ResumeAgent(id)
+            | Self::ResumeSubtree(id)
+            | Self::SetTitle { id, .. }
+            | Self::SetPinned { id, .. }
+            | Self::SetInbox { id, .. } => Some(*id),
+            Self::PutRole { .. } | Self::DeleteRole { .. } => None,
+        }
+    }
+}
+
 impl<T: ReadableTable<&'static [u8], &'static [u8]>> Records<T> {
     pub fn get<V: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<V>, StoreError> {
         self.0
@@ -185,6 +213,40 @@ impl<T: ReadableTable<&'static [u8], &'static [u8]>> Records<T> {
 }
 
 impl Records<Table<'_, &'static [u8], &'static [u8]>> {
+    /// Stores a client request receipt and indexes it by the agent it applies to.
+    pub fn put_request(
+        &mut self,
+        idempotency_key: &str,
+        request: &Request,
+    ) -> Result<(), StoreError> {
+        self.put(&key(REQUEST, 0, idempotency_key.as_bytes()), request)?;
+        if let Some(agent) = request.agent() {
+            self.put(&key(AGENT_REQUEST, agent, idempotency_key.as_bytes()), &())?;
+        }
+        Ok(())
+    }
+
+    /// Indexes client request receipts stored before format 6 by their agents.
+    pub fn index_requests(&mut self) -> Result<(), StoreError> {
+        let prefix = key(REQUEST, 0, &[]);
+        let mut receipts = Vec::new();
+        for entry in self
+            .0
+            .range(prefix.as_slice()..prefix_end(&prefix).as_slice())?
+        {
+            let (key, value) = entry?;
+            if let Some(agent) = serde_json::from_slice::<Request>(value.value())?.agent() {
+                let idempotency_key = key.value().strip_prefix(prefix.as_slice());
+                let idempotency_key = idempotency_key.expect("key has the prefix").to_vec();
+                receipts.push((agent, idempotency_key));
+            }
+        }
+        for (agent, idempotency_key) in receipts {
+            self.put(&key(AGENT_REQUEST, agent, &idempotency_key), &())?;
+        }
+        Ok(())
+    }
+
     pub fn push_message(
         &mut self,
         agent: &mut AgentRecord,

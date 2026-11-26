@@ -1,21 +1,22 @@
 use crate::{
     Store, StoreError, Topic,
     records::{self, Records},
-    release_records::{self, ENDED, RELEASE, SETTLED},
+    release_records::{self, DELETED, ENDED, RELEASE, Release, SETTLED},
 };
-use fleet_core::AgentId;
+use fleet_core::{AgentId, Configured, RoleName};
 use redb::ReadableDatabase as _;
 
 /// A pending release of an agent's workspace.
 ///
-/// A release is scheduled when an agent's scope closes or a root agent settles. Restoring,
-/// snoozing or messaging a settled agent cancels its release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A release is scheduled when an agent's scope closes, a root agent settles or an agent is
+/// deleted. Restoring, snoozing or messaging a settled agent cancels its release.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRelease {
     agent: AgentId,
     kind: u8,
     since: u64,
     generation: u128,
+    role: Option<Configured<RoleName>>,
 }
 
 /// Whether a pending release can start.
@@ -36,6 +37,12 @@ impl WorkspaceRelease {
         self.agent
     }
 
+    /// Returns the role a deleted agent had, or `None` if the agent was not deleted.
+    #[must_use]
+    pub const fn deleted_role(&self) -> Option<&Configured<RoleName>> {
+        self.role.as_ref()
+    }
+
     fn key(&self) -> Vec<u8> {
         release_records::key(self.kind, self.since, self.agent.into())
     }
@@ -45,16 +52,16 @@ impl WorkspaceRelease {
         records: &Records<T>,
     ) -> Result<bool, StoreError> {
         Ok(records
-            .get::<(u64, u128, u128)>(&self.key())?
-            .is_some_and(|(_, _, generation)| generation == self.generation))
+            .get::<Release>(&self.key())?
+            .is_some_and(|Release(_, _, generation, _)| generation == self.generation))
     }
 }
 
 impl Store {
     /// Lists the workspace releases due at `now` and the next time a release becomes due.
     ///
-    /// Releases of agents whose scope closed are due immediately. Settled root agents are due
-    /// once settled for `settled_for` milliseconds, or never without it.
+    /// Releases of agents whose scope closed or that were deleted are due immediately. Settled root
+    /// agents are due once settled for `settled_for` milliseconds, or never without it.
     ///
     /// # Errors
     /// Returns an error if the store cannot be read.
@@ -67,18 +74,19 @@ impl Store {
             .call(move |worker| {
                 let transaction = worker.database.begin_read()?;
                 let records = Records(transaction.open_table(records::RECORDS)?);
-                let mut due = records
-                    .prefix::<(u64, u128, u128)>(&[RELEASE, ENDED])?
-                    .map(|entry| {
-                        let (since, agent, generation) = entry?;
-                        Ok(WorkspaceRelease {
+                let mut due = Vec::new();
+                for kind in [ENDED, DELETED] {
+                    for entry in records.prefix::<Release>(&[RELEASE, kind])? {
+                        let Release(since, agent, generation, role) = entry?;
+                        due.push(WorkspaceRelease {
                             agent: agent.into(),
-                            kind: ENDED,
+                            kind,
                             since,
                             generation,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, StoreError>>()?;
+                            role: role.map(Into::into),
+                        });
+                    }
+                }
                 let mut next = None;
                 if let Some(settled_for) = settled_for {
                     for entry in records.prefix::<(u64, u128, u128)>(&[RELEASE, SETTLED])? {
@@ -93,6 +101,7 @@ impl Store {
                             kind: SETTLED,
                             since,
                             generation,
+                            role: None,
                         });
                     }
                 }
@@ -103,15 +112,16 @@ impl Store {
 
     /// Reads whether a pending release can start.
     ///
-    /// The host must keep the agent's environment from being used from before this check until
-    /// the release ends.
+    /// A deleted agent is idle. The host must keep the agent's environment from being used from
+    /// before this check until the release ends.
     ///
     /// # Errors
     /// Returns an error if the store cannot be read.
     pub async fn workspace_release_state(
         &self,
-        release: WorkspaceRelease,
+        release: &WorkspaceRelease,
     ) -> Result<WorkspaceReleaseState, StoreError> {
+        let release = release.clone();
         self.worker()
             .call(move |worker| {
                 let transaction = worker.database.begin_read()?;
@@ -119,11 +129,13 @@ impl Store {
                 if !release.pending(&records)? {
                     return Ok(WorkspaceReleaseState::Cancelled);
                 }
-                Ok(if records.agent(release.agent.into())?.idle() {
-                    WorkspaceReleaseState::Ready
-                } else {
-                    WorkspaceReleaseState::Busy
-                })
+                Ok(
+                    if release.role.is_some() || records.agent(release.agent.into())?.idle() {
+                        WorkspaceReleaseState::Ready
+                    } else {
+                        WorkspaceReleaseState::Busy
+                    },
+                )
             })
             .await
     }
@@ -134,8 +146,9 @@ impl Store {
     /// Returns an error if the store cannot commit the removal.
     pub async fn complete_workspace_release(
         &self,
-        release: WorkspaceRelease,
+        release: &WorkspaceRelease,
     ) -> Result<(), StoreError> {
+        let release = release.clone();
         self.worker()
             .call(move |worker| {
                 let transaction = worker.database.begin_write()?;
@@ -212,10 +225,10 @@ mod tests {
             set_inbox(&store, crate::agents::SETTLED, 1).await;
 
             assert_eq!(
-                store.workspace_release_state(first[0]).await.unwrap(),
+                store.workspace_release_state(&first[0]).await.unwrap(),
                 WorkspaceReleaseState::Cancelled
             );
-            store.complete_workspace_release(first[0]).await.unwrap();
+            store.complete_workspace_release(&first[0]).await.unwrap();
             let (second, _) = store.workspace_releases(1, Some(0)).await.unwrap();
             assert_eq!(second.len(), 1);
             assert_ne!(second, first);
@@ -252,7 +265,7 @@ mod tests {
                 due.iter().map(WorkspaceRelease::agent).collect::<Vec<_>>(),
                 [AgentId::from(1)]
             );
-            store.complete_workspace_release(due[0]).await.unwrap();
+            store.complete_workspace_release(&due[0]).await.unwrap();
             drop(store);
 
             let store = Store::open(&path).unwrap();

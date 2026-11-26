@@ -464,3 +464,35 @@ fn stalled_agents_stay_stalled_and_asleep_after_reopening() {
 
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn deleting_a_stalled_tree_interrupts_it_and_rejects_runtime_writes() {
+    futures_executor::block_on(async {
+        let store = Store::memory().unwrap();
+        let ids = chain(&store).await;
+        let mut wakes = pin!(store.wakes());
+        while wakes.next().await.unwrap().unwrap() != Wake::Idle {}
+
+        let error = store.delete_agent(ids[1]).await.unwrap_err();
+        assert_matches!(error, StoreError::AgentDenied);
+        store.delete_agent(ids[0]).await.unwrap();
+
+        let woken = wakes.take(3).map(Result::unwrap).collect::<Vec<_>>().await;
+        let mut sorted = ids;
+        sorted.sort();
+        assert_eq!(woken, sorted.map(Wake::Interrupt));
+        for id in ids {
+            assert_eq!(store.agent_state(id).await.unwrap(), None);
+        }
+        let result = ToolResult {
+            call_id: "drive".into(),
+            output: ToolOutput {
+                content: vec![],
+                structured_content: None,
+                is_error: false,
+            },
+        };
+        let error = store.append_tool_result(ids[0], &result).await.unwrap_err();
+        assert_matches!(error, StoreError::AgentNotFound);
+    });
+}
