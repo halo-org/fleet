@@ -260,6 +260,64 @@ fn scripted_agents_use_tools_in_an_in_memory_workspace() {
 }
 
 #[test]
+fn scripted_agents_delete_roles() {
+    run(async |fleet| {
+        for (name, tools) in [
+            (
+                "admin",
+                json!({ "delete_role": { "name": "roles:delete_role" } }),
+            ),
+            ("temporary", json!({})),
+        ] {
+            let role = json!({ "model": { "name": "sandbox:scripted" }, "tools": tools });
+            let path = format!("/roles/{name}");
+            let headers = [("if-none-match", "*")];
+            let (status, _) = call_with(fleet, "PUT", &path, &headers, Some(&role)).await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+        let (_, temporary) = call(fleet, "GET", "/roles/temporary", None).await;
+        let version = temporary["version"].as_str().unwrap();
+        let stale = (version.parse::<u128>().unwrap() - 1).to_string();
+        let delete = |version: &str| {
+            json!({
+                "tool_calls": [{
+                    "tool": "delete_role",
+                    "input": { "name": "temporary", "version": version },
+                }],
+            })
+        };
+        let script = json!({
+            "steps": [delete(&stale), delete(version), delete(version), { "text": "Done." }],
+        });
+
+        start(fleet, "admin", &script).await;
+
+        let results: Vec<_> = events(fleet, "1")
+            .await
+            .into_iter()
+            .filter(|event| event["type"] == "tool_result")
+            .map(|event| {
+                let output = &event["output"];
+                json!({ "text": output["content"][0]["text"], "is_error": output["is_error"] })
+            })
+            .collect();
+        assert_eq!(
+            Value::from(results),
+            json!([
+                {
+                    "text": "Role temporary changed since it was read. Read it again before deleting it.",
+                    "is_error": true,
+                },
+                { "text": "Role temporary was deleted.", "is_error": false },
+                { "text": "Role temporary does not exist.", "is_error": true },
+            ]),
+        );
+        let (status, _) = call(fleet, "GET", "/roles/temporary", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    });
+}
+
+#[test]
 fn delegated_agents_share_the_parent_workspace() {
     run(async |fleet| {
         let helper = json!({

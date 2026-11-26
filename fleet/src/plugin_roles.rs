@@ -63,6 +63,22 @@ impl RoleStore for PluginRoles {
             .await
             .map_err(PluginRolesError::Fleet)
     }
+
+    async fn delete_role(
+        &self,
+        idempotency_key: &str,
+        name: &RoleName,
+        expected: RoleVersion,
+    ) -> Result<(), PluginRolesError> {
+        self.fleet
+            .delete_role(
+                format!("{}:{idempotency_key}", self.scope),
+                name.clone(),
+                expected,
+            )
+            .await
+            .map_err(PluginRolesError::Fleet)
+    }
 }
 
 impl fmt::Display for PluginRolesError {

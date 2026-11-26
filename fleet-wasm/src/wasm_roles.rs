@@ -34,6 +34,12 @@ trait RolesObject: Send + Sync {
         role: roles::Role,
         expected: Option<roles::RoleVersion>,
     ) -> BoxFuture<'_, Result<(), roles::RolesError>>;
+    fn delete(
+        &self,
+        idempotency_key: String,
+        name: String,
+        expected: roles::RoleVersion,
+    ) -> BoxFuture<'_, Result<(), roles::RolesError>>;
 }
 
 impl WasmRoles {
@@ -105,6 +111,19 @@ impl<R: RoleStore + Send + Sync> RolesObject for R {
                 .map_err(|source| error(&source))
         })
     }
+
+    fn delete(
+        &self,
+        idempotency_key: String,
+        name: String,
+        expected: roles::RoleVersion,
+    ) -> BoxFuture<'_, Result<(), roles::RolesError>> {
+        Box::pin(async move {
+            RoleStore::delete_role(self, &idempotency_key, &name.into(), expected.into())
+                .await
+                .map_err(|source| error(&source))
+        })
+    }
 }
 
 impl roles::Host for WasmState {}
@@ -129,14 +148,22 @@ impl roles::HostWithStore<WasmState> for HasSelf<WasmState> {
         role: roles::Role,
         expected: Option<roles::RoleVersion>,
     ) -> Result<(), roles::RolesError> {
-        let host = host(store)?;
-        if !host.writable {
-            return Err(roles::RolesError {
-                kind: roles::RolesErrorKind::Other,
-                message: "role writes are not allowed".into(),
-            });
-        }
-        host.provider.put(idempotency_key, role, expected).await
+        writable(store)?
+            .provider
+            .put(idempotency_key, role, expected)
+            .await
+    }
+
+    async fn delete(
+        store: &Accessor<WasmState, Self>,
+        idempotency_key: String,
+        name: String,
+        expected: roles::RoleVersion,
+    ) -> Result<(), roles::RolesError> {
+        writable(store)?
+            .provider
+            .delete(idempotency_key, name, expected)
+            .await
     }
 }
 
@@ -149,6 +176,19 @@ fn host(
             kind: roles::RolesErrorKind::Other,
             message: "roles are not available".into(),
         })
+}
+
+fn writable(
+    store: &Accessor<WasmState, HasSelf<WasmState>>,
+) -> Result<WasmAgentRoles, roles::RolesError> {
+    let host = host(store)?;
+    if !host.writable {
+        return Err(roles::RolesError {
+            kind: roles::RolesErrorKind::Other,
+            message: "role writes are not allowed".into(),
+        });
+    }
+    Ok(host)
 }
 
 impl From<StoredRole> for roles::StoredRole {
@@ -426,6 +466,62 @@ mod tests {
     }
 
     #[test]
+    fn host_deletes_roles_once() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let roles = Arc::new(fleet_store::Store::memory().unwrap());
+                roles.put_role("seed", &role(), None).await.unwrap();
+                let version = roles
+                    .role(&"reviewer".into())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .version;
+                let mut state = WasmState::new(WasmEnvironment::default(), None);
+                state.set_roles(Some(
+                    WasmRoles::new(move |_| roles.clone()).for_agent(1.into()),
+                ));
+                let mut config = Config::new();
+                config.wasm_component_model_async(true);
+                let mut store = Store::new(&Engine::new(&config).unwrap(), state);
+
+                store
+                    .run_concurrent(async |accessor| {
+                        let delete = async |key: &str, version: RoleVersion| {
+                            <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::delete(
+                                accessor,
+                                key.into(),
+                                "reviewer".into(),
+                                version.into(),
+                            )
+                            .await
+                        };
+                        let error = delete("stale", (u128::from(version) + 1).into())
+                            .await
+                            .unwrap_err();
+                        assert_matches!(error.kind, roles::RolesErrorKind::PreconditionFailed);
+
+                        delete("delete", version).await.unwrap();
+                        delete("delete", version).await.unwrap();
+                        let error = delete("again", version).await.unwrap_err();
+                        assert_matches!(error.kind, roles::RolesErrorKind::PreconditionFailed);
+                        let stored = <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::get(
+                            accessor,
+                            "reviewer".into(),
+                        )
+                        .await
+                        .unwrap();
+                        assert!(stored.is_none());
+                    })
+                    .await
+                    .unwrap();
+            });
+    }
+
+    #[test]
     fn read_only_access_rejects_writes() {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -460,6 +556,16 @@ mod tests {
                         )
                         .await
                         .unwrap_err();
+                        assert_eq!(error.message, "role writes are not allowed");
+                        let error =
+                            <HasSelf<WasmState> as roles::HostWithStore<WasmState>>::delete(
+                                accessor,
+                                "delete".into(),
+                                "reviewer".into(),
+                                stored.version,
+                            )
+                            .await
+                            .unwrap_err();
                         assert_eq!(error.message, "role writes are not allowed");
                     })
                     .await

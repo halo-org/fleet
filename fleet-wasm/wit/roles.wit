@@ -1,4 +1,4 @@
-/// Reads and writes stored roles.
+/// Reads, writes and deletes stored roles.
 ///
 /// Agents look up their role on each turn, so edits apply to agents already using it.
 /// The host scopes idempotency keys to the calling agent.
@@ -110,6 +110,14 @@ interface roles {
     /// repeating the write, even if the role has since changed. Failed writes do not use up
     /// their key.
     put: async func(idempotency-key: string, role: role, expected: option<role-version>)
+        -> result<_, roles-error>;
+
+    /// Deletes a role if its version matches.
+    ///
+    /// A missing role fails with precondition-failed. Retries with the same key and arguments
+    /// succeed without repeating the delete, even if the role has since been recreated. Failed
+    /// deletes do not use up their key.
+    delete: async func(idempotency-key: string, name: string, expected: role-version)
         -> result<_, roles-error>;
 }
 

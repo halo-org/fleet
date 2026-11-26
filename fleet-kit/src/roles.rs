@@ -71,6 +71,24 @@ pub trait RoleStore {
         role: &Role,
         expected: Option<RoleVersion>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Deletes a role if its version matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors with the following error kinds:
+    ///
+    /// - [`PreconditionFailed`](RoleStoreErrorKind::PreconditionFailed) when the role is missing
+    ///   or its version does not match `expected`.
+    /// - [`IdempotencyConflict`](RoleStoreErrorKind::IdempotencyConflict) when the key was used
+    ///   with different arguments.
+    /// - [`Other`](RoleStoreErrorKind::Other) when there are any other provider specific errors.
+    fn delete_role(
+        &self,
+        idempotency_key: &str,
+        name: &RoleName,
+        expected: RoleVersion,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// The kind of error returned by a role store.
@@ -110,6 +128,15 @@ macro_rules! impl_role_store_for_pointer {
                 expected: Option<RoleVersion>,
             ) -> impl Future<Output = Result<(), Self::Error>> + Send {
                 (**self).put_role(idempotency_key, role, expected)
+            }
+
+            fn delete_role(
+                &self,
+                idempotency_key: &str,
+                name: &RoleName,
+                expected: RoleVersion,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+                (**self).delete_role(idempotency_key, name, expected)
             }
         }
     };
