@@ -1,4 +1,4 @@
-//! WebAssembly tools for reading and writing roles.
+//! WebAssembly tools for reading, writing and deleting roles.
 
 mod bindings;
 mod config;
@@ -59,6 +59,13 @@ struct EditInput {
     merge: Map<String, Value>,
     #[serde(default)]
     system_prompt_edits: Vec<TextEdit>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteInput {
+    name: String,
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -130,6 +137,28 @@ impl Guest for Roles {
                  with the role use the change from their next turn.",
                 &crate::edit::schema(),
             )),
+            "delete_role" => Some(metadata(
+                "delete_role",
+                "Delete role",
+                "Deletes a role. Pass the version from read_role, so a role changed since it was \
+                 read is not deleted. Agents with the role stall from their next turn until a role \
+                 with the same name is created and they are resumed.",
+                &json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The role name.",
+                        },
+                        "version": {
+                            "type": "string",
+                            "description": "The version from read_role of the role being deleted.",
+                        },
+                    },
+                    "required": ["name", "version"],
+                    "additionalProperties": false,
+                }),
+            )),
             _ => None,
         })
     }
@@ -144,6 +173,7 @@ impl Guest for Roles {
             "read_role" => read(&input).await,
             "write_role" => write(&context, &input).await,
             "edit_role" => edit(&context, is_retry, &input).await,
+            "delete_role" => delete(&context, &input).await,
             _ => return Ok(error_output("The tool is not available.")),
         };
         match result {
@@ -163,6 +193,9 @@ impl Guest for Roles {
                 "The tool call was interrupted. The role may already have been written."
             }
             "edit_role" => "The tool call was interrupted. The role may already have been edited.",
+            "delete_role" => {
+                "The tool call was interrupted. The role may already have been deleted."
+            }
             _ => "The tool call was interrupted.",
         }))
     }
@@ -267,6 +300,35 @@ async fn edit(context: &ToolContext, is_retry: bool, input: &str) -> Result<Tool
             }
             RolesErrorKind::Other => Err(service_error("failed to write role", &error)),
         },
+    }
+}
+
+async fn delete(context: &ToolContext, input: &str) -> Result<ToolOutput, Error> {
+    let config = Config::load().map_err(Error::Tools)?;
+    let input: DeleteInput = serde_json::from_str(input)?;
+    let name = input.name;
+    if !config.writable(&name) {
+        return Err(Error::Input(format!(
+            "Deleting role {name} is not allowed."
+        )));
+    }
+    let expected = parse_version(&input.version)?;
+    match roles::delete(context.call_id.clone(), name.clone(), expected).await {
+        Ok(()) => Ok(success_output(format!("Role {name} was deleted."))),
+        Err(error) => Err(match error.kind {
+            RolesErrorKind::PreconditionFailed => match roles::get(name.clone()).await {
+                Ok(None) => Error::Input(format!("Role {name} does not exist.")),
+                Ok(Some(_)) => Error::Input(format!(
+                    "Role {name} changed since it was read. Read it again before deleting it."
+                )),
+                Err(_) => Error::Input(format!(
+                    "Role {name} changed or was deleted since it was read. Read it again."
+                )),
+            },
+            RolesErrorKind::IdempotencyConflict
+            | RolesErrorKind::InvalidRole
+            | RolesErrorKind::Other => service_error("failed to delete role", &error),
+        }),
     }
 }
 

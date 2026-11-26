@@ -1,6 +1,6 @@
 package fleet:plugin-roles@0.0.0;
 
-/// Tools for reading and writing roles.
+/// Tools for reading, writing and deleting roles.
 world plugin {
     import fleet:providers/configuration@0.0.0;
     import fleet:providers/roles@0.0.0;

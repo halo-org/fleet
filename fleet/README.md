@@ -270,11 +270,11 @@ They do not add validation to core.
 ### Plugin access
 
 Approve `"roles": true` in a plugin's `capabilities` and have its component import
-`fleet:providers/roles@0.0.0`. Tool calls can then list, read and write every stored role.
-Use `"roles": "read"` to allow discovery without writes.
+`fleet:providers/roles@0.0.0`. Tool calls can then list, read, write and delete every stored
+role. Use `"roles": "read"` to allow discovery without writes or deletes.
 Model calls and metadata lookups receive no role access. Fleet accepts only valid names and
 roles that the API can represent as definitions. Idempotency keys are scoped to the provider
-and agent. The capability grants no deletion and applies no further policy. Plugins such as
+and agent. The capability applies no further policy. Plugins such as
 [`fleet-plugin-roles`](../fleet-plugin-roles) read their limits from provider config, which
 only administrators control.
 
