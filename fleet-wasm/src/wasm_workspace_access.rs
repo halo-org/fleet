@@ -1,10 +1,13 @@
 use crate::{
     WasmState,
-    bindings::{types, workspace_access, workspace_host::fleet::providers::workspaces},
+    bindings::{types, workspace_access, workspace_access_host::fleet::providers::workspaces},
 };
 use core::fmt;
-use fleet_core::AgentId;
-use fleet_kit::{WorkspaceAccess, WorkspaceBinding};
+use fleet_core::{AgentId, Configured};
+use fleet_kit::{
+    CapturedOutput, WorkspaceAccess, WorkspaceBinding, WorkspaceContext, WorkspaceExit,
+    WorkspaceOutput, WorkspacesErrorKind,
+};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use wasmtime::component::{Accessor, HasSelf};
@@ -73,7 +76,7 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
         Box::pin(async move {
             let binding = WorkspaceAccess::open(self)
                 .await
-                .map_err(|source| crate::wasm_workspace_host::error(&source))?;
+                .map_err(|source| error(&source))?;
             let id = u128::from(binding.context.id);
             Ok(workspace_access::WorkspaceBinding {
                 context: workspaces::WorkspaceContext {
@@ -101,7 +104,7 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
         Box::pin(async move {
             WorkspaceAccess::read(self, &convert_binding(binding)?, &path, limit)
                 .await
-                .map_err(|source| crate::wasm_workspace_host::error(&source))
+                .map_err(|source| error(&source))
         })
     }
 
@@ -119,7 +122,7 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
             };
             WorkspaceAccess::write(self, &convert_binding(binding)?, &file)
                 .await
-                .map_err(|source| crate::wasm_workspace_host::error(&source))
+                .map_err(|source| error(&source))
         })
     }
 
@@ -143,8 +146,8 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
             let output =
                 WorkspaceAccess::exec(self, &convert_binding(binding)?, is_retry, &command)
                     .await
-                    .map_err(|source| crate::wasm_workspace_host::error(&source))?;
-            Ok(crate::wasm_workspace_host::convert_output(output))
+                    .map_err(|source| error(&source))?;
+            Ok(convert_output(output))
         })
     }
 }
@@ -198,7 +201,69 @@ fn convert_binding(
     binding: workspace_access::WorkspaceBinding,
 ) -> Result<WorkspaceBinding, workspaces::WorkspacesError> {
     Ok(WorkspaceBinding {
-        context: crate::wasm_workspace_host::convert_context(binding.context)?,
+        context: convert_context(binding.context)?,
         directory: binding.directory,
     })
+}
+
+fn convert_context(
+    context: workspaces::WorkspaceContext,
+) -> Result<WorkspaceContext, workspaces::WorkspacesError> {
+    Ok(WorkspaceContext {
+        workspace: Configured {
+            name: context.workspace.name.into(),
+            config: serde_json::from_str(&context.workspace.config)
+                .map_err(|source| json_error(&source))?,
+        },
+        agent_id: context.agent_id.into(),
+        id: ((u128::from(context.id.high) << 64) | u128::from(context.id.low)).into(),
+    })
+}
+
+fn convert_output(output: WorkspaceOutput) -> workspaces::WorkspaceOutput {
+    let captured = |output: CapturedOutput| workspaces::CapturedOutput {
+        head: output.head,
+        omitted: output.omitted,
+        tail: output.tail,
+    };
+    workspaces::WorkspaceOutput {
+        exit: match output.exit {
+            WorkspaceExit::Code(code) => workspaces::WorkspaceExit::Code(code),
+            WorkspaceExit::Terminated => workspaces::WorkspaceExit::Terminated,
+            WorkspaceExit::TimedOut => workspaces::WorkspaceExit::TimedOut,
+        },
+        stdout: captured(output.stdout),
+        stderr: captured(output.stderr),
+    }
+}
+
+fn json_error(error: &serde_json::Error) -> workspaces::WorkspacesError {
+    workspaces::WorkspacesError {
+        kind: workspaces::WorkspacesErrorKind::InvalidConfiguration,
+        message: error.to_string(),
+    }
+}
+
+fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> workspaces::WorkspacesError {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    workspaces::WorkspacesError {
+        kind: match error.kind() {
+            WorkspacesErrorKind::NotFound => workspaces::WorkspacesErrorKind::NotFound,
+            WorkspacesErrorKind::InvalidConfiguration => {
+                workspaces::WorkspacesErrorKind::InvalidConfiguration
+            }
+            WorkspacesErrorKind::FileNotFound => workspaces::WorkspacesErrorKind::FileNotFound,
+            WorkspacesErrorKind::FileTooLarge => workspaces::WorkspacesErrorKind::FileTooLarge,
+            WorkspacesErrorKind::FileChanged => workspaces::WorkspacesErrorKind::FileChanged,
+            WorkspacesErrorKind::UnsafeToRetry => workspaces::WorkspacesErrorKind::UnsafeToRetry,
+            WorkspacesErrorKind::Other => workspaces::WorkspacesErrorKind::Other,
+        },
+        message,
+    }
 }

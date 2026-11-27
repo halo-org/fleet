@@ -1,6 +1,5 @@
 use crate::{
     WasmCapabilities, WasmError, WasmProvider, WasmState,
-    bindings::workspace_host::fleet::providers::workspaces,
     bindings::{agents, blobs, configuration, credentials, process, roles, tool_calls, workers},
 };
 use fleet_core::JsonObject;
@@ -168,10 +167,6 @@ impl Wasm {
         }
         if capabilities.blobs.is_some() {
             blobs::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.workspaces.is_some() {
-            workspaces::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
                 .map_err(WasmError::runtime)?;
         }
         if capabilities.workspace_access.is_some() {

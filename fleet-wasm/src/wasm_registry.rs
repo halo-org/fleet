@@ -111,7 +111,6 @@ impl WasmProvider {
             filesystem: capabilities.open_filesystem()?,
             origins: WasmOrigins::new(capabilities.http),
             credentials: capabilities.credentials,
-            workspace_host: capabilities.workspaces,
             agents: capabilities.agents,
             workspace_access: capabilities.workspace_access,
             tool_calls: capabilities.tool_calls,
