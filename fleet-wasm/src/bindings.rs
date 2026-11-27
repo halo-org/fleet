@@ -102,22 +102,11 @@ pub mod worker {
     });
 }
 
-pub mod workspace_host {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "workspace-host",
-        with: { "fleet:providers/types": super::types },
-    });
-}
-
 pub mod workspace_access_host {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "workspace-access-host",
-        with: {
-            "fleet:providers/types": super::types,
-            "fleet:providers/workspaces": super::workspace_host::fleet::providers::workspaces,
-        },
+        with: { "fleet:providers/types": super::types },
     });
 }
 
@@ -131,7 +120,7 @@ pub mod workspace_resolvers {
         with: {
             "fleet:providers/configuration": super::configuration,
             "fleet:providers/types": super::types,
-            "fleet:providers/workspaces": super::workspace_host::fleet::providers::workspaces,
+            "fleet:providers/workspaces": super::workspace_access_host::fleet::providers::workspaces,
         },
     });
 }

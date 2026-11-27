@@ -4,7 +4,6 @@ use fleet_core::JsonObject;
 use fleet_wasm::{
     Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount,
     WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmToolCalls, WasmWorkspaceAccess,
-    WasmWorkspaceHost,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -246,7 +245,6 @@ fn capabilities_for(
     let workspace_access = (!capabilities.workspaces.is_empty()).then(|| {
         let store = fleet.blob_store().clone();
         let locks = fleet.workspace_locks().clone();
-        let workspaces = workspaces.clone();
         WasmWorkspaceAccess::new(move |agent| {
             fleet_workspaces::AgentWorkspaces::new(
                 agent,
@@ -277,8 +275,6 @@ fn capabilities_for(
         credentials: capabilities
             .credentials
             .then(|| WasmCredentials::new(authentication.scope(name))),
-        workspaces: (!capabilities.workspaces.is_empty())
-            .then(|| WasmWorkspaceHost::new(workspaces)),
         workspace_access,
         roles: match capabilities.roles {
             RoleCapability::Enabled(false) => None,

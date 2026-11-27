@@ -1,6 +1,6 @@
 use crate::{
     WasmAgents, WasmBlobs, WasmCredentials, WasmOrigins, WasmToolCalls, WasmWorkers,
-    WasmWorkspaceAccess, WasmWorkspaceHost,
+    WasmWorkspaceAccess,
     bindings::{configuration, credentials},
     wasm_roles::WasmAgentRoles,
 };
@@ -19,7 +19,6 @@ pub struct WasmEnvironment {
     pub filesystem: WasiFilesystemCtx,
     pub origins: WasmOrigins,
     pub credentials: Option<WasmCredentials>,
-    pub workspace_host: Option<WasmWorkspaceHost>,
     pub agents: Option<WasmAgents>,
     pub workspace_access: Option<WasmWorkspaceAccess>,
     pub tool_calls: Option<WasmToolCalls>,
@@ -33,7 +32,6 @@ pub struct WasmState {
     config: Arc<str>,
     credentials: Option<WasmCredentials>,
     roles: Option<WasmAgentRoles>,
-    workspace_host: Option<WasmWorkspaceHost>,
     workers: Option<WasmWorkers>,
     limits: StoreLimits,
     wasi: WasiCtx,
@@ -49,7 +47,6 @@ impl WasmState {
             filesystem,
             origins,
             credentials,
-            workspace_host,
             agents,
             workspace_access,
             tool_calls,
@@ -65,7 +62,6 @@ impl WasmState {
             config,
             credentials,
             roles: None,
-            workspace_host,
             workers,
             limits: StoreLimits::default(),
             wasi,
@@ -130,10 +126,6 @@ impl WasmState {
 
     pub fn set_workspace_access(&mut self, access: Option<WasmWorkspaceAccess>) {
         self.workspace_access = access;
-    }
-
-    pub fn workspace_host(&self) -> Option<WasmWorkspaceHost> {
-        self.workspace_host.clone()
     }
 
     pub const fn table(&mut self) -> &mut ResourceTable {

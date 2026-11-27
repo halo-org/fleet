@@ -1,6 +1,6 @@
 use crate::{
     WasmAgents, WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmRoles, WasmToolCalls,
-    WasmWorkspaceAccess, WasmWorkspaceHost,
+    WasmWorkspaceAccess,
 };
 use core::mem;
 use std::path::PathBuf;
@@ -23,8 +23,6 @@ pub struct WasmCapabilities {
     pub process: bool,
     /// Credentials available to this provider.
     pub credentials: Option<WasmCredentials>,
-    /// Workspaces available to this provider.
-    pub workspaces: Option<WasmWorkspaceHost>,
     /// Roles available to tool calls.
     pub roles: Option<WasmRoles>,
     /// Role-driven workspaces available to tool calls.

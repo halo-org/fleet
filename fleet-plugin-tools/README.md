@@ -56,9 +56,10 @@ configured, add:
 }
 ```
 
-The capability lists the provider namespaces this provider may access. Fleet loads
-those providers first and rejects missing or cyclic dependencies. These can be
-any workspace providers, including remote ones.
+The capability lists the workspace providers and resolvers that tool calls may use
+to open the acting agent's workspace through `fleet:providers/workspace-access`.
+Fleet loads those providers first and rejects missing or cyclic dependencies.
+These can be any workspace providers, including remote ones.
 
 Select the workspace in the role:
 
