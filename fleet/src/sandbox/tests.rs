@@ -704,24 +704,66 @@ fn plugins_reaching_outside_fleet_are_rejected() {
         .build()
         .unwrap()
         .block_on(async {
-            for (plugin, access) in [
-                (json!({ "url": "https://example.com/host.wasm" }), "a remote URL"),
-                (json!({ "path": "host.wasm", "capabilities": { "process": true } }), "process"),
+            let provider = |capabilities| {
+                json!({
+                    "plugins": { "host": { "path": "host.wasm" } },
+                    "providers": { "local": { "plugin": "host", "capabilities": capabilities } },
+                })
+            };
+            for (config, access) in [
                 (
-                    json!({ "path": "host.wasm", "capabilities": { "http": ["https://example.com"] } }),
-                    "HTTP",
+                    json!({ "plugins": { "host": { "url": "https://example.com/host.wasm" } } }),
+                    "plugin host uses a remote URL",
+                ),
+                (
+                    provider(json!({ "process": true })),
+                    "provider local uses process",
+                ),
+                (
+                    provider(json!({ "http": ["https://example.com"] })),
+                    "provider local uses HTTP",
+                ),
+                (
+                    provider(json!({
+                        "filesystem": [{ "host_path": ".", "guest_path": "/", "read_only": true }],
+                    })),
+                    "provider local uses filesystem",
                 ),
             ] {
-                let config = json!({ "plugins": { "host": plugin } });
                 let error = open(serde_json::from_value(config).unwrap(), &directory())
                     .await
                     .err()
                     .unwrap();
                 assert_eq!(
                     error.to_string(),
-                    format!("plugin host uses {access}, which the sandbox does not allow")
+                    format!("{access}, which the sandbox does not allow")
                 );
             }
+        });
+}
+
+#[test]
+fn providers_of_one_plugin_have_their_own_capabilities() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let path = plugins().join("fleet_plugin_roles.wasm");
+            let config = json!({
+                "plugins": { "roles": { "path": path.to_str().unwrap() } },
+                "providers": {
+                    "roles": { "plugin": "roles", "capabilities": { "roles": true } },
+                    "unapproved": { "plugin": "roles" },
+                },
+            });
+
+            let error = open(serde_json::from_value(config).unwrap(), &directory())
+                .await
+                .err()
+                .unwrap();
+
+            assert_eq!(error.to_string(), "could not load provider unapproved");
         });
 }
 

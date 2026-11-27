@@ -68,17 +68,17 @@ cargo build -p fleet-plugin-sandbox --release --target wasm32-unknown-unknown
 {
   "plugins": {
     "sandbox": {
-      "path": "./plugins/sandbox.wasm",
-      "capabilities": {
-        "credentials": true,
-        "workers": true
-      }
+      "path": "./plugins/sandbox.wasm"
     }
   },
   "providers": {
     "sandbox": {
       "plugin": "sandbox",
-      "config": { "oauth": "http://127.0.0.1:1337/sandbox/oauth" }
+      "config": { "oauth": "http://127.0.0.1:1337/sandbox/oauth" },
+      "capabilities": {
+        "credentials": true,
+        "workers": true
+      }
     }
   }
 }

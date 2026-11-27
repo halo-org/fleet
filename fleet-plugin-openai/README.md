@@ -17,12 +17,7 @@ config directory as `plugins/openai.wasm`, then add:
 {
   "plugins": {
     "openai": {
-      "path": "./plugins/openai.wasm",
-      "capabilities": {
-        "http": ["https://api.openai.com"],
-        "credentials": true,
-        "blobs": true
-      }
+      "path": "./plugins/openai.wasm"
     }
   },
   "providers": {
@@ -38,6 +33,11 @@ config directory as `plugins/openai.wasm`, then add:
             "compaction_threshold": 400000
           }
         ]
+      },
+      "capabilities": {
+        "http": ["https://api.openai.com"],
+        "credentials": true,
+        "blobs": true
       }
     }
   }

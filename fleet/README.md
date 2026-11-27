@@ -16,32 +16,37 @@ Set `FLEET_DIR` to an absolute path to keep everything in one place instead. Fle
   "listen": "127.0.0.1:1337",
   "plugins": {
     "models": {
-      "path": "./plugins/models.wasm",
-      "capabilities": {
-        "http": ["https://api.example.com"],
-        "credentials": true
-      }
+      "path": "./plugins/models.wasm"
     }
   },
   "providers": {
     "personal": {
       "plugin": "models",
-      "config": {}
+      "config": {},
+      "capabilities": {
+        "http": ["https://api.example.com"],
+        "credentials": true
+      }
     },
     "work": {
       "plugin": "models",
-      "config": {}
+      "config": {},
+      "capabilities": {
+        "http": ["https://api.example.com"],
+        "credentials": true
+      }
     }
   }
 }
 ```
 
 Plugin and provider names contain ASCII letters, digits, hyphens or underscores.
-Providers reference a plugin and pass it an arbitrary JSON configuration object.
+Providers reference a plugin, pass it an arbitrary JSON configuration object and
+approve the capabilities it may use.
 The provider name is its namespace and credential scope. A model named `example`
 from the `work` provider is addressed as `work:example`.
 
-Capabilities are approved per plugin and default to no access. HTTP lists the
+Capabilities are approved per provider and default to no access. HTTP lists the
 origins that outgoing requests may use, each a scheme, host and optional port.
 Requests to other origins are denied. Credentials enables access to that
 provider's saved credentials.
@@ -65,21 +70,21 @@ Restart Fleet after changing plugin or provider configuration.
 agent has been settled this many milliseconds, as described in
 [Workspaces](#workspaces).
 
-Approve `"workers": true` in a plugin's capabilities to let it retain private WASM
+Approve `"workers": true` in a provider's capabilities to let it retain private WASM
 workers between calls. The component must import `fleet:providers/workers@0.0.0`
 and export `fleet:providers/worker@0.0.0` alongside its normal provider interfaces.
 Workers belong to a configured provider, not to the compiled plugin or another
 namespace. Other plugins continue to use its normal interfaces.
 
-Workers receive approved static capabilities, but no blob access or ability to
-start nested workers. They have no automatic idle timeout; plugins may retire
-idle workers themselves. Fleet stops worker admission during shutdown and allows
-five seconds for cleanup before dropping their instances. Worker state does not
-survive a restart. See `fleet-wasm/wit/workers.wit` for the connection contract
+Workers receive their provider's static capabilities, but no blob access or
+ability to start nested workers. They have no automatic idle timeout; plugins may
+retire idle workers themselves. Fleet stops worker admission during shutdown and
+allows five seconds for cleanup before dropping their instances. Worker state does
+not survive a restart. See `fleet-wasm/wit/workers.wit` for the connection contract
 and resource limits. Ordinary calls run without fuel instrumentation; worker
 execution uses a separately compiled variant that yields for bounded shutdown.
 
-Plugins with process access can use `process.spawn-group` for SDKs or helpers
+Providers with process access can use `process.spawn-group` for SDKs or helpers
 that launch descendants. On Linux and macOS, resource drop and forced worker
 shutdown terminate processes remaining in that group. Waiting for the leader
 also terminates remaining group members before returning. Other platforms return
@@ -91,9 +96,9 @@ daemonize or leave the group. Existing `process.spawn` remains child-only.
 `fleet sandbox <directory>` runs Fleet without effects outside its process, for
 testing clients and changes. It reads `config.json` from the directory in the usual
 format and keeps every store in memory, so each start is fresh. Plugins must be
-local and may use only capabilities provided by Fleet: blobs, credentials, workers,
-roles, agents, tool calls and workspace providers. HTTP, filesystem and process
-access are rejected. Push notifications are unavailable.
+local, and providers may use only capabilities provided by Fleet: blobs,
+credentials, workers, roles, agents, tool calls and workspace providers. HTTP,
+filesystem and process access are rejected. Push notifications are unavailable.
 
 JSON files in the directory's `roles` subdirectory are stored as roles on startup,
 each named after its file. Without `FLEET_ADMIN_TOKEN`, Fleet generates an admin
@@ -136,8 +141,8 @@ platform cache directory and verified before compilation. Missing cached files
 are downloaded from the locked URL. Local components are read directly and are
 not locked.
 
-Changing the lockfile never grants additional capabilities. A component requiring
-an unapproved interface fails to load.
+Changing the lockfile never grants additional capabilities. A provider whose
+component requires an unapproved interface fails to load.
 
 The plugins in this repository are published for each commit on `main`, for example
 `oci://ghcr.io/halo-org/fleet-plugin-tools:<commit>` with the full commit hash.
@@ -269,7 +274,7 @@ They do not add validation to core.
 
 ### Plugin access
 
-Approve `"roles": true` in a plugin's `capabilities` and have its component import
+Approve `"roles": true` in a provider's `capabilities` and have its component import
 `fleet:providers/roles@0.0.0`. Tool calls can then list, read, write and delete every stored
 role. Use `"roles": "read"` to allow discovery without writes or deletes.
 Model calls and metadata lookups receive no role access. Fleet accepts only valid names and
@@ -331,7 +336,7 @@ updated WIT files before using this version.
 
 ## Subagents
 
-Approve `"agents": true` in a plugin's capabilities and import
+Approve `"agents": true` in a provider's capabilities and import
 `fleet:providers/agents@0.0.0`. Tool calls can create agents, queue messages, read
 permitted history and wait for the first turn end after a message is consumed.
 Metadata access covers relatives; history access covers the caller and its descendants.
@@ -358,7 +363,7 @@ loads current role instances and enforces its approved provider list.
 
 ## Tool calls
 
-Approve `"tool_calls": true` in a plugin's capabilities and import
+Approve `"tool_calls": true` in a provider's capabilities and import
 `fleet:providers/tool-calls@0.0.0`. A tool call can read the state of its agent's other
 unresolved tool calls, wait for that state to change and interrupt them. The driving call is
 excluded. Access closes once the driving call is absent, resolved or being interrupted.
@@ -524,7 +529,7 @@ protocol, not a tus-compatible endpoint.
 
 ### Plugin access
 
-Approve `"blobs": true` in a plugin's `capabilities` and have its component import
+Approve `"blobs": true` in a provider's `capabilities` and have its component import
 `fleet:providers/blobs@0.0.0`. The host supplies metadata, bounded reads, and immutable writes.
 Model generation and compaction get read-only access to the configured blob provider, including
 older blobs that are no longer in the current input. Compaction does not revoke access.

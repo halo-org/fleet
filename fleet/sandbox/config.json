@@ -2,7 +2,24 @@
   "listen": "127.0.0.1:1337",
   "plugins": {
     "agents": {
-      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_agents.wasm",
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_agents.wasm"
+    },
+    "roles": {
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_roles.wasm"
+    },
+    "sandbox": {
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_sandbox.wasm"
+    },
+    "tasks": {
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_tasks.wasm"
+    },
+    "tools": {
+      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_tools.wasm"
+    }
+  },
+  "providers": {
+    "agents": {
+      "plugin": "agents",
       "capabilities": {
         "agents": true,
         "blobs": true,
@@ -11,50 +28,33 @@
       }
     },
     "roles": {
-      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_roles.wasm",
+      "plugin": "roles",
       "capabilities": {
         "roles": true
       }
     },
     "sandbox": {
-      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_sandbox.wasm",
+      "plugin": "sandbox",
+      "config": {
+        "oauth": "http://127.0.0.1:1337/sandbox/oauth"
+      },
       "capabilities": {
         "credentials": true,
         "workers": true
       }
     },
     "tasks": {
-      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_tasks.wasm",
+      "plugin": "tasks",
       "capabilities": {
         "tool_calls": true
       }
     },
     "tools": {
-      "path": "../../target/wasm32-unknown-unknown/release/fleet_plugin_tools.wasm",
+      "plugin": "tools",
       "capabilities": {
         "blobs": true,
         "workspaces": ["sandbox", "agents"]
       }
-    }
-  },
-  "providers": {
-    "agents": {
-      "plugin": "agents"
-    },
-    "roles": {
-      "plugin": "roles"
-    },
-    "sandbox": {
-      "plugin": "sandbox",
-      "config": {
-        "oauth": "http://127.0.0.1:1337/sandbox/oauth"
-      }
-    },
-    "tasks": {
-      "plugin": "tasks"
-    },
-    "tools": {
-      "plugin": "tools"
     }
   }
 }
