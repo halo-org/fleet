@@ -39,14 +39,16 @@ config directory as `plugins/tasks.wasm` and add:
 {
   "plugins": {
     "tasks": {
-      "path": "./plugins/tasks.wasm",
+      "path": "./plugins/tasks.wasm"
+    }
+  },
+  "providers": {
+    "tasks": {
+      "plugin": "tasks",
       "capabilities": {
         "tool_calls": true
       }
     }
-  },
-  "providers": {
-    "tasks": { "plugin": "tasks" }
   }
 }
 ```

@@ -10,9 +10,9 @@ use url::Url;
 
 /// Opens a sandbox from its config and directory.
 ///
-/// Stores are kept in memory. Plugins may use only capabilities within Fleet, and
-/// sign-in reaches only the sandbox's OAuth provider. Roles are seeded from the
-/// directory's `roles` subdirectory.
+/// Stores are kept in memory. Plugins must be local, providers may use only
+/// capabilities within Fleet, and sign-in reaches only the sandbox's OAuth
+/// provider. Roles are seeded from the directory's `roles` subdirectory.
 pub async fn open(
     config: Config,
     directory: &Path,
@@ -29,6 +29,13 @@ async fn open_store(
         if let Some(access) = plugin.outside_access() {
             return Err(
                 format!("plugin {name} uses {access}, which the sandbox does not allow").into(),
+            );
+        }
+    }
+    for (name, provider) in &config.providers {
+        if let Some(access) = provider.outside_access() {
+            return Err(
+                format!("provider {name} uses {access}, which the sandbox does not allow").into(),
             );
         }
     }

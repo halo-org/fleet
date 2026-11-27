@@ -18,29 +18,27 @@ use std::{
 
 // === Configuration ===
 
-/// A plugin source and its approved capabilities.
+/// A plugin source.
 #[derive(Debug, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
+#[serde(
+    untagged,
+    deny_unknown_fields,
+    expecting = "a plugin takes either a path or a url"
+)]
 pub enum PluginConfig {
     /// A local component.
     Local {
         /// The component path.
         path: PathBuf,
-        /// The approved capabilities.
-        #[serde(default)]
-        capabilities: PluginCapabilities,
     },
     /// A remote component pinned in the lockfile.
     Remote {
         /// The component URL, or an OCI reference prefixed with `oci://`.
         url: String,
-        /// The approved capabilities.
-        #[serde(default)]
-        capabilities: PluginCapabilities,
     },
 }
 
-/// A configured plugin provider.
+/// A configured plugin provider and its approved capabilities.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -49,16 +47,19 @@ pub struct ProviderConfig {
     /// The configuration passed to the plugin.
     #[serde(default)]
     pub config: JsonObject,
+    /// The approved capabilities.
+    #[serde(default)]
+    pub capabilities: ProviderCapabilities,
 }
 
-/// Access approved for a plugin.
+/// Access approved for a provider.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "capabilities are independently approved permissions"
 )]
-pub struct PluginCapabilities {
+pub struct ProviderCapabilities {
     #[serde(default)]
     blobs: bool,
     #[serde(default)]
@@ -144,7 +145,7 @@ pub async fn load(
 
     for (name, plugin) in &config.plugins {
         let bytes = match plugin {
-            PluginConfig::Local { path, .. } => {
+            PluginConfig::Local { path } => {
                 let path = directory.join(path);
                 fs::read(&path).map_err(|error| {
                     io::Error::new(
@@ -156,7 +157,7 @@ pub async fn load(
                     )
                 })?
             }
-            PluginConfig::Remote { url, .. } => {
+            PluginConfig::Remote { url } => {
                 let cache = cache.ok_or("remote plugins need a cache directory")?;
                 let locked = lockfile.plugin(name, url)?;
                 let path = cache.join(format!("{}.wasm", locked.sha256));
@@ -185,14 +186,10 @@ pub async fn load(
     let mut loaded = BTreeMap::<&str, WasmProvider>::new();
     for name in order {
         let provider = config.providers.get(name).expect("provider exists");
-        let plugin = config
-            .plugins
+        let component = components
             .get(&provider.plugin)
             .ok_or_else(|| io::Error::other(format!("unknown plugin: {}", provider.plugin)))?;
-        let component = components.get(&provider.plugin).ok_or_else(|| {
-            io::Error::other(format!("plugin was not loaded: {}", provider.plugin))
-        })?;
-        let capabilities = plugin.capabilities();
+        let capabilities = &provider.capabilities;
         let mut workspaces = WasmRegistry::new();
         for dependency in &capabilities.workspaces {
             let provider = loaded
@@ -210,7 +207,7 @@ pub async fn load(
             authentication,
         )
         .map_err(|source| LoadError {
-            target: format!("plugin {}", provider.plugin),
+            target: format!("provider {name}"),
             source,
         })?;
         let provider = wasm
@@ -233,7 +230,7 @@ pub async fn load(
 }
 
 fn capabilities_for(
-    capabilities: &PluginCapabilities,
+    capabilities: &ProviderCapabilities,
     workspaces: WasmRegistry,
     task_handles: &Arc<TaskHandles<WasmRegistry>>,
     fleet: &Fleet,
@@ -298,27 +295,26 @@ fn capabilities_for(
 }
 
 impl PluginConfig {
-    /// Returns access beyond Fleet that the plugin requires, if any.
+    /// Returns access beyond Fleet that the plugin source requires, if any.
     pub const fn outside_access(&self) -> Option<&'static str> {
         match self {
             Self::Remote { .. } => Some("a remote URL"),
-            Self::Local { capabilities, .. } => {
-                if !capabilities.http.is_empty() {
-                    Some("HTTP")
-                } else if !capabilities.filesystem.is_empty() {
-                    Some("filesystem")
-                } else if capabilities.process {
-                    Some("process")
-                } else {
-                    None
-                }
-            }
+            Self::Local { .. } => None,
         }
     }
+}
 
-    const fn capabilities(&self) -> &PluginCapabilities {
-        match self {
-            Self::Local { capabilities, .. } | Self::Remote { capabilities, .. } => capabilities,
+impl ProviderConfig {
+    /// Returns access beyond Fleet that the provider is approved for, if any.
+    pub const fn outside_access(&self) -> Option<&'static str> {
+        if !self.capabilities.http.is_empty() {
+            Some("HTTP")
+        } else if !self.capabilities.filesystem.is_empty() {
+            Some("filesystem")
+        } else if self.capabilities.process {
+            Some("process")
+        } else {
+            None
         }
     }
 }
@@ -351,18 +347,14 @@ fn tool_calls(fleet: &Fleet, task_handles: &Arc<TaskHandles<WasmRegistry>>) -> W
 fn provider_order(config: &Config) -> io::Result<Vec<&str>> {
     let mut dependencies = BTreeMap::new();
     for (name, provider) in &config.providers {
-        let plugin = config
-            .plugins
-            .get(&provider.plugin)
-            .ok_or_else(|| io::Error::other(format!("unknown plugin: {}", provider.plugin)))?;
-        for dependency in &plugin.capabilities().workspaces {
+        for dependency in &provider.capabilities.workspaces {
             if !config.providers.contains_key(dependency) {
                 return Err(io::Error::other(format!(
                     "unknown workspace provider: {dependency}",
                 )));
             }
         }
-        dependencies.insert(name.as_str(), &plugin.capabilities().workspaces);
+        dependencies.insert(name.as_str(), &provider.capabilities.workspaces);
     }
     let mut pending: BTreeSet<_> = dependencies.keys().copied().collect();
     let mut order = Vec::new();
@@ -528,9 +520,6 @@ mod tests {
             "plugins": {
                 "tools": {
                     "path": "tools.wasm",
-                    "capabilities": {
-                        "workspaces": ["workspace"],
-                    },
                 },
                 "host": {
                     "path": "host.wasm",
@@ -539,6 +528,9 @@ mod tests {
             "providers": {
                 "tools": {
                     "plugin": "tools",
+                    "capabilities": {
+                        "workspaces": ["workspace"],
+                    },
                 },
                 "workspace": {
                     "plugin": "host",
@@ -559,14 +551,14 @@ mod tests {
                 "plugins": {
                     "tools": {
                         "path": "tools.wasm",
-                        "capabilities": {
-                            "workspaces": [dependency],
-                        },
                     },
                 },
                 "providers": {
                     "tools": {
                         "plugin": "tools",
+                        "capabilities": {
+                            "workspaces": [dependency],
+                        },
                     },
                 },
             }))
@@ -580,25 +572,26 @@ mod tests {
 
     #[test]
     fn roles_can_be_read_only() {
-        let plugin: PluginConfig = serde_json::from_value(json!({
-            "path": "agents.wasm",
+        let provider: ProviderConfig = serde_json::from_value(json!({
+            "plugin": "agents",
             "capabilities": { "roles": "read", "agents": true },
         }))
         .unwrap();
         assert!(matches!(
-            plugin.capabilities().roles,
+            provider.capabilities.roles,
             RoleCapability::Permission(RolePermission::Read)
         ));
-        let error = serde_json::from_value::<PluginConfig>(json!({
-            "path": "agents.wasm",
+        let error = serde_json::from_value::<ProviderConfig>(json!({
+            "plugin": "agents",
             "capabilities": { "roles": "write" },
         }))
-        .unwrap_err();
+        .err()
+        .unwrap();
         assert!(error.is_data());
     }
 
     #[test]
-    fn plugin_config_requires_one_source() {
+    fn plugin_config_takes_only_one_source() {
         for value in [
             json!({}),
             json!({
@@ -608,12 +601,12 @@ mod tests {
             json!({
                 "path": "plugin.wasm",
                 "capabilities": {
-                    "htpt": true,
+                    "blobs": true,
                 },
             }),
         ] {
             let error = serde_json::from_value::<PluginConfig>(value).unwrap_err();
-            assert!(error.is_data());
+            assert_eq!(error.to_string(), "a plugin takes either a path or a url");
         }
     }
 

@@ -16,7 +16,12 @@ config directory as `plugins/host.wasm`, then add:
 {
   "plugins": {
     "host": {
-      "path": "./plugins/host.wasm",
+      "path": "./plugins/host.wasm"
+    }
+  },
+  "providers": {
+    "host": {
+      "plugin": "host",
       "capabilities": {
         "process": true,
         "filesystem": [
@@ -32,11 +37,6 @@ config directory as `plugins/host.wasm`, then add:
           }
         ]
       }
-    }
-  },
-  "providers": {
-    "host": {
-      "plugin": "host"
     }
   }
 }

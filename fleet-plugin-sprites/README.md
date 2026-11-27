@@ -16,11 +16,7 @@ config directory as `plugins/sprites.wasm`, then add:
 {
   "plugins": {
     "sprites": {
-      "path": "./plugins/sprites.wasm",
-      "capabilities": {
-        "http": ["https://api.sprites.dev"],
-        "credentials": true
-      }
+      "path": "./plugins/sprites.wasm"
     }
   },
   "providers": {
@@ -30,6 +26,10 @@ config directory as `plugins/sprites.wasm`, then add:
         "connections": {
           "github": { "title": "GitHub" }
         }
+      },
+      "capabilities": {
+        "http": ["https://api.sprites.dev"],
+        "credentials": true
       }
     }
   }

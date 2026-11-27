@@ -41,22 +41,22 @@ configured, add:
 {
   "plugins": {
     "tools": {
-      "path": "./plugins/tools.wasm",
+      "path": "./plugins/tools.wasm"
+    }
+  },
+  "providers": {
+    "tools": {
+      "plugin": "tools",
       "capabilities": {
         "blobs": true,
         "workspaces": ["host"]
       }
     }
-  },
-  "providers": {
-    "tools": {
-      "plugin": "tools"
-    }
   }
 }
 ```
 
-The capability lists the provider namespaces this plugin may access. Fleet loads
+The capability lists the provider namespaces this provider may access. Fleet loads
 those providers first and rejects missing or cyclic dependencies. These can be
 any workspace providers, including remote ones.
 

@@ -26,7 +26,7 @@ declared as the call's task handle. A call whose name is already used by an
 earlier call the model can see, or by another call in the same response, returns
 an error without starting an agent. Calls made before `task` existed still run
 without a name. The plugin imports tool call access even when only
-`oneshot_agent` is used, so approve `tool_calls` for it.
+`oneshot_agent` is used, so approve `tool_calls` for each of its providers.
 
 The driving tool call owns execution until its result is durably committed or
 it is interrupted. Ending a parent turn, retrying a call or dropping an attempt
@@ -61,8 +61,13 @@ With a `host` workspace provider configured:
 ```json
 {
   "plugins": {
-    "agents": {
-      "path": "./plugins/agents.wasm",
+    "agents": { "path": "./plugins/agents.wasm" },
+    "tools": { "path": "./plugins/tools.wasm" }
+  },
+  "providers": {
+    "helpers": {
+      "plugin": "agents",
+      "config": { "roles": ["reviewer", "worker-*"] },
       "capabilities": {
         "agents": true,
         "blobs": true,
@@ -71,19 +76,12 @@ With a `host` workspace provider configured:
       }
     },
     "tools": {
-      "path": "./plugins/tools.wasm",
+      "plugin": "tools",
       "capabilities": {
         "blobs": true,
         "workspaces": ["host", "helpers"]
       }
     }
-  },
-  "providers": {
-    "helpers": {
-      "plugin": "agents",
-      "config": { "roles": ["reviewer", "worker-*"] }
-    },
-    "tools": { "plugin": "tools" }
   }
 }
 ```
@@ -129,5 +127,5 @@ scope closes leaves the parent's environment in place.
 The resolver returns a typed agent reference, not a provider name convention.
 `helpers` is an arbitrary registration name. Other resolver plugins can select a
 root or ancestor, or return an explicit concrete environment and view. The host
-retains the original acting agent and dispatches only through the tool plugin's
-approved workspace providers.
+retains the original acting agent and dispatches only through the calling tool
+provider's approved workspace providers.

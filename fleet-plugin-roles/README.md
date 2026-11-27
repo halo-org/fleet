@@ -73,10 +73,7 @@ config directory as `plugins/roles.wasm` and add:
 {
   "plugins": {
     "roles": {
-      "path": "./plugins/roles.wasm",
-      "capabilities": {
-        "roles": true
-      }
+      "path": "./plugins/roles.wasm"
     }
   },
   "providers": {
@@ -84,6 +81,9 @@ config directory as `plugins/roles.wasm` and add:
       "plugin": "roles",
       "config": {
         "write": ["drafts-*"]
+      },
+      "capabilities": {
+        "roles": true
       }
     }
   }
