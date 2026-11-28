@@ -37,6 +37,10 @@ struct SignOutResponse {
     revocation_confirmed: bool,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "routes each connection request in one place"
+)]
 pub async fn route<B>(
     fleet: &Fleet,
     parts: &Parts,
@@ -57,6 +61,7 @@ where
     let id = id.map(String::from).unwrap_or_default();
     let response = match (&parts.method, segments) {
         (&Method::GET, ["", "connections"]) => {
+            authentication.probe();
             crate::api::json_response(StatusCode::OK, &authentication.connections().await)
         }
         (&Method::POST, ["", "connections", _, "authorizations"]) => {
@@ -201,6 +206,7 @@ pub const fn error_details(
         ),
         crate::AuthenticationError::Rejected(_)
         | crate::AuthenticationError::ClientRejected
+        | crate::AuthenticationError::GrantRejected
         | crate::AuthenticationError::Other(_, _) => (
             StatusCode::BAD_GATEWAY,
             "authentication_failed",

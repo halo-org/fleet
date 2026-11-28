@@ -43,7 +43,8 @@ pub struct OAuthConfig {
     /// How Fleet is identified to the authorization server.
     pub client: OAuthClient,
     /// The requested scopes. Without any, a protected resource's advertised
-    /// scopes are requested.
+    /// scopes are requested. Scopes a service asks for when rejecting a request
+    /// take precedence.
     pub scopes: Vec<String>,
     /// Additional authorization parameters.
     pub parameters: Vec<(String, String)>,
@@ -132,10 +133,15 @@ pub trait Credentials {
         name: &str,
     ) -> impl Future<Output = Result<Option<Credential>, Self::Error>> + Send;
 
-    /// Refreshes a rejected access token if it is still current.
-    fn refresh(
+    /// Reports that the service rejected a request.
+    ///
+    /// `token` is the access token the request carried, if any. `challenge` is the value
+    /// of the response's `WWW-Authenticate` header, if any. Returns whether to retry with
+    /// the credentials from [`get`](Self::get).
+    fn reject(
         &self,
         name: &str,
-        rejected: &str,
+        token: Option<&str>,
+        challenge: Option<&str>,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 }

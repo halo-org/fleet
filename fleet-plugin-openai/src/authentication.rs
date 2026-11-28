@@ -102,7 +102,7 @@ impl Credentials for HostCredentials {
         else {
             return Ok(false);
         };
-        credentials::refresh(CONNECTION.into(), token.into())
+        credentials::reject(CONNECTION.into(), Some(token.into()), None)
             .await
             .map_err(CredentialsError::Host)
     }

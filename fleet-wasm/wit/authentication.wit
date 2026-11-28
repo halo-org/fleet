@@ -58,7 +58,8 @@ interface authentication {
         /// How Fleet is identified to the authorization server.
         client: oauth-client,
         /// The requested scopes. Without any, a protected resource's advertised
-        /// scopes are requested.
+        /// scopes are requested. Scopes a service asks for when rejecting a request
+        /// take precedence.
         scopes: list<string>,
         /// Additional authorization parameters.
         parameters: list<tuple<string, string>>,
@@ -123,8 +124,14 @@ interface credentials {
     /// Returns current credentials, refreshing expired tokens if needed.
     get: async func(name: string) -> result<option<credential>, string>;
 
-    /// Refreshes a rejected access token if it is still current.
-    refresh: async func(name: string, rejected: string) -> result<bool, string>;
+    /// Reports that the service rejected a request.
+    ///
+    /// `token` is the access token the request carried, if any. `challenge` is the value of
+    /// the response's WWW-Authenticate header, if any. Fleet renews a rejected token that is
+    /// still current, and records what the service asks for: sign-in, or further scopes.
+    /// Returns whether to retry with the credentials from get.
+    reject: async func(name: string, token: option<string>, challenge: option<string>)
+        -> result<bool, string>;
 }
 
 /// A component that declares authentication methods.

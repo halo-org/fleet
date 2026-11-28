@@ -293,6 +293,7 @@ pub async fn load(
         )?;
         loaded.insert(name, provider);
     }
+    authentication.probe();
 
     let mut providers = WasmRegistry::new();
     for (name, provider) in loaded {

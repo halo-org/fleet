@@ -19,6 +19,7 @@ mod notifications;
 mod oauth;
 mod oauth_api;
 mod oauth_callback;
+mod oauth_challenge;
 mod oauth_client;
 mod oauth_discovery;
 mod oci;

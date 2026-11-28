@@ -1,6 +1,7 @@
 use crate::{
     AuthenticationError, CredentialStore, IdleHandler, SandboxOAuth,
     oauth::{Authorization, Discovered, OAuth, Registration, Server, Tokens},
+    oauth_challenge::Challenge,
     oauth_client::AutomaticClient,
 };
 use core::{pin::pin, time::Duration};
@@ -12,13 +13,14 @@ use fleet_wasm::WasmOrigin;
 use futures_util::future::{self, Either};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, RwLock},
 };
 use tokio::{
     net::TcpListener,
     sync::{Mutex, oneshot},
+    time::Instant,
 };
 use url::Url;
 
@@ -48,6 +50,16 @@ struct ConnectionState {
     origins: Vec<WasmOrigin>,
     definition: Connection,
     session: Mutex<Session>,
+    probes: std::sync::Mutex<BTreeMap<String, Probe>>,
+}
+
+/// The last check of whether a method's protected resource offers sign-in.
+#[derive(Default)]
+struct Probe {
+    /// Whether the resource publishes metadata, unless that is unknown.
+    available: Option<bool>,
+    finished: Option<Instant>,
+    running: bool,
 }
 
 struct Session {
@@ -62,6 +74,12 @@ struct Record {
     credential: Option<SavedCredential>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     clients: BTreeMap<String, Registration>,
+    /// Scopes the service asked for that the credential was not granted.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    requested_scopes: BTreeSet<String>,
+    /// Where services said the metadata of each protected resource is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    resource_metadata: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -119,6 +137,8 @@ pub struct ConnectionInfo {
     pub manage_url: Option<String>,
     pub connected: bool,
     pub email: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requested_scopes: Vec<String>,
     pub methods: Vec<MethodInfo>,
 }
 
@@ -131,6 +151,8 @@ pub struct MethodInfo {
     pub redirect_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
 }
 
 impl Authentication {
@@ -277,11 +299,63 @@ impl Authentication {
                         dirty: false,
                         authorization: None,
                     }),
+                    probes: std::sync::Mutex::default(),
                 }),
             );
         }
         drop(connections);
         Ok(())
+    }
+
+    /// Checks in the background whether protected resources offer sign-in.
+    ///
+    /// Only stale answers are checked again: unknown answers after a minute, and others
+    /// after ten minutes.
+    pub fn probe(&self) {
+        let connections = self
+            .state
+            .connections
+            .read()
+            .expect("connection lock is not poisoned")
+            .clone();
+        let now = Instant::now();
+        for connection in connections.into_values() {
+            for method in &connection.definition.methods {
+                let AuthenticationKind::OAuth(config) = &method.kind else {
+                    continue;
+                };
+                let OAuthServer::Resource(resource) = &config.server else {
+                    continue;
+                };
+                if !connection
+                    .probes()
+                    .entry(method.name.clone())
+                    .or_default()
+                    .start(now)
+                {
+                    continue;
+                }
+                let oauth = self.state.oauth.clone();
+                let (connection, method) = (connection.clone(), method.name.clone());
+                let resource = resource.clone();
+                tokio::spawn(async move {
+                    let session = connection.session.lock().await;
+                    let recorded = session.record.resource_metadata.get(&resource).cloned();
+                    drop(session);
+                    let available = oauth
+                        .offers_sign_in(&resource, &connection.origins, recorded.as_deref())
+                        .await;
+                    connection.probes().insert(
+                        method,
+                        Probe {
+                            available,
+                            finished: Some(Instant::now()),
+                            running: false,
+                        },
+                    );
+                });
+            }
+        }
     }
 
     /// Lists connections without exposing credentials.
@@ -304,11 +378,27 @@ impl Authentication {
                 Secret::OAuth(tokens) => {
                     oauth_config(&connection, &credential.method).is_ok_and(|config| {
                         authorized(config, tokens)
+                            && (tokens.refresh_token.is_some() || !expiring(tokens))
                             && server(&connection, config, credential.server.as_ref()).is_ok()
                     })
                 }
             });
+            let granted = credential.map_or(&[][..], SavedCredential::scopes);
+            let requested_scopes = session
+                .record
+                .requested_scopes
+                .iter()
+                .filter(|scope| !granted.contains(scope))
+                .cloned()
+                .collect();
+            let challenged = session
+                .record
+                .resource_metadata
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             drop(session);
+            let probes = connection.probes();
             result.push(ConnectionInfo {
                 id,
                 provider: connection.provider.clone(),
@@ -317,6 +407,7 @@ impl Authentication {
                 manage_url: connection.definition.manage_url.clone(),
                 connected,
                 email,
+                requested_scopes,
                 methods: connection
                     .definition
                     .methods
@@ -344,6 +435,20 @@ impl Authentication {
                             },
                             AuthenticationKind::ApiKey => None,
                         },
+                        available: match &method.kind {
+                            AuthenticationKind::OAuth(config) => match &config.server {
+                                OAuthServer::Resource(resource)
+                                    if challenged.contains(resource) =>
+                                {
+                                    Some(true)
+                                }
+                                OAuthServer::Resource(_) => {
+                                    probes.get(&method.name).and_then(|probe| probe.available)
+                                }
+                                OAuthServer::Endpoints(_) => None,
+                            },
+                            AuthenticationKind::ApiKey => None,
+                        },
                     })
                     .collect(),
             });
@@ -357,8 +462,13 @@ impl Authentication {
     /// [`callback`](Self::callback). Without one, Fleet also listens at the registered URI.
     /// Automatic clients take no `requested` URI, since Fleet receives their callback with
     /// [`hosted_callback`](Self::hosted_callback). A pending attempt with the same method
-    /// and redirect URI is returned instead. A protected resource's server is discovered,
-    /// and an automatic client identified, without blocking the connection.
+    /// and redirect URI is returned instead, and scopes recorded after it started apply to
+    /// the next attempt. A protected resource's server is discovered, and an automatic
+    /// client identified, without blocking the connection.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the steps of starting a sign-in together"
+    )]
     pub async fn authorize(
         &self,
         id: &str,
@@ -390,11 +500,16 @@ impl Authentication {
             return Ok(info);
         }
         let stored = session.record.clients.get(method).cloned();
+        let recorded = match &config.server {
+            OAuthServer::Resource(resource) => session.record.resource_metadata.get(resource),
+            OAuthServer::Endpoints(_) => None,
+        }
+        .cloned();
         drop(session);
         let metadata = self
             .state
             .oauth
-            .discover(config, &connection.origins)
+            .discover(config, &connection.origins, recorded.as_deref())
             .await?;
         let identity = match (&config.client, &metadata) {
             (OAuthClient::Automatic, Some(metadata)) => {
@@ -423,6 +538,7 @@ impl Authentication {
         let authorization = self.state.oauth.authorize(
             config,
             metadata,
+            &session.requested_scopes(method, config),
             identity
                 .as_ref()
                 .or_else(|| session.record.registrations.get(method)),
@@ -688,6 +804,13 @@ impl Authentication {
             secret: Secret::OAuth(tokens),
             server: attempt.authorization.server.clone(),
         });
+        if authorized && let Some(requested) = &attempt.authorization.scope {
+            let requested = requested.split_whitespace().collect::<BTreeSet<_>>();
+            session
+                .record
+                .requested_scopes
+                .retain(|scope| !requested.contains(scope.as_str()));
+        }
         session.dirty = true;
         self.flush(id, session).await?;
         if !authorized {
@@ -736,6 +859,7 @@ impl Authentication {
             secret: Secret::ApiKey(key),
             server: None,
         });
+        session.record.requested_scopes.clear();
         session.dirty = true;
         let result = self.flush(id, &mut session).await;
         drop(session);
@@ -773,6 +897,7 @@ impl Authentication {
             true
         };
         session.record.credential = None;
+        session.record.requested_scopes.clear();
         session.dirty = true;
         self.flush(id, &mut session).await?;
         drop(session);
@@ -814,72 +939,254 @@ impl Authentication {
         Ok(())
     }
 
-    async fn credential(
-        &self,
-        id: &str,
-        rejected: Option<&str>,
-    ) -> Result<Option<Credential>, AuthenticationError> {
+    async fn credential(&self, id: &str) -> Result<Option<Credential>, AuthenticationError> {
         let connection = self.connection(id)?;
         let mut session = connection.session.lock().await;
         self.flush(id, &mut session).await?;
         let Some(credential) = session.record.credential.clone() else {
             return Ok(None);
         };
-        match credential.secret {
-            Secret::ApiKey(key) => Ok(Some(Credential::ApiKey(key))),
-            Secret::OAuth(mut tokens) => {
-                let config = oauth_config(&connection, &credential.method)?;
-                let server = server(&connection, config, credential.server.as_ref())?;
-                if !authorized(config, &tokens) {
-                    return Err(AuthenticationError::Unauthorized);
-                }
-                if tokens
-                    .expires_at
-                    .is_some_and(|expires_at| expires_at <= crate::oauth::now().saturating_add(60))
-                    || rejected == Some(tokens.access_token.as_str())
-                {
-                    let mut registration = session
-                        .record
-                        .registrations
-                        .get(&credential.method)
-                        .cloned()
-                        .ok_or(AuthenticationError::Unauthorized)?;
-                    let result = self
-                        .state
-                        .oauth
-                        .refresh(server, &mut registration, &tokens)
-                        .await;
-                    if matches!(result, Err(AuthenticationError::ClientRejected)) {
-                        session.reject_client(&credential.method, &registration);
-                        self.flush(id, &mut session).await?;
-                    }
-                    tokens = result?;
-                    session
-                        .record
-                        .registrations
-                        .insert(credential.method.clone(), registration);
-                    session.record.credential = Some(SavedCredential {
-                        method: credential.method.clone(),
-                        secret: Secret::OAuth(tokens.clone()),
-                        server: credential.server.clone(),
-                    });
-                    session.dirty = true;
-                    self.flush(id, &mut session).await?;
-                    if !authorized(config, &tokens) {
-                        return Err(AuthenticationError::Unauthorized);
-                    }
-                }
-                drop(session);
-                Ok(Some(Credential::OAuth {
-                    access_token: tokens.access_token,
-                    id_token: tokens.id_token,
-                }))
+        let mut tokens = match &credential.secret {
+            Secret::ApiKey(key) => return Ok(Some(Credential::ApiKey(key.clone()))),
+            Secret::OAuth(tokens) => tokens.clone(),
+        };
+        let config = oauth_config(&connection, &credential.method)?;
+        let server = server(&connection, config, credential.server.as_ref())?;
+        if expiring(&tokens) {
+            let Some(renewed) = self
+                .renew(id, &mut session, &credential, server, &tokens)
+                .await?
+            else {
+                return Ok(None);
+            };
+            tokens = renewed;
+        }
+        drop(session);
+        if !authorized(config, &tokens) {
+            return Err(AuthenticationError::Unauthorized);
+        }
+        Ok(Some(Credential::OAuth {
+            access_token: tokens.access_token,
+            id_token: tokens.id_token,
+        }))
+    }
+
+    /// Records what a rejection's challenge asks for, and renews a rejected token that is
+    /// still current.
+    ///
+    /// Returns whether to retry with the current credential. A token that is not current
+    /// gets a retry without recording its challenge, since it may belong to another
+    /// sign-in. Discards a credential that cannot be renewed without signing in.
+    async fn reject(
+        &self,
+        id: &str,
+        token: Option<&str>,
+        challenge: Option<&Challenge>,
+    ) -> Result<bool, AuthenticationError> {
+        let connection = self.connection(id)?;
+        let mut session = connection.session.lock().await;
+        self.flush(id, &mut session).await?;
+        let Some(credential) = session.record.credential.clone() else {
+            if let Some(challenge) = challenge.filter(|_| token.is_none()) {
+                session.record_challenge(&connection.definition, None, challenge);
+                self.flush(id, &mut session).await?;
             }
+            return Ok(false);
+        };
+        let Secret::OAuth(tokens) = &credential.secret else {
+            return Ok(false);
+        };
+        if token != Some(tokens.access_token.as_str()) {
+            return Ok(true);
+        }
+        if let Some(challenge) = challenge {
+            session.record_challenge(&connection.definition, Some(&credential.method), challenge);
+            self.flush(id, &mut session).await?;
+            if challenge.error.as_deref() == Some("insufficient_scope") {
+                return Ok(false);
+            }
+        }
+        let config = oauth_config(&connection, &credential.method)?;
+        let server = server(&connection, config, credential.server.as_ref())?;
+        let Some(renewed) = self
+            .renew(id, &mut session, &credential, server, tokens)
+            .await?
+        else {
+            return Ok(false);
+        };
+        drop(session);
+        if !authorized(config, &renewed) {
+            return Err(AuthenticationError::Unauthorized);
+        }
+        Ok(renewed.access_token != tokens.access_token)
+    }
+
+    /// Renews a credential's tokens and keeps them.
+    ///
+    /// Returns nothing after discarding a credential without a refresh token, or whose
+    /// grant the server no longer accepts.
+    async fn renew(
+        &self,
+        id: &str,
+        session: &mut Session,
+        credential: &SavedCredential,
+        server: Server<'_>,
+        tokens: &Tokens,
+    ) -> Result<Option<Tokens>, AuthenticationError> {
+        if tokens.refresh_token.is_none() {
+            return self.discard(id, session).await.map(|()| None);
+        }
+        let mut registration = session
+            .record
+            .registrations
+            .get(&credential.method)
+            .cloned()
+            .ok_or(AuthenticationError::Unauthorized)?;
+        let result = self
+            .state
+            .oauth
+            .refresh(server, &mut registration, tokens)
+            .await;
+        match result {
+            Err(AuthenticationError::ClientRejected) => {
+                session.reject_client(&credential.method, &registration);
+                self.flush(id, session).await?;
+            }
+            Err(AuthenticationError::GrantRejected) => {
+                return self.discard(id, session).await.map(|()| None);
+            }
+            _ => {}
+        }
+        let tokens = result?;
+        session
+            .record
+            .registrations
+            .insert(credential.method.clone(), registration);
+        session.record.credential = Some(SavedCredential {
+            method: credential.method.clone(),
+            secret: Secret::OAuth(tokens.clone()),
+            server: credential.server.clone(),
+        });
+        session.dirty = true;
+        self.flush(id, session).await?;
+        Ok(Some(tokens))
+    }
+
+    /// Discards a credential that needs a new sign-in, keeping client registrations.
+    async fn discard(&self, id: &str, session: &mut Session) -> Result<(), AuthenticationError> {
+        session.record.credential = None;
+        session.dirty = true;
+        self.flush(id, session).await
+    }
+}
+
+impl ConnectionState {
+    fn probes(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Probe>> {
+        self.probes.lock().expect("probe lock is not poisoned")
+    }
+}
+
+impl Probe {
+    /// Starts a check unless one is running or the last answer is fresh.
+    fn start(&mut self, now: Instant) -> bool {
+        let lifetime = Duration::from_secs(if self.available.is_some() { 600 } else { 60 });
+        if self.running
+            || self
+                .finished
+                .is_some_and(|finished| now.saturating_duration_since(finished) < lifetime)
+        {
+            return false;
+        }
+        self.running = true;
+        true
+    }
+}
+
+impl SavedCredential {
+    /// Returns the scopes an OAuth credential was granted.
+    fn scopes(&self) -> &[String] {
+        match &self.secret {
+            Secret::OAuth(tokens) => &tokens.scopes,
+            Secret::ApiKey(_) => &[],
         }
     }
 }
 
 impl Session {
+    /// Records what a challenge asks for at the next sign-in.
+    ///
+    /// `method` is the method of the current credential the request carried, or nothing
+    /// without a credential. Scopes the credential was not granted become requested
+    /// scopes when such a method uses OAuth. The resource metadata URL is kept for the
+    /// protected resource when such methods name exactly one.
+    fn record_challenge(
+        &mut self,
+        definition: &Connection,
+        method: Option<&str>,
+        challenge: &Challenge,
+    ) {
+        let configs = definition
+            .methods
+            .iter()
+            .filter(|candidate| method.is_none_or(|method| candidate.name == method))
+            .filter_map(|candidate| match &candidate.kind {
+                AuthenticationKind::OAuth(config) => Some(config),
+                AuthenticationKind::ApiKey => None,
+            })
+            .collect::<Vec<_>>();
+        if configs.is_empty() {
+            return;
+        }
+        let granted = self
+            .record
+            .credential
+            .as_ref()
+            .map_or(&[][..], SavedCredential::scopes);
+        let requested = challenge
+            .scopes
+            .iter()
+            .filter(|scope| !granted.contains(scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for scope in requested {
+            self.dirty |= self.record.requested_scopes.insert(scope);
+        }
+        let resources = configs
+            .iter()
+            .filter_map(|config| match &config.server {
+                OAuthServer::Resource(resource) => Some(resource),
+                OAuthServer::Endpoints(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if let Some(url) = &challenge.resource_metadata
+            && let Some(resource) = resources.first().filter(|_| resources.len() == 1)
+            && crate::oauth::endpoint(url).is_ok()
+            && self.record.resource_metadata.get(*resource) != Some(url)
+        {
+            self.record
+                .resource_metadata
+                .insert((*resource).clone(), url.clone());
+            self.dirty = true;
+        }
+    }
+
+    /// Returns the scopes a method's sign-in requests because the service asked for them,
+    /// with those its credential was granted and those the method requires.
+    fn requested_scopes(&self, method: &str, config: &OAuthConfig) -> Vec<String> {
+        if self.record.requested_scopes.is_empty() {
+            return Vec::new();
+        }
+        let granted = self
+            .record
+            .credential
+            .as_ref()
+            .filter(|credential| credential.method == method)
+            .map_or(&[][..], SavedCredential::scopes);
+        let mut scopes = self.record.requested_scopes.clone();
+        scopes.extend(granted.iter().chain(&config.required_scopes).cloned());
+        scopes.into_iter().collect()
+    }
+
     /// Returns the dynamic registration to use for a method, keeping a new one.
     ///
     /// A registration kept for the same issuer and redirect URI takes precedence. Reusing
@@ -950,12 +1257,17 @@ impl Credentials for ProviderCredentials {
         let id = format!("{}:{name}", self.namespace);
         crate::authentication::finish(async move {
             let _guard = guard;
-            authentication.credential(&id, None).await
+            authentication.credential(&id).await
         })
         .await
     }
 
-    async fn refresh(&self, name: &str, rejected: &str) -> Result<bool, Self::Error> {
+    async fn reject(
+        &self,
+        name: &str,
+        token: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Result<bool, Self::Error> {
         let guard = self
             .authentication
             .state
@@ -964,11 +1276,15 @@ impl Credentials for ProviderCredentials {
             .ok_or(AuthenticationError::Cancelled)?;
         let authentication = self.authentication.clone();
         let id = format!("{}:{name}", self.namespace);
-        let rejected = rejected.to_owned();
+        let token = token.map(str::to_owned);
+        let challenge = challenge.and_then(Challenge::parse);
         crate::authentication::finish(async move {
             let _guard = guard;
-            Ok(matches!(authentication.credential(&id, Some(&rejected)).await?, Some(Credential::OAuth { access_token, .. }) if access_token != rejected))
-        }).await
+            authentication
+                .reject(&id, token.as_deref(), challenge.as_ref())
+                .await
+        })
+        .await
     }
 }
 
@@ -1016,6 +1332,15 @@ fn authorized(config: &OAuthConfig, tokens: &Tokens) -> bool {
         .required_scopes
         .iter()
         .all(|scope| tokens.scopes.contains(scope))
+}
+
+/// Whether tokens are due for renewal, a minute before they expire with a refresh token
+/// or once they expire without one.
+fn expiring(tokens: &Tokens) -> bool {
+    let margin = tokens.refresh_token.as_ref().map_or(0, |_| 60);
+    tokens
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= crate::oauth::now().saturating_add(margin))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -1210,7 +1535,17 @@ mod tests {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "serves every fixture route in one place"
+    )]
     fn respond(origin: &str, target: &str, count: usize) -> Response<Full<Bytes>> {
+        let error = |status, error: &str| {
+            let body = json!({ "error": error }).to_string();
+            let mut response = Response::new(Full::new(body.into()));
+            *response.status_mut() = status;
+            response
+        };
         let server = |issuer: String, token_path: &str| {
             json!({
                 "issuer": issuer,
@@ -1253,6 +1588,14 @@ mod tests {
                 "resource": format!("{origin}/failing"),
                 "authorization_servers": [format!("{origin}/failing")],
             }),
+            "/metadata/hidden" => json!({
+                "resource": format!("{origin}/hidden"),
+                "authorization_servers": [origin],
+            }),
+            "/metadata/broken" => json!({
+                "resource": format!("{origin}/mcp"),
+                "authorization_servers": ["not a URL"],
+            }),
             "/.well-known/oauth-authorization-server" => server(origin.into(), "/token"),
             "/.well-known/oauth-authorization-server/failing" => {
                 server(format!("{origin}/failing"), "/failing")
@@ -1287,18 +1630,9 @@ mod tests {
             }),
             "/register" => json!({ "client_id": format!("client-{count}") }),
             "/secret" => json!({ "client_id": "client", "client_secret": "secret" }),
-            "/rejecting" => {
-                let body = json!({ "error": "invalid_client" }).to_string();
-                let mut response = Response::new(Full::new(body.into()));
-                *response.status_mut() = StatusCode::UNAUTHORIZED;
-                return response;
-            }
-            "/failing" => {
-                let body = json!({ "error": "server_error" }).to_string();
-                let mut response = Response::new(Full::new(body.into()));
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                return response;
-            }
+            "/rejecting" => return error(StatusCode::UNAUTHORIZED, "invalid_client"),
+            "/expired" => return error(StatusCode::BAD_REQUEST, "invalid_grant"),
+            "/failing" => return error(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
             "/revoke" => json!({}),
             _ => {
                 let mut response = Response::new(Full::default());
@@ -1590,7 +1924,10 @@ mod tests {
                 .unwrap();
             let credentials = authentication.scope("first");
             let first = credentials.get("account").await.unwrap().unwrap();
-            let refreshed = credentials.refresh("account", "access-3").await.unwrap();
+            let refreshed = credentials
+                .reject("account", Some("access-3"), None)
+                .await
+                .unwrap();
             let second = credentials.get("account").await.unwrap().unwrap();
             let revoked = authentication.sign_out("first:account").await.unwrap();
 
@@ -1902,7 +2239,10 @@ mod tests {
             let credentials = authentication.scope("first");
             let first = credentials.get("account").await.unwrap().unwrap();
             let second = credentials.get("account").await.unwrap().unwrap();
-            let refreshed = credentials.refresh("account", "access-1").await.unwrap();
+            let refreshed = credentials
+                .reject("account", Some("access-1"), None)
+                .await
+                .unwrap();
             let third = credentials.get("account").await.unwrap().unwrap();
 
             assert_eq!(completed.status, AuthorizationStatus::Complete);
@@ -2655,5 +2995,563 @@ mod tests {
         assert!(registration.issued_by(Some(&first)));
         assert!(!registration.issued_by(Some(&server("https://other.example.com"))));
         assert!(!registration.issued_by(None));
+    }
+
+    fn declared(origin: &str, token_path: &str) -> AuthenticationMethod {
+        let endpoints = OAuthServer::Endpoints(OAuthEndpoints {
+            authorization_url: format!("{origin}/authorize"),
+            token_url: format!("{origin}{token_path}"),
+            resource: None,
+            issuer: None,
+        });
+        let client = OAuthClient::Registered(OAuthRegisteredClient {
+            client_id: "fleet".into(),
+            redirect_uri: "http://127.0.0.1:0/callback".into(),
+            registration: None,
+        });
+        method("oauth", endpoints, client, &[])
+    }
+
+    /// Opens a connection signed in with `method` and the access token `saved` granted
+    /// `read`, from a record written before challenges were recorded.
+    async fn signed_in(
+        method: AuthenticationMethod,
+        refresh_token: Option<&str>,
+        expires_at: Option<u64>,
+    ) -> Authentication {
+        let store = CredentialStore::memory().unwrap();
+        let record = json!({
+            "registrations": {
+                "oauth": { "client_id": "fleet", "subject": null, "email": null },
+            },
+            "credential": {
+                "method": "oauth",
+                "secret": {
+                    "OAuth": {
+                        "access_token": "saved",
+                        "refresh_token": refresh_token,
+                        "id_token": null,
+                        "expires_at": expires_at,
+                        "scopes": ["read"],
+                    },
+                },
+            },
+        });
+        store.put("first:account".into(), &record).await.unwrap();
+        let authentication = open(store, Some(automatic_client())).await;
+        let mut definition = connection();
+        definition.methods.push(method);
+        authentication
+            .register("first", &[], vec![definition])
+            .unwrap();
+        authentication
+    }
+
+    fn stored(authentication: &Authentication) -> Value {
+        authentication
+            .state
+            .store
+            .get("first:account")
+            .unwrap()
+            .unwrap()
+    }
+
+    fn access_token(credential: Option<Credential>) -> Option<String> {
+        match credential {
+            Some(Credential::OAuth { access_token, .. }) => Some(access_token),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn rejected_tokens_are_renewed_only_while_current() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let mut results = Vec::new();
+            for (path, token) in [
+                ("/token", Some("saved")),
+                ("/token", Some("stale")),
+                ("/token", None),
+                ("/failing", Some("saved")),
+            ] {
+                let authentication =
+                    signed_in(declared(&origin, path), Some("saved-refresh"), None).await;
+                let credentials = authentication.scope("first");
+                let retry = credentials
+                    .reject("account", token, None)
+                    .await
+                    .map_err(|error| error.to_string());
+                let credential = credentials.get("account").await.unwrap();
+                results.push((retry, access_token(credential).unwrap()));
+            }
+
+            assert_eq!(
+                results,
+                [
+                    (Ok(true), "access-1".into()),
+                    (Ok(true), "saved".into()),
+                    (Ok(true), "saved".into()),
+                    (
+                        Err("authorization server returned HTTP 500".into()),
+                        "saved".into()
+                    ),
+                ]
+            );
+            let targets: Vec<_> = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(target, _)| target.clone())
+                .collect();
+            assert_eq!(targets, ["/token", "/failing"]);
+
+            let authentication = memory().await;
+            authentication
+                .register("first", &[], vec![connection()])
+                .unwrap();
+            let credentials = authentication.scope("first");
+            let signed_out = credentials
+                .reject("account", Some("key"), None)
+                .await
+                .unwrap();
+            authentication
+                .set_key("first:account", "key", "key".into())
+                .await
+                .unwrap();
+            let key = credentials
+                .reject("account", Some("key"), None)
+                .await
+                .unwrap();
+
+            assert!(!signed_out);
+            assert!(!key);
+        });
+    }
+
+    #[test]
+    fn credentials_that_need_sign_in_are_discarded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let mut partial = declared(&origin, "/token");
+            if let AuthenticationKind::OAuth(config) = &mut partial.kind {
+                config.required_scopes = vec!["admin".into()];
+            }
+            for (method, refresh_token) in [
+                (declared(&origin, "/token"), None),
+                (declared(&origin, "/expired"), Some("saved-refresh")),
+                (partial, None),
+            ] {
+                let authentication = signed_in(method, refresh_token, None).await;
+                let credentials = authentication.scope("first");
+                let retry = credentials
+                    .reject("account", Some("saved"), None)
+                    .await
+                    .unwrap();
+                let credential = credentials.get("account").await.unwrap();
+                let connections = authentication.connections().await;
+                let record = stored(&authentication);
+
+                assert!(!retry);
+                assert!(credential.is_none());
+                assert!(!connections[0].connected);
+                assert_eq!(record["credential"], Value::Null);
+                assert_eq!(record["registrations"]["oauth"]["client_id"], "fleet");
+            }
+            assert_eq!(requests.lock().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn expiring_credentials_that_need_sign_in_are_discarded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let soon = crate::oauth::now() + 30;
+            let mut partial = declared(&origin, "/token");
+            if let AuthenticationKind::OAuth(config) = &mut partial.kind {
+                config.required_scopes = vec!["admin".into()];
+            }
+            let mut results = Vec::new();
+            for (method, refresh_token, expires_at) in [
+                (
+                    declared(&origin, "/expired"),
+                    Some("saved-refresh"),
+                    Some(0),
+                ),
+                (
+                    declared(&origin, "/failing"),
+                    Some("saved-refresh"),
+                    Some(0),
+                ),
+                (declared(&origin, "/token"), None, Some(0)),
+                (partial, None, Some(0)),
+                (declared(&origin, "/token"), None, Some(soon)),
+                (declared(&origin, "/token"), None, None),
+            ] {
+                let authentication = signed_in(method, refresh_token, expires_at).await;
+                let credential = authentication
+                    .scope("first")
+                    .get("account")
+                    .await
+                    .map(access_token)
+                    .map_err(|error| error.to_string());
+                let connections = authentication.connections().await;
+                let record = stored(&authentication);
+
+                assert_eq!(record["registrations"]["oauth"]["client_id"], "fleet");
+                results.push((
+                    credential,
+                    connections[0].connected,
+                    record["credential"]["method"].clone(),
+                ));
+            }
+
+            assert_eq!(
+                results,
+                [
+                    (Ok(None), false, Value::Null),
+                    (
+                        Err("authorization server returned HTTP 500".into()),
+                        true,
+                        json!("oauth")
+                    ),
+                    (Ok(None), false, Value::Null),
+                    (Ok(None), false, Value::Null),
+                    (Ok(Some("saved".into())), true, json!("oauth")),
+                    (Ok(Some("saved".into())), true, json!("oauth")),
+                ]
+            );
+            assert_eq!(requests.lock().unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn expired_credentials_without_a_refresh_token_are_not_connected() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let later = crate::oauth::now() + 3600;
+            let mut connected = Vec::new();
+            for (refresh_token, expires_at) in [
+                (None, Some(0)),
+                (None, Some(later)),
+                (Some("saved-refresh"), Some(0)),
+                (None, None),
+            ] {
+                let method = declared("https://auth.example.com", "/token");
+                let authentication = signed_in(method, refresh_token, expires_at).await;
+                connected.push(authentication.connections().await[0].connected);
+
+                assert_eq!(stored(&authentication)["credential"]["method"], "oauth");
+            }
+
+            assert_eq!(connected, [false, true, true, true]);
+        });
+    }
+
+    #[test]
+    fn insufficient_scope_records_further_scopes_for_the_next_sign_in() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let authentication =
+                signed_in(declared(&origin, "/token"), Some("saved-refresh"), None).await;
+            let credentials = authentication.scope("first");
+            let mut retries = Vec::new();
+            for scope in ["read write", "admin write", "read", ""] {
+                let challenge = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
+                let retry = credentials.reject("account", Some("saved"), Some(&challenge));
+                retries.push(retry.await.unwrap());
+            }
+            let stale = "Bearer error=\"insufficient_scope\", scope=\"stale\"";
+            retries.push(
+                credentials
+                    .reject("account", Some("stale"), Some(stale))
+                    .await
+                    .unwrap(),
+            );
+            let credential = credentials.get("account").await.unwrap();
+            let connections = authentication.connections().await;
+
+            assert_eq!(retries, [false, false, false, false, true]);
+            assert_eq!(access_token(credential).as_deref(), Some("saved"));
+            assert!(connections[0].connected);
+            assert_eq!(connections[0].requested_scopes, ["admin", "write"]);
+            assert_eq!(
+                stored(&authentication)["requested_scopes"],
+                json!(["admin", "write"])
+            );
+            assert!(requests.lock().unwrap().is_empty());
+
+            let authorize = || {
+                let redirect_uri = Some("http://127.0.0.1:3000/callback");
+                authentication.authorize("first:account", "oauth", redirect_uri)
+            };
+            let info = authorize().await.unwrap();
+            let challenge = "Bearer error=\"insufficient_scope\", scope=\"files\"";
+            credentials
+                .reject("account", Some("saved"), Some(challenge))
+                .await
+                .unwrap();
+            let repeated = authorize().await.unwrap();
+            let callback = format!(
+                "http://127.0.0.1:3000/callback?state={}&code=granted",
+                info.id
+            );
+            authentication
+                .callback("first:account", &info.id, &callback)
+                .await
+                .unwrap();
+            let signed_in = authentication.connections().await;
+            let challenge = "Bearer error=\"insufficient_scope\", scope=\"admin files\"";
+            credentials
+                .reject("account", Some("access-1"), Some(challenge))
+                .await
+                .unwrap();
+            let challenged = authentication.connections().await;
+            let again = authorize().await.unwrap();
+            authentication.sign_out("first:account").await.unwrap();
+            credentials
+                .reject("account", Some("access-1"), Some(challenge))
+                .await
+                .unwrap();
+            let signed_out = authentication.connections().await;
+            credentials
+                .reject("account", None, Some(challenge))
+                .await
+                .unwrap();
+            authentication
+                .set_key("first:account", "key", "key".into())
+                .await
+                .unwrap();
+            let keyed = authentication.connections().await;
+
+            assert_eq!(repeated.id, info.id);
+            assert_eq!(query(&info.url)["scope"], "admin read write");
+            assert_eq!(query(&again.url)["scope"], "admin files read write");
+            assert_eq!(
+                [signed_in, challenged, signed_out, keyed]
+                    .map(|connections| connections[0].requested_scopes.clone()),
+                [
+                    vec!["files".to_owned()],
+                    vec!["files".to_owned()],
+                    vec![],
+                    vec![]
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn challenges_lead_the_next_sign_in_to_resource_metadata() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let authentication = memory().await;
+            let mut required = resource("mcp", format!("{origin}/hidden"), &["write"]);
+            if let AuthenticationKind::OAuth(config) = &mut required.kind {
+                config.required_scopes = vec!["base".into()];
+            }
+            let mut hidden = connection();
+            hidden.name = "hidden".into();
+            hidden.methods = vec![required];
+            let mut published = connection();
+            published.methods = vec![resource("mcp", format!("{origin}/mcp"), &[])];
+            let mut mixed = connection();
+            mixed.name = "mixed".into();
+            mixed.methods = vec![
+                resource("mcp", format!("{origin}/mcp"), &[]),
+                resource("hidden", format!("{origin}/hidden"), &[]),
+            ];
+            authentication
+                .register("first", &grant, vec![hidden, published, mixed])
+                .unwrap();
+            let mut retries = Vec::new();
+            for (name, path) in [
+                ("hidden", "hidden"),
+                ("account", "broken"),
+                ("mixed", "hidden"),
+            ] {
+                let challenge = format!(
+                    "Bearer error=\"invalid_token\", resource_metadata=\"{origin}/metadata/{path}\", scope=\"files\""
+                );
+                let credentials = authentication.scope("first");
+                let retry = credentials.reject(name, None, Some(&challenge)).await;
+                retries.push(retry.unwrap());
+            }
+            let connections = authentication.connections().await;
+            let available: Vec<_> = connections
+                .iter()
+                .map(|connection| {
+                    let methods = connection.methods.iter();
+                    methods.map(|method| method.available).collect::<Vec<_>>()
+                })
+                .collect();
+
+            assert_eq!(retries, [false; 3]);
+            assert_eq!(
+                available,
+                [vec![Some(true)], vec![Some(true)], vec![None, None]]
+            );
+            for connection in &connections {
+                assert_eq!(connection.requested_scopes, ["files"]);
+            }
+
+            let mut scopes = Vec::new();
+            for id in ["first:hidden", "first:account"] {
+                let info = authentication
+                    .authorize(id, "mcp", Some("http://127.0.0.1:3000/callback"))
+                    .await
+                    .unwrap();
+                scopes.push(query(&info.url).remove("scope"));
+            }
+
+            assert_eq!(scopes, [Some("base files".into()), Some("files".into())]);
+            let targets: Vec<_> = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(target, _)| target.clone())
+                .collect();
+            assert_eq!(
+                targets,
+                [
+                    "/metadata/hidden",
+                    "/.well-known/oauth-authorization-server",
+                    "/metadata/broken",
+                    "/.well-known/oauth-protected-resource/mcp",
+                    "/.well-known/oauth-authorization-server",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn probes_find_in_the_background_whether_resources_offer_sign_in() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let authentication = memory().await;
+            let mut definition = connection();
+            definition.methods = vec![
+                resource("mcp", format!("{origin}/mcp"), &[]),
+                resource("missing", format!("{origin}/missing"), &[]),
+                resource("down", format!("{origin}/down"), &[]),
+                resource("slow", format!("{origin}/slow"), &[]),
+                declared(&origin, "/token"),
+            ];
+            authentication
+                .register("first", &grant, vec![definition])
+                .unwrap();
+            let mut ungranted = connection();
+            ungranted.methods = vec![resource("mcp", format!("{origin}/mcp"), &[])];
+            authentication
+                .register("second", &[], vec![ungranted])
+                .unwrap();
+            let available = async || {
+                let connections = authentication.connections().await;
+                let methods = connections[0].methods.iter();
+                methods.map(|method| method.available).collect::<Vec<_>>()
+            };
+            authentication.probe();
+            authentication.probe();
+            let pending = tokio::time::timeout(Duration::from_secs(5), available()).await;
+            let answered = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let answered = available().await;
+                    if answered[..2].iter().all(Option::is_some)
+                        && requests.lock().unwrap().len() == 5
+                    {
+                        break answered;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            authentication.probe();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let ungranted = authentication.connections().await;
+
+            assert_eq!(pending.unwrap(), [None; 5]);
+            assert_eq!(ungranted[1].methods[0].available, None);
+            assert_eq!(
+                answered.unwrap(),
+                [Some(true), Some(false), None, None, None]
+            );
+            let mut targets: Vec<_> = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(target, _)| target.clone())
+                .collect();
+            targets.sort();
+            assert_eq!(
+                targets,
+                [
+                    "/.well-known/oauth-protected-resource",
+                    "/.well-known/oauth-protected-resource",
+                    "/.well-known/oauth-protected-resource/down",
+                    "/.well-known/oauth-protected-resource/mcp",
+                    "/.well-known/oauth-protected-resource/missing",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn probe_answers_go_stale_after_ten_minutes_or_one_when_unknown() {
+        let finished = Instant::now();
+        let mut started = Vec::new();
+        for (available, seconds) in [
+            (Some(true), 599),
+            (Some(false), 600),
+            (None, 59),
+            (None, 60),
+        ] {
+            let mut probe = Probe {
+                available,
+                finished: Some(finished),
+                running: false,
+            };
+            let now = finished.checked_add(Duration::from_secs(seconds)).unwrap();
+            started.push((probe.start(now), probe.start(now)));
+        }
+
+        assert_eq!(
+            started,
+            [(false, false), (true, false), (false, false), (true, false)]
+        );
+        assert!(Probe::default().start(finished));
     }
 }

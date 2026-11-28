@@ -24,6 +24,8 @@ use std::{
 };
 use url::{Host, Url};
 
+const RESOURCE_METADATA_MISSING: &str = "protected resource metadata was not found";
+
 #[derive(Clone)]
 pub struct OAuth {
     transport: Transport,
@@ -233,11 +235,14 @@ impl OAuth {
 
     /// Starts an authorization through endpoints this client can reach.
     ///
-    /// A protected resource's server must be [discovered](Self::discover) first.
+    /// A protected resource's server must be [discovered](Self::discover) first. Scopes a
+    /// service asked for take precedence over the declared scopes, and declared scopes
+    /// over those a resource advertises.
     pub fn authorize(
         &self,
         config: &OAuthConfig,
         metadata: Option<Metadata>,
+        requested: &[String],
         registration: Option<&Registration>,
         redirect_uri: Url,
     ) -> Result<Authorization, AuthenticationError> {
@@ -245,7 +250,12 @@ impl OAuth {
         let (url, server) = match (&config.server, metadata) {
             (OAuthServer::Endpoints(endpoints), None) => {
                 self.endpoint(&endpoints.token_url, Reach::Declared)?;
-                parameters.insert("scope".to_owned(), config.scopes.join(" "));
+                let scopes = if requested.is_empty() {
+                    &config.scopes
+                } else {
+                    requested
+                };
+                parameters.insert("scope".to_owned(), scopes.join(" "));
                 if let Some(resource) = &endpoints.resource {
                     parameters.insert("resource".into(), resource.clone());
                 }
@@ -253,12 +263,10 @@ impl OAuth {
                 (url, None)
             }
             (OAuthServer::Resource(resource), Some(metadata)) => {
-                let scopes = if config.scopes.is_empty() {
-                    &metadata.scopes
-                } else {
-                    &config.scopes
-                };
-                if !scopes.is_empty() {
+                if let Some(scopes) = [requested, &config.scopes, &metadata.scopes]
+                    .into_iter()
+                    .find(|scopes| !scopes.is_empty())
+                {
                     parameters.insert("scope".into(), scopes.join(" "));
                 }
                 parameters.insert("resource".into(), resource.clone());
@@ -353,9 +361,7 @@ impl OAuth {
             form.push(("resource", resource));
         }
         let mut response = self.token(server, registration, &form).await?;
-        if let Server::Discovered(..) = server
-            && response.scope.is_none()
-        {
+        if response.scope.is_none() {
             response.scope.clone_from(&authorization.scope);
         }
         if let Server::Declared(OAuthEndpoints {
@@ -438,7 +444,7 @@ impl OAuth {
             .is_success())
     }
 
-    /// Requests tokens, reporting a rejected dynamic registration.
+    /// Requests tokens, reporting a rejected grant or dynamic registration.
     async fn token(
         &self,
         server: Server<'_>,
@@ -449,11 +455,15 @@ impl OAuth {
             .send(server.token_url(), Some(Body::Form(form)), server.reach())
             .await?;
         if !response.is_success()
-            && registration.redirect_uri.is_some()
-            && serde_json::from_slice::<TokenError>(&response.body)
-                .is_ok_and(|error| error.error == "invalid_client")
+            && let Ok(error) = serde_json::from_slice::<TokenError>(&response.body)
         {
-            return Err(AuthenticationError::ClientRejected);
+            match error.error.as_str() {
+                "invalid_client" if registration.redirect_uri.is_some() => {
+                    return Err(AuthenticationError::ClientRejected);
+                }
+                "invalid_grant" => return Err(AuthenticationError::GrantRejected),
+                _ => {}
+            }
         }
         read_json(&response)
     }
@@ -494,32 +504,20 @@ impl OAuth {
 
     /// Discovers the authorization server of a protected resource.
     ///
-    /// Returns nothing for declared endpoints.
+    /// Resource metadata is read first from the `recorded` URL a service gave. Returns
+    /// nothing for declared endpoints.
     pub async fn discover(
         &self,
         config: &OAuthConfig,
         origins: &[WasmOrigin],
+        recorded: Option<&str>,
     ) -> Result<Option<Metadata>, AuthenticationError> {
         let OAuthServer::Resource(resource) = &config.server else {
             return Ok(None);
         };
         let reach = Reach::Public(origins);
-        let url = self.endpoint(resource, reach)?;
-        let (issuer, scopes) = self
-            .metadata(
-                crate::oauth_discovery::resource_metadata_urls(&url),
-                reach,
-                "protected resource metadata was not found",
-                "protected resource metadata is invalid",
-                |metadata: ResourceMetadata| metadata.issuer(resource),
-            )
-            .await?;
+        let (issuer, scopes) = self.resource_metadata(resource, reach, recorded).await?;
         let url = self.endpoint(&issuer, reach)?;
-        if url.query().is_some() {
-            return Err(AuthenticationError::Invalid(
-                "authorization server issuer must not contain a query",
-            ));
-        }
         let (server, authorization_endpoint, clients) = self
             .metadata(
                 crate::oauth_discovery::server_metadata_urls(&url),
@@ -539,6 +537,70 @@ impl OAuth {
             scopes,
             clients,
         }))
+    }
+
+    /// Returns whether a protected resource publishes valid metadata, or nothing when
+    /// that is unknown.
+    ///
+    /// Metadata is read as for [`discover`](Self::discover), but only from the sandbox's
+    /// provider or origins in the provider's HTTP grant, since nobody asked for the check.
+    pub async fn offers_sign_in(
+        &self,
+        resource: &str,
+        origins: &[WasmOrigin],
+        recorded: Option<&str>,
+    ) -> Option<bool> {
+        let unattended = |url: &str| {
+            matches!(self.transport, Transport::Sandbox(_))
+                || endpoint(url)
+                    .is_ok_and(|url| matches!(crate::oauth::granted(&url, origins), Ok(true)))
+        };
+        if !unattended(resource) {
+            return None;
+        }
+        let recorded = recorded.filter(|url| unattended(url));
+        match self
+            .resource_metadata(resource, Reach::Public(origins), recorded)
+            .await
+        {
+            Ok(_) => Some(true),
+            Err(AuthenticationError::Invalid(RESOURCE_METADATA_MISSING)) => Some(false),
+            Err(_) => None,
+        }
+    }
+
+    /// Reads a protected resource's metadata, returning its first server's issuer and the
+    /// supported scopes.
+    ///
+    /// A document whose issuer this client cannot reach is invalid.
+    async fn resource_metadata(
+        &self,
+        resource: &str,
+        reach: Reach<'_>,
+        recorded: Option<&str>,
+    ) -> Result<(String, Vec<String>), AuthenticationError> {
+        let url = self.endpoint(resource, reach)?;
+        let mut urls = crate::oauth_discovery::resource_metadata_urls(&url);
+        if let Some(recorded) = recorded.and_then(|url| Url::parse(url).ok()) {
+            urls.retain(|url| *url != recorded);
+            urls.insert(0, recorded);
+        }
+        self.metadata(
+            urls,
+            reach,
+            RESOURCE_METADATA_MISSING,
+            "protected resource metadata is invalid",
+            |metadata: ResourceMetadata| {
+                let (issuer, scopes) = metadata.issuer(resource)?;
+                if self.endpoint(&issuer, reach)?.query().is_some() {
+                    return Err(AuthenticationError::Invalid(
+                        "authorization server issuer must not contain a query",
+                    ));
+                }
+                Ok((issuer, scopes))
+            },
+        )
+        .await
     }
 
     /// Reads the first metadata document that is valid.
@@ -856,7 +918,8 @@ fn tokens(
     })
 }
 
-fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
+/// Parses an HTTP or HTTPS URL without credentials or a fragment.
+pub fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
     let url =
         Url::parse(value).map_err(|_| AuthenticationError::Invalid("invalid OAuth endpoint"))?;
     if !matches!(url.scheme(), "http" | "https")

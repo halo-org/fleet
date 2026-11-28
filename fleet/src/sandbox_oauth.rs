@@ -423,9 +423,9 @@ mod tests {
         let resource = |base: &str| config(OAuthServer::Resource(format!("{base}/resource")));
         let oauth = OAuth::sandbox(provider.clone());
         let authorize = |config| {
-            let metadata = oauth.discover(&config, &[]).now_or_never().unwrap()?;
+            let metadata = oauth.discover(&config, &[], None).now_or_never().unwrap()?;
             let redirect_uri = "http://127.0.0.1:9/callback".parse().unwrap();
-            oauth.authorize(&config, metadata, None, redirect_uri)
+            oauth.authorize(&config, metadata, &[], None, redirect_uri)
         };
 
         let response = provider.handle(&Method::GET, &external.parse().unwrap());

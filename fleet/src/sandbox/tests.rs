@@ -703,6 +703,7 @@ fn sign_in_discovers_the_resource_server_and_receives_the_callback() {
     run(async |fleet| {
         let connection = "/connections/sandbox:account";
         let credential = json!({ "credential": true });
+        tokio::task::yield_now().await;
         let (status, connections) = call(fleet, "GET", "/connections", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
@@ -712,6 +713,7 @@ fn sign_in_discovers_the_resource_server_and_receives_the_callback() {
                 "title": "Sign in to the resource",
                 "kind": "oauth",
                 "resource": "http://127.0.0.1:1337/sandbox/oauth/resource",
+                "available": true,
             })
         );
 

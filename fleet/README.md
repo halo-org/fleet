@@ -180,8 +180,7 @@ gives another server's authorization endpoint, and only `iss` shows which server
 answered.
 
 Fleet keeps any query in an authorization endpoint and refuses one that names a
-parameter Fleet or the plugin sets. Tokens issued without a lifetime are refreshed
-only when the plugin reports them rejected.
+parameter Fleet or the plugin sets.
 
 ### Clients
 
@@ -271,6 +270,70 @@ outside the list ignore proxy settings, since a proxy would choose the address.
 The authorization URL given to the browser must also use HTTPS unless the list
 allows its origin, and an IP address there must be public. Fleet does not connect
 to it, so it cannot check where the browser's name lookups lead.
+
+### Rejected requests
+
+Plugins report a request the service rejected with `credentials.reject`, passing
+the access token the request carried and the response's `WWW-Authenticate` value,
+if any. The result says whether to retry with the current credentials:
+
+- A token other than the current one gives true without renewing. The retry
+  carries the current token.
+- For `insufficient_scope`, the credential stays in place and the result is false.
+  Fleet never starts a sign-in itself.
+- Otherwise Fleet renews the current token, and the result says whether a new
+  token was obtained.
+- When renewal needs a sign-in, because there is no refresh token or the server
+  answers `invalid_grant`, Fleet discards the credential, keeping client
+  registrations, so the connection reports signed out. The result is false. Other
+  renewal failures leave the credential in place and are returned as errors.
+- API keys and connections without a credential give false.
+
+`credentials.get` renews tokens that are about to expire. A token without a
+refresh token is returned as is until it expires. Once it has expired, or when
+the server answers `invalid_grant`, Fleet discards the credential in the same way
+and returns no credential, as for a signed-out connection. Other renewal failures
+leave the credential in place and are returned as errors. Tokens issued without a
+lifetime are renewed only when the plugin reports them rejected.
+
+### Challenges
+
+Fleet records what a rejection's challenge asks for and uses it at the next
+sign-in, but only for the current token, or for a request without a token when
+the connection has no credential. A challenge for another token is not recorded,
+since it may come from an earlier sign-in. Fleet reads the first `Bearer` challenge (RFC 6750) and treats a value it
+cannot parse as no challenge. It never logs or stores the header.
+
+Scopes the challenge names that the credential was not granted are recorded with
+the connection, which `GET /connections` reports as `requested_scopes`. The next
+sign-in requests them together with the scopes the method's credential was
+granted and those the method requires, ahead of declared and advertised scopes. A
+sign-in started again for the same method and redirect URI returns the pending
+attempt as is, so scopes recorded after it started apply to the next attempt. A
+sign-in clears the scopes it requested once it succeeds, and signing out or saving
+an API key clears them all. A token response without `scope` grants the requested
+scopes, as RFC 6749 allows.
+
+When the challenge names `resource_metadata` (RFC 9728) and the credential's
+method, or without a credential the connection's methods, name exactly one
+protected resource, Fleet keeps that URL for the resource. Its sign-in reads the
+resource metadata there first, with the same restrictions and checks, and falls
+back to the well-known locations.
+
+### Availability
+
+The methods of a protected resource report `available` as `true` when valid
+metadata was found or a challenge named its location, and `false` when no
+location had any. While unknown, such as after a network or server error, an
+invalid document or for a resource outside the provider's `http` capability,
+`available` is omitted.
+
+Fleet checks in the background whether each protected resource publishes
+metadata: at startup, and when `GET /connections` finds the last answer older
+than ten minutes, or older than a minute if it was unknown. `GET /connections`
+reports the last answer without waiting for these checks. Since nobody asked for
+them, they reach only origins in the provider's `http` capability, or the
+sandbox's provider. Answers are kept in memory only.
 
 ## Sandbox
 
