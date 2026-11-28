@@ -51,10 +51,13 @@ import every interface Fleet provides, so one plugin can serve providers with
 different approvals. Without approval, Fleet interfaces deny every call, no
 directories are visible and HTTP requests are denied. A component with imports
 Fleet cannot satisfy fails to load. HTTP lists the
-origins that outgoing requests may use, each a scheme, host and optional port.
+origins that outgoing requests may use, each `http` or `https`, a host and an
+optional port from 1 to 65535 without leading zeros, as in `http://127.0.0.1:8080`.
+A host is a domain name of ASCII letters, digits, hyphens and underscores without
+a trailing dot, an IPv4 address or an IPv6 address in brackets.
 A host starting with `*.`, as in `https://*.example.com`, covers subdomains at
 any depth but not the domain itself. Its last label must start with a letter.
-Requests to other origins are denied.
+Hosts are compared as text, ignoring case. Requests to other origins are denied.
 Credentials enables access to that provider's saved credentials.
 Filesystem access uses a `filesystem` array of mounts:
 
