@@ -1,8 +1,7 @@
 use crate::{
     Config, HostBlobs, HostCredentials, ModelsError, OpenAi, WasiHttp, bindings,
     bindings::{
-        exports::fleet::providers::models::Guest,
-        fleet::providers::{configuration, types},
+        exports::fleet::providers::models::Guest, fleet::common::types, fleet::host::configuration,
     },
 };
 use core::pin::pin;

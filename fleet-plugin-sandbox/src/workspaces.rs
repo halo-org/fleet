@@ -2,7 +2,7 @@ use crate::{
     Sandbox, WorkspacesError, WorkspacesErrorKind,
     bindings::{
         exports::fleet::providers::workspaces::Guest,
-        fleet::providers::types::{
+        fleet::common::types::{
             CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
             WorkspaceOutput, WorkspaceWrite,
         },

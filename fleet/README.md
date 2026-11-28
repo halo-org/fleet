@@ -82,7 +82,7 @@ agent has been settled this many milliseconds, as described in
 [Workspaces](#workspaces).
 
 Approve `"workers": true` in a provider's capabilities to let it retain private WASM
-workers between calls. The component must import `fleet:providers/workers@0.0.0`
+workers between calls. The component must import `fleet:host/workers@0.0.0`
 and export `fleet:providers/worker@0.0.0` alongside its normal provider interfaces.
 Workers belong to a configured provider, not to the compiled plugin or another
 namespace. Other plugins continue to use its normal interfaces.
@@ -91,8 +91,9 @@ Workers receive their provider's static capabilities, but no blob access or
 ability to start nested workers. They have no automatic idle timeout; plugins may
 retire idle workers themselves. Fleet stops worker admission during shutdown and
 allows five seconds for cleanup before dropping their instances. Worker state does
-not survive a restart. See `fleet-wasm/wit/workers.wit` for the connection contract
-and resource limits. Ordinary calls run without fuel instrumentation; worker
+not survive a restart. See `fleet-wasm/wit/host/workers.wit` and
+`fleet-wasm/wit/providers/worker.wit` for the connection contract and resource
+limits. Ordinary calls run without fuel instrumentation; worker
 execution uses a separately compiled variant that yields for bounded shutdown.
 
 Approve `"process": true` to let a provider run any program on the host, outside
@@ -319,7 +320,7 @@ They do not add validation to core.
 ### Plugin access
 
 Approve `"roles": true` in a provider's `capabilities` and have its component import
-`fleet:providers/roles@0.0.0`. Tool calls can then list, read, write and delete every stored
+`fleet:host/roles@0.0.0`. Tool calls can then list, read, write and delete every stored
 role. Use `"roles": "read"` to allow discovery without writes or deletes.
 Model calls and metadata lookups receive no role access. Fleet accepts only valid names and
 roles that the API can represent as definitions. Idempotency keys are scoped to the provider
@@ -381,7 +382,7 @@ updated WIT files before using this version.
 ## Subagents
 
 Approve `"agents": true` in a provider's capabilities and import
-`fleet:providers/agents@0.0.0`. Tool calls can create agents, queue messages, read
+`fleet:host/agents@0.0.0`. Tool calls can create agents, queue messages, read
 permitted history and wait for the first turn end after a message is consumed.
 Metadata access covers relatives; history access covers the caller and its descendants.
 Workspace resolvers receive metadata access only. See [the agents plugin](../fleet-plugin-agents)
@@ -408,7 +409,7 @@ loads current role instances and enforces its approved provider list.
 ## Tool calls
 
 Approve `"tool_calls": true` in a provider's capabilities and import
-`fleet:providers/tool-calls@0.0.0`. A tool call can read the state of its agent's other
+`fleet:host/tool-calls@0.0.0`. A tool call can read the state of its agent's other
 unresolved tool calls, wait for that state to change and interrupt them. The driving call is
 excluded. Access closes once the driving call is absent, resolved or being interrupted.
 
@@ -574,7 +575,7 @@ protocol, not a tus-compatible endpoint.
 ### Plugin access
 
 Approve `"blobs": true` in a provider's `capabilities` and have its component import
-`fleet:providers/blobs@0.0.0`. The host supplies metadata, bounded reads, and immutable writes.
+`fleet:host/blobs@0.0.0`. The host supplies metadata, bounded reads, and immutable writes.
 Model generation and compaction get read-only access to the configured blob provider, including
 older blobs that are no longer in the current input. Compaction does not revoke access.
 Tools get access to the executing agent's attachments and can create new blobs. They can also

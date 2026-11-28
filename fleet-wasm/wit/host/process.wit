@@ -1,3 +1,5 @@
+package fleet:host@0.0.0;
+
 /// Runs programs on the host.
 ///
 /// Programs use host paths and permissions, independently of WASI filesystem mounts.

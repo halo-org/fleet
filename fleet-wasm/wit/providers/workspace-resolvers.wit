@@ -1,0 +1,30 @@
+package fleet:providers@0.0.0;
+
+/// Selects workspace sources without file or process access.
+interface workspace-resolvers {
+    use fleet:common/types@0.0.0.{agent-id, configured, workspace, workspace-id, workspaces-error};
+
+    /// A live role reference or a concrete environment.
+    variant workspace-source {
+        agent(agent-id),
+        environment(tuple<configured, workspace-id>),
+    }
+
+    /// A source and a relative directory view.
+    record workspace-resolution {
+        source: workspace-source,
+        directory: option<string>,
+    }
+
+    /// Returns the resolver's metadata.
+    get: async func(name: string) -> result<option<workspace>, workspaces-error>;
+
+    /// Resolves the workspace of the subject, which may differ from the acting agent.
+    resolve: async func(subject: agent-id, workspace: configured)
+        -> result<workspace-resolution, workspaces-error>;
+}
+
+world workspace-resolver-provider {
+    import fleet:host/configuration@0.0.0;
+    export workspace-resolvers;
+}

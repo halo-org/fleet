@@ -1,10 +1,12 @@
+package fleet:providers@0.0.0;
+
 /// Provides access to tools.
 ///
 /// Tools should keep their output to a sensible size for a model's context. For outputs from
 /// execute and interrupted-output, the host keeps the start and end of text content over
 /// 128 KiB across all blocks. It drops structured content over 128 KiB of JSON.
 interface tools {
-    use types.{json-object, tool, tool-name, tool-context, tool-output};
+    use fleet:common/types@0.0.0.{json-object, tool, tool-name, tool-context, tool-output};
 
     /// The kind of error returned by a tools provider.
     enum tools-error-kind {
@@ -49,6 +51,6 @@ interface tools {
 
 /// A component that provides tools.
 world tool-provider {
-    import configuration;
+    import fleet:host/configuration@0.0.0;
     export tools;
 }

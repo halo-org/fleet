@@ -1,9 +1,11 @@
+package fleet:providers@0.0.0;
+
 /// Provides access to models.
 ///
 /// Use the input provenance to determine whether provider tool calls can be replayed.
 /// Omit incompatible calls or replace them with a text marker.
 interface models {
-    use types.{
+    use fleet:common/types@0.0.0.{
         model, model-name, model-context, model-continuation, model-input,
         model-response-chunk, model-compaction-response,
     };
@@ -63,6 +65,6 @@ interface models {
 
 /// A component that provides models.
 world model-provider {
-    import configuration;
+    import fleet:host/configuration@0.0.0;
     export models;
 }

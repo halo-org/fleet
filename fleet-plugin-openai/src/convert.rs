@@ -1,4 +1,4 @@
-use crate::bindings::fleet::providers::types;
+use crate::bindings::fleet::common::types;
 use fleet_core::{
     AgentId, BlobId, Configured, ContentBlock, JsonObject, Model, ModelCompaction,
     ModelCompactionResponse, ModelContext, ModelContinuation, ModelInput, ModelOutput,

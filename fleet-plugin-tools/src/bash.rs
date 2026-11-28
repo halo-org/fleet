@@ -78,7 +78,7 @@ pub async fn execute(
         timeout_ms: timeout,
         output_limit: config.output_limit.unwrap_or(65_536),
     };
-    let result = crate::workspace_access::exec(workspace, is_retry, command).await?;
+    let result = crate::workspace::exec(workspace, is_retry, command).await?;
     Ok(render(&result))
 }
 

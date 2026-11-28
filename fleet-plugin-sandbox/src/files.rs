@@ -3,7 +3,7 @@ use crate::{
     bindings::{
         self,
         exports::fleet::providers::worker::Guest,
-        fleet::providers::workers::{self, Connection, Listener},
+        fleet::host::workers::{self, Connection, Listener},
     },
 };
 use futures_util::future;

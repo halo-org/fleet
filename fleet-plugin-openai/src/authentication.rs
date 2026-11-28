@@ -5,7 +5,7 @@ use crate::{
             AuthenticationKind, AuthenticationMethod, Connection, Guest, OauthConfig,
             OauthRegistration,
         },
-        fleet::providers::credentials::{self, Credential},
+        fleet::host::credentials::{self, Credential},
     },
 };
 use core::fmt;

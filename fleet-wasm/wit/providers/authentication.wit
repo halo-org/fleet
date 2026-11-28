@@ -1,3 +1,5 @@
+package fleet:providers@0.0.0;
+
 /// Declares connections used by a provider.
 interface authentication {
     /// Client registration completed during authorization.
@@ -70,38 +72,8 @@ interface authentication {
     connections: async func(host-id: string) -> result<list<connection>, string>;
 }
 
-/// Provides credentials for this provider's connections.
-interface credentials {
-    /// An OAuth access token and optional identity token.
-    record oauth-credential {
-        /// The access token.
-        access-token: string,
-        /// The identity token returned by the provider.
-        id-token: option<string>,
-    }
-
-    /// Credentials for a connection.
-    variant credential {
-        /// A key supplied by the user.
-        api-key(string),
-        /// An OAuth access token and optional identity token.
-        oauth(oauth-credential),
-    }
-
-    /// Returns current credentials, refreshing expired tokens if needed.
-    get: async func(name: string) -> result<option<credential>, string>;
-
-    /// Refreshes a rejected access token if it is still current.
-    refresh: async func(name: string, rejected: string) -> result<bool, string>;
-}
-
 /// A component that declares authentication methods.
 world authentication-provider {
-    import configuration;
+    import fleet:host/configuration@0.0.0;
     export authentication;
-}
-
-/// A host that provides credentials.
-world credential-host {
-    import credentials;
 }

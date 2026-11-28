@@ -4,10 +4,8 @@ use crate::{
         exports::fleet::providers::workspace_resolvers::{
             Guest, WorkspaceResolution, WorkspaceSource,
         },
-        fleet::providers::{
-            agents,
-            types::{Workspace, WorkspacesError, WorkspacesErrorKind},
-        },
+        fleet::common::types::{Workspace, WorkspacesError, WorkspacesErrorKind},
+        fleet::host::agents,
     },
 };
 use fleet_kit::{AgentParent, Extension as _};

@@ -1,3 +1,5 @@
+package fleet:host@0.0.0;
+
 /// Tool calls of the calling agent, within its driving tool call.
 ///
 /// Access closes once the driving call is absent, resolved or being interrupted. The driving call
@@ -13,7 +15,7 @@
 /// the agent's role or the tool declarations change. Waits on these conditions do not depend on
 /// timing.
 interface tool-calls {
-    use types.{tool-alias, tool-call-id};
+    use fleet:common/types@0.0.0.{tool-alias, tool-call-id};
 
     /// A revision of the agent's stored state.
     record revision {

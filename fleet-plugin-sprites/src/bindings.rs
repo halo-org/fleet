@@ -5,7 +5,12 @@
 )]
 
 wit_bindgen::generate!({
-    path: ["../fleet-wasm/wit", "wit"],
+    path: [
+        "../fleet-wasm/wit/common",
+        "../fleet-wasm/wit/host",
+        "../fleet-wasm/wit/providers",
+        "wit",
+    ],
     world: "fleet:plugin-sprites/plugin@0.0.0",
     generate_all,
 });

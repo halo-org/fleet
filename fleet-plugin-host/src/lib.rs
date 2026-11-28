@@ -10,7 +10,7 @@ mod workspaces;
 use self::workspaces::Host;
 
 pub(crate) use self::{
-    bindings::fleet::providers::types::{
+    bindings::fleet::common::types::{
         CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
         WorkspaceOutput, WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
     },

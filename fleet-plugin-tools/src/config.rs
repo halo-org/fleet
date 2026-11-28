@@ -1,4 +1,4 @@
-use crate::{ToolContext, ToolsError, ToolsErrorKind, bindings::fleet::providers::configuration};
+use crate::{ToolContext, ToolsError, ToolsErrorKind, bindings::fleet::host::configuration};
 use serde::Deserialize;
 
 #[derive(Default, Deserialize)]

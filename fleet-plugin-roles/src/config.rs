@@ -1,4 +1,4 @@
-use crate::{ToolsError, ToolsErrorKind, bindings::fleet::providers::configuration};
+use crate::{ToolsError, ToolsErrorKind, bindings::fleet::host::configuration};
 use serde::Deserialize;
 
 /// The provider config.

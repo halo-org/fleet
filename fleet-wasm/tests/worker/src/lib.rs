@@ -9,7 +9,7 @@ mod component {
     )]
     mod bindings {
         wit_bindgen::generate!({
-            path: ["../../wit", "wit"],
+            path: ["../../wit/common", "../../wit/host", "../../wit/providers", "wit"],
             world: "fleet:test-worker/plugin@0.0.0",
             generate_all,
         });
@@ -17,10 +17,8 @@ mod component {
 
     use bindings::{
         exports::fleet::providers::{prompts, worker},
-        fleet::providers::{
-            types::{ContentBlock, Prompt, PromptContext, PromptOutput, PromptResponse},
-            workers::{self, Connection, Listener},
-        },
+        fleet::common::types::{ContentBlock, Prompt, PromptContext, PromptOutput, PromptResponse},
+        fleet::host::workers::{self, Connection, Listener},
     };
     use futures_util::future;
     use wit_bindgen::{StreamReader, StreamResult};

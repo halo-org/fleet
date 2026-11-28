@@ -7,15 +7,14 @@ mod workspaces;
 pub(crate) use self::{
     bindings::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
-        fleet::providers::{
+        fleet::common::types::{
+            AgentId, BlobId, Configured, ContentBlock, ModelOutput, Tool, ToolContext, ToolOutput,
+        },
+        fleet::host::{
             agents::{self, AgentsError, EventDirection, EventPayload, EventQuery, TurnEnd},
             blobs::{self, BlobsErrorKind},
             roles,
             tool_calls::{self, TaskStatus, ToolCallsErrorKind},
-            types::{
-                AgentId, BlobId, Configured, ContentBlock, ModelOutput, Tool, ToolContext,
-                ToolOutput,
-            },
         },
     },
     config::Config,

@@ -57,7 +57,7 @@ configured, add:
 ```
 
 The capability lists the workspace providers and resolvers that tool calls may use
-to open the acting agent's workspace through `fleet:providers/workspace-access`.
+to open the acting agent's workspace through `fleet:host/workspace`.
 Fleet loads those providers first and rejects missing or cyclic dependencies.
 These can be any workspace providers, including remote ones.
 

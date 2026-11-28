@@ -1,6 +1,8 @@
+package fleet:host@0.0.0;
+
 /// Agent access scoped to a caller and its driving tool call.
 interface agents {
-    use types.{
+    use fleet:common/types@0.0.0.{
         json-object, agent-id, configured, content-block, model-input, model-response,
         model-usage, tool-call, tool-result,
     };

@@ -21,7 +21,7 @@
 //! program or only the exact commands listed in [`WasmProcessAccess`].
 //! Blob imports delegate through [`WasmBlobs`]. Model calls can
 //! read only their input's blob references and cannot write. Tool access is supplied by an
-//! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
+//! agent-scoped factory. A plugin must declare the `fleet:host/blobs` import to use it.
 //! Metadata lookups receive no blob capability. Role imports delegate to an agent-scoped
 //! [`fleet_kit::RoleStore`] through [`WasmRoles`] and are available only to tool calls.
 //! [`WasmAgents`] binds agent access to tool calls or metadata-only workspace resolution.
@@ -32,7 +32,7 @@
 //! # Private workers
 //!
 //! With [`WasmCapabilities::workers`] enabled, a component that imports
-//! `fleet:providers/workers` must export `fleet:providers/worker` alongside its ordinary
+//! `fleet:host/workers` must export `fleet:providers/worker` alongside its ordinary
 //! provider interfaces. `connect` starts or reuses a worker instance by a private key.
 //! Clones of a configured provider share workers; separately configured providers do not.
 //! Other plugins continue to use the ordinary provider interfaces, not worker identities.

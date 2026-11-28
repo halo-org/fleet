@@ -1,5 +1,5 @@
 use crate::{
-    WorkspaceId, WorkspacesError, WorkspacesErrorKind, bindings::fleet::providers::configuration,
+    WorkspaceId, WorkspacesError, WorkspacesErrorKind, bindings::fleet::host::configuration,
 };
 use percent_encoding::{AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};

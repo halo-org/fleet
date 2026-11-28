@@ -1,0 +1,21 @@
+package fleet:providers@0.0.0;
+
+/// The private worker entrypoint of a provider component.
+interface worker {
+    use fleet:host/workers@0.0.0.{listener};
+
+    /// Runs until retired, stopped or failed.
+    ///
+    /// Keep processing I/O and connections between provider calls. Idle retirement is
+    /// the worker's policy. Listener closure requests shutdown; the host allows five
+    /// seconds for cleanup before dropping the instance. Returning closes all connections.
+    /// Workers have a 64 MiB limit per linear memory. No state survives host shutdown.
+    run: async func(initialization: list<u8>, incoming: listener) -> result<_, string>;
+}
+
+/// A component that can run private workers.
+world worker-provider {
+    import fleet:host/configuration@0.0.0;
+    import fleet:host/workers@0.0.0;
+    export worker;
+}

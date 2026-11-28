@@ -1,4 +1,4 @@
-use crate::bindings::fleet::providers::blobs;
+use crate::bindings::fleet::host::blobs;
 use fleet_core::BlobId;
 use fleet_kit::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions};
 

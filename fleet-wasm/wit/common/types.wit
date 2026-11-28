@@ -1,6 +1,6 @@
-package fleet:providers@0.0.0;
+package fleet:common@0.0.0;
 
-/// Types shared by providers.
+/// Types shared by provider and host interfaces.
 interface types {
     /// A JSON object encoded as a string.
     type json-object = string;
