@@ -237,14 +237,26 @@ impl WasmProvider {
                             auth::AuthenticationKind::Oauth(config) => {
                                 fleet_kit::AuthenticationKind::OAuth(Box::new(
                                     fleet_kit::OAuthConfig {
-                                        authorization_url: config.authorization_url,
-                                        token_url: config.token_url,
+                                        server: match config.server {
+                                            auth::OauthServer::Endpoints(endpoints) => {
+                                                fleet_kit::OAuthServer::Endpoints(
+                                                    fleet_kit::OAuthEndpoints {
+                                                        authorization_url: endpoints
+                                                            .authorization_url,
+                                                        token_url: endpoints.token_url,
+                                                        resource: endpoints.resource,
+                                                        issuer: endpoints.issuer,
+                                                    },
+                                                )
+                                            }
+                                            auth::OauthServer::Resource(resource) => {
+                                                fleet_kit::OAuthServer::Resource(resource)
+                                            }
+                                        },
                                         client_id: config.client_id,
                                         redirect_uri: config.redirect_uri,
                                         scopes: config.scopes,
                                         parameters: config.parameters,
-                                        resource: config.resource,
-                                        issuer: config.issuer,
                                         registration: config.registration.map(|registration| {
                                             fleet_kit::OAuthRegistration {
                                                 client_id_parameter: registration

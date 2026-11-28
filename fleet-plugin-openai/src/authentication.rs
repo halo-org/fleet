@@ -3,7 +3,7 @@ use crate::{
     bindings::{
         exports::fleet::providers::authentication::{
             AuthenticationKind, AuthenticationMethod, Connection, Guest, OauthConfig,
-            OauthRegistration,
+            OauthEndpoints, OauthRegistration, OauthServer,
         },
         fleet::providers::credentials::{self, Credential},
     },
@@ -42,8 +42,12 @@ impl Guest for OpenAi {
                 name: CONNECTION.into(),
                 title: "Continue with ChatGPT".into(),
                 kind: AuthenticationKind::Oauth(OauthConfig {
-                    authorization_url: "https://auth.openai.com/api/accounts/authorize".into(),
-                    token_url: "https://auth.openai.com/api/accounts/oauth/token".into(),
+                    server: OauthServer::Endpoints(OauthEndpoints {
+                        authorization_url: "https://auth.openai.com/api/accounts/authorize".into(),
+                        token_url: "https://auth.openai.com/api/accounts/oauth/token".into(),
+                        resource: Some("https://api.openai.com/v1".into()),
+                        issuer: Some("https://auth.openai.com".into()),
+                    }),
                     client_id: "dynamic_agent_client".into(),
                     redirect_uri: "http://127.0.0.1:0/auth/callback".into(),
                     scopes: [
@@ -57,8 +61,6 @@ impl Guest for OpenAi {
                     .map(str::to_owned)
                     .to_vec(),
                     parameters: vec![("ext_agent_host_id".into(), host_id)],
-                    resource: Some("https://api.openai.com/v1".into()),
-                    issuer: Some("https://auth.openai.com".into()),
                     registration: Some(OauthRegistration {
                         client_id_parameter: "client_id".into(),
                         parameters: vec![("agent_name_hint".into(), "Fleet".into())],

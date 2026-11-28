@@ -134,6 +134,57 @@ also terminates remaining group members before returning. Other platforms return
 an error rather than falling back to child-only cleanup. Descendants must not
 daemonize or leave the group. Existing `process.spawn` remains child-only.
 
+## Connections
+
+Plugins declare connections to external services, each with sign-in methods that
+take an API key or use OAuth authorization with PKCE. `GET /connections` lists
+them without credentials. Providers approved for credentials read their own.
+
+### OAuth servers
+
+An OAuth method either declares its authorization server's endpoints or names a
+protected resource, whose authorization server Fleet discovers when a sign-in
+starts. The resource's methods report their `resource`, and its authorization
+attempts report the discovered `issuer`.
+
+Fleet reads the resource's metadata (RFC 9728) and then the server's metadata
+(RFC 8414 or OpenID Connect discovery). The resource metadata must name the
+resource exactly and list a server, the server metadata must name that issuer
+exactly, and the server must support PKCE with S256. Fleet keeps the discovered
+token and revocation endpoints with the credential, so renewal and sign-out do
+not repeat discovery, and a new sign-in discovers the server again. Until a
+sign-in obtains tokens, the current credential and the client it renews with stay
+as they were.
+
+Authorization, token and refresh requests for a resource include the resource.
+Without declared scopes, Fleet requests the scopes the resource advertises.
+
+The callback of a resource's sign-in, including an error response, must name the
+discovered issuer in `iss` (RFC 9207), whether or not the server advertises
+support. Otherwise the attempt fails. A resource can name an issuer whose metadata
+gives another server's authorization endpoint, and only `iss` shows which server
+answered.
+
+Fleet keeps any query in an authorization endpoint and refuses one that names a
+parameter Fleet or the plugin sets. Tokens issued without a lifetime are refreshed
+only when the plugin reports them rejected.
+
+### Requests to discovered servers
+
+Requests made for a resource's sign-in do not follow redirects and must use HTTPS
+to a public address unless the provider's `http` capability lists their origin.
+Declared endpoints are not restricted this way.
+
+Fleet checks the addresses it connects to, including every address a host name
+resolves to, and refuses loopback, private, link-local, shared, multicast and
+other addresses outside the public internet. A listed origin, such as
+`http://127.0.0.1:8080`, may use HTTP or a private address. Requests to origins
+outside the list ignore proxy settings, since a proxy would choose the address.
+
+The authorization URL given to the browser must also use HTTPS unless the list
+allows its origin, and an IP address there must be public. Fleet does not connect
+to it, so it cannot check where the browser's name lookups lead.
+
 ## Sandbox
 
 `fleet sandbox <directory>` runs Fleet without effects outside its process, for
@@ -153,7 +204,9 @@ own address; authorizations with other endpoints are rejected. Its `authorize`
 endpoint approves every request and redirects back immediately to a callback on
 127.0.0.1. Browsers reach it without the admin token. Fleet's requests to its
 `token` endpoint stay in process: codes are exchanged with PKCE, and refresh tokens
-rotate. Clients can pass their own redirect URI as usual, or Fleet listens for the
+rotate. The provider is also the authorization server of the protected resource
+`/sandbox/oauth/resource`, and serves the metadata for discovery in process as
+well. Clients can pass their own redirect URI as usual, or Fleet listens for the
 callback on a loopback port.
 
 [`fleet/sandbox`](sandbox) configures the agents, roles, tools and

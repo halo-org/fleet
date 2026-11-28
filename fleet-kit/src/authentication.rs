@@ -36,30 +36,50 @@ pub enum AuthenticationKind {
 }
 
 /// Settings for OAuth authorization with PKCE.
-///
-/// Endpoints should use HTTPS unless the network is trusted.
 #[derive(Clone, Debug)]
 pub struct OAuthConfig {
-    /// The authorization endpoint.
-    pub authorization_url: String,
-    /// The token endpoint.
-    pub token_url: String,
+    /// Where the authorization server comes from.
+    pub server: OAuthServer,
     /// The public client ID.
     pub client_id: String,
     /// The registered redirect URI. Port 0 means any port is registered.
     pub redirect_uri: String,
-    /// The requested scopes.
+    /// The requested scopes. Without any, a protected resource's advertised
+    /// scopes are requested.
     pub scopes: Vec<String>,
     /// Additional authorization parameters.
     pub parameters: Vec<(String, String)>,
-    /// The API resource requested during authorization and renewal.
-    pub resource: Option<String>,
-    /// The identity provider's issuer URL.
-    pub issuer: Option<String>,
     /// Client registration completed during authorization.
     pub registration: Option<OAuthRegistration>,
     /// Scopes that must be granted before credentials can be used.
     pub required_scopes: Vec<String>,
+}
+
+/// Where the authorization server comes from.
+#[derive(Clone, Debug)]
+pub enum OAuthServer {
+    /// Endpoints known in advance.
+    Endpoints(OAuthEndpoints),
+    /// A protected resource. Fleet discovers its authorization server.
+    ///
+    /// Discovered servers must use HTTPS at public addresses unless the
+    /// provider's HTTP grant allows their origin.
+    Resource(String),
+}
+
+/// Endpoints of an authorization server known in advance.
+///
+/// Endpoints should use HTTPS unless the network is trusted.
+#[derive(Clone, Debug)]
+pub struct OAuthEndpoints {
+    /// The authorization endpoint.
+    pub authorization_url: String,
+    /// The token endpoint.
+    pub token_url: String,
+    /// The API resource requested during authorization and renewal.
+    pub resource: Option<String>,
+    /// The identity provider's issuer URL.
+    pub issuer: Option<String>,
 }
 
 /// Client registration completed during authorization.

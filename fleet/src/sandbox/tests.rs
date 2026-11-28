@@ -699,6 +699,78 @@ fn sign_in_reaches_plugins_and_refreshes_tokens() {
 }
 
 #[test]
+fn sign_in_discovers_the_resource_server() {
+    run(async |fleet| {
+        let connection = "/connections/sandbox:account";
+        let credential = json!({ "credential": true });
+        let (status, connections) = call(fleet, "GET", "/connections", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            connections[0]["methods"][2],
+            json!({
+                "name": "resource",
+                "title": "Sign in to the resource",
+                "kind": "oauth",
+                "redirect_uri": "http://127.0.0.1:0/callback",
+                "resource": "http://127.0.0.1:1337/sandbox/oauth/resource",
+            })
+        );
+
+        let authorize =
+            json!({ "method": "resource", "redirect_uri": "http://127.0.0.1:9/callback" });
+        let (status, authorization) = call(
+            fleet,
+            "POST",
+            &format!("{connection}/authorizations"),
+            Some(&authorize),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            authorization["issuer"],
+            "http://127.0.0.1:1337/sandbox/oauth"
+        );
+        let url: Url = authorization["url"].as_str().unwrap().parse().unwrap();
+        let browser = Request::get(&url[url::Position::BeforePath..])
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let token = AdminToken::new(TOKEN.as_ref()).unwrap();
+        let redirect = crate::admin_auth::handle(token, fleet.clone(), browser)
+            .await
+            .unwrap();
+        let callback = json!({ "url": redirect.headers()[header::LOCATION].to_str().unwrap() });
+        let id = authorization["id"].as_str().unwrap();
+        let (status, completed) = call(
+            fleet,
+            "POST",
+            &format!("{connection}/authorizations/{id}/callback"),
+            Some(&callback),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["status"], "complete");
+        assert_eq!(completed["issuer"], "http://127.0.0.1:1337/sandbox/oauth");
+
+        start(fleet, "assistant", &credential).await;
+        assert_eq!(
+            reply(fleet).await,
+            "Signed in with OAuth token sandbox-access-1."
+        );
+        send(fleet, 2, &json!({ "refresh": true })).await;
+        assert_eq!(
+            reply(fleet).await,
+            "Signed in with OAuth token sandbox-access-2."
+        );
+        let (status, signed_out) =
+            call(fleet, "DELETE", &format!("{connection}/credential"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(signed_out, json!({ "revocation_confirmed": true }));
+        send(fleet, 3, &credential).await;
+        assert_eq!(reply(fleet).await, "Not signed in.");
+    });
+}
+
+#[test]
 fn plugins_reaching_outside_fleet_are_rejected() {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

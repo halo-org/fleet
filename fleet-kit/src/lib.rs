@@ -25,7 +25,7 @@ pub use self::{
     },
     authentication::{
         AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthConfig,
-        OAuthRegistration,
+        OAuthEndpoints, OAuthRegistration, OAuthServer,
     },
     blobs::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions, NoBlobs},
     extensions::Extension,

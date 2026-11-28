@@ -18,6 +18,7 @@ mod notification_api;
 mod notifications;
 mod oauth;
 mod oauth_callback;
+mod oauth_discovery;
 mod oci;
 mod plugin_roles;
 mod plugin_tool_calls;

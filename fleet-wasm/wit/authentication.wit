@@ -8,26 +8,44 @@ interface authentication {
         parameters: list<tuple<string, string>>,
     }
 
-    /// Settings for OAuth authorization with PKCE.
+    /// Endpoints of an authorization server known in advance.
     ///
     /// Endpoints should use HTTPS unless the network is trusted.
-    record oauth-config {
+    record oauth-endpoints {
         /// The authorization endpoint.
         authorization-url: string,
         /// The token endpoint.
         token-url: string,
-        /// The public client ID.
-        client-id: string,
-        /// The registered redirect URI. Port 0 means any port is registered.
-        redirect-uri: string,
-        /// The requested scopes.
-        scopes: list<string>,
-        /// Additional authorization parameters.
-        parameters: list<tuple<string, string>>,
         /// The API resource requested during authorization and renewal.
         %resource: option<string>,
         /// The identity provider's issuer URL.
         issuer: option<string>,
+    }
+
+    /// Where the authorization server comes from.
+    variant oauth-server {
+        /// Endpoints known in advance.
+        endpoints(oauth-endpoints),
+        /// A protected resource. Fleet discovers its authorization server.
+        ///
+        /// Discovered servers must use HTTPS at public addresses unless the
+        /// provider's HTTP grant allows their origin.
+        %resource(string),
+    }
+
+    /// Settings for OAuth authorization with PKCE.
+    record oauth-config {
+        /// Where the authorization server comes from.
+        server: oauth-server,
+        /// The public client ID.
+        client-id: string,
+        /// The registered redirect URI. Port 0 means any port is registered.
+        redirect-uri: string,
+        /// The requested scopes. Without any, a protected resource's advertised
+        /// scopes are requested.
+        scopes: list<string>,
+        /// Additional authorization parameters.
+        parameters: list<tuple<string, string>>,
         /// Client registration completed during authorization.
         registration: option<oauth-registration>,
         /// Scopes that must be granted before credentials can be used.

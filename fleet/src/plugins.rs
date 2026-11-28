@@ -279,13 +279,18 @@ pub async fn load(
             target: format!("provider {name}"),
             source,
         })?;
+        let origins = capabilities.http.clone();
         let provider = wasm
             .provider(component, &provider.config, capabilities)
             .map_err(|source| LoadError {
                 target: format!("provider {name}"),
                 source: source.into(),
             })?;
-        authentication.register(name, provider.connections(authentication.host_id()).await?)?;
+        authentication.register(
+            name,
+            &origins,
+            provider.connections(authentication.host_id()).await?,
+        )?;
         loaded.insert(name, provider);
     }
 

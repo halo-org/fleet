@@ -16,7 +16,9 @@ use url::Url;
 /// A simulated OAuth provider that approves every authorization.
 ///
 /// Browsers reach the authorization endpoint through Fleet's HTTP server. Fleet's OAuth
-/// client reaches every endpoint in process.
+/// client reaches every endpoint in process. The provider is also the authorization
+/// server of the protected resource at `resource` and publishes metadata for both.
+/// Callbacks for the resource name the issuer.
 #[derive(Clone)]
 pub struct SandboxOAuth {
     base: Url,
@@ -28,14 +30,20 @@ struct State {
     codes_issued: u64,
     tokens_issued: u64,
     codes: BTreeMap<String, Grant>,
-    refresh_tokens: BTreeMap<String, String>,
+    refresh_tokens: BTreeMap<String, Access>,
 }
 
 struct Grant {
     client_id: String,
     redirect_uri: String,
     code_challenge: String,
+    access: Access,
+}
+
+#[derive(Clone)]
+struct Access {
     scope: String,
+    resource: Option<String>,
 }
 
 impl SandboxOAuth {
@@ -82,8 +90,29 @@ impl SandboxOAuth {
         url: &Url,
         form: Option<&[(&str, &str)]>,
     ) -> Result<oauth::Response, AuthenticationError> {
-        let (status, body) = match (self.endpoint(url)?, form) {
+        let base = self.base.as_str();
+        let (status, body) = match (self.endpoint(url)?.as_str(), form) {
             ("/token", Some(form)) => self.token(form),
+            ("/revoke", Some(form)) => self.revoke(form),
+            ("/.well-known/oauth-protected-resource/resource", None) => (
+                StatusCode::OK,
+                json!({
+                    "resource": format!("{base}/resource"),
+                    "authorization_servers": [base],
+                    "scopes_supported": ["sandbox"],
+                }),
+            ),
+            ("/.well-known/oauth-authorization-server", None) => (
+                StatusCode::OK,
+                json!({
+                    "issuer": base,
+                    "authorization_endpoint": format!("{base}/authorize"),
+                    "token_endpoint": format!("{base}/token"),
+                    "revocation_endpoint": format!("{base}/revoke"),
+                    "code_challenge_methods_supported": ["S256"],
+                    "authorization_response_iss_parameter_supported": true,
+                }),
+            ),
             _ => (StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
         };
         Ok(oauth::Response {
@@ -94,13 +123,24 @@ impl SandboxOAuth {
 
     /// Returns the endpoint's path within the provider.
     ///
+    /// Metadata paths keep their well-known prefix.
+    ///
     /// # Errors
     ///
     /// Returns an error for URLs outside the provider.
-    pub fn endpoint<'a>(&self, url: &'a Url) -> Result<&'a str, AuthenticationError> {
+    pub fn endpoint(&self, url: &Url) -> Result<String, AuthenticationError> {
+        let path = url.path();
+        let (prefix, path) = [
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-authorization-server",
+        ]
+        .into_iter()
+        .find_map(|prefix| Some((prefix, path.strip_prefix(prefix)?)))
+        .unwrap_or(("", path));
         (url.origin() == self.base.origin())
-            .then(|| url.path().strip_prefix(self.base.path()))
+            .then(|| path.strip_prefix(self.base.path()))
             .flatten()
+            .map(|path| format!("{prefix}{path}"))
             .ok_or(AuthenticationError::Invalid(
                 "the sandbox only allows its own OAuth provider",
             ))
@@ -127,11 +167,19 @@ impl SandboxOAuth {
                 client_id: client_id.into(),
                 redirect_uri: redirect_uri.into(),
                 code_challenge: challenge.into(),
-                scope: parameter("scope").unwrap_or_default().into(),
+                access: Access {
+                    scope: parameter("scope").unwrap_or_default().into(),
+                    resource: parameter("resource").map(Into::into),
+                },
             });
         location.query_pairs_mut().append_pair("code", &code);
         if let Some(value) = parameter("state") {
             location.query_pairs_mut().append_pair("state", value);
+        }
+        if parameter("resource").is_some() {
+            location
+                .query_pairs_mut()
+                .append_pair("iss", self.base.as_str());
         }
         Ok(location)
     }
@@ -157,6 +205,17 @@ impl SandboxOAuth {
             Err(error) => (StatusCode::BAD_REQUEST, json!({ "error": error })),
         }
     }
+
+    fn revoke(&self, form: &[(&str, &str)]) -> (StatusCode, Value) {
+        if let Some((_, token)) = form.iter().find(|(name, _)| *name == "token") {
+            self.state
+                .lock()
+                .expect("sandbox OAuth lock is not poisoned")
+                .refresh_tokens
+                .remove(*token);
+        }
+        (StatusCode::OK, json!({}))
+    }
 }
 
 impl State {
@@ -169,7 +228,8 @@ impl State {
 
     /// Issues tokens for a code or refresh token, returning their number and scope.
     fn token(&mut self, form: &BTreeMap<&str, &str>) -> Result<(u64, String), &'static str> {
-        let scope = match form.get("grant_type").copied() {
+        let resource = form.get("resource").copied();
+        let access = match form.get("grant_type").copied() {
             Some("authorization_code") => {
                 let grant = form
                     .get("code")
@@ -184,20 +244,30 @@ impl State {
                 {
                     return Err("invalid_grant");
                 }
-                grant.scope
+                if grant.access.resource.as_deref() != resource {
+                    return Err("invalid_target");
+                }
+                grant.access
             }
-            Some("refresh_token") => form
-                .get("refresh_token")
-                .and_then(|token| self.refresh_tokens.remove(*token))
-                .ok_or("invalid_grant")?,
+            Some("refresh_token") => {
+                let token = form.get("refresh_token").copied().unwrap_or_default();
+                if self
+                    .refresh_tokens
+                    .get(token)
+                    .is_some_and(|access| access.resource.as_deref() != resource)
+                {
+                    return Err("invalid_target");
+                }
+                self.refresh_tokens.remove(token).ok_or("invalid_grant")?
+            }
             _ => return Err("unsupported_grant_type"),
         };
         self.tokens_issued = self.tokens_issued.saturating_add(1);
         self.refresh_tokens.insert(
             format!("sandbox-refresh-{}", self.tokens_issued),
-            scope.clone(),
+            access.clone(),
         );
-        Ok((self.tokens_issued, scope))
+        Ok((self.tokens_issued, access.scope))
     }
 }
 
@@ -205,7 +275,8 @@ impl State {
 mod tests {
     use super::*;
     use crate::oauth::OAuth;
-    use fleet_kit::OAuthConfig;
+    use fleet_kit::{OAuthConfig, OAuthEndpoints, OAuthServer};
+    use futures_util::FutureExt as _;
 
     fn provider() -> SandboxOAuth {
         SandboxOAuth::new("http://127.0.0.1:1337/sandbox/oauth".parse().unwrap())
@@ -286,37 +357,51 @@ mod tests {
         let external = "/sandbox/oauth/authorize?response_type=code&client_id=fleet\
                        &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
                        &code_challenge_method=S256&code_challenge=x";
-        let config = |base: &str| OAuthConfig {
-            authorization_url: format!("{base}/authorize"),
-            token_url: format!("{base}/token"),
+        let config = |server| OAuthConfig {
+            server,
             client_id: "fleet".into(),
             redirect_uri: "http://127.0.0.1:0/callback".into(),
             scopes: Vec::new(),
             parameters: Vec::new(),
-            resource: None,
-            issuer: None,
             registration: None,
             required_scopes: Vec::new(),
         };
+        let endpoints = |base: &str| {
+            config(OAuthServer::Endpoints(OAuthEndpoints {
+                authorization_url: format!("{base}/authorize"),
+                token_url: format!("{base}/token"),
+                resource: None,
+                issuer: None,
+            }))
+        };
+        let resource = |base: &str| config(OAuthServer::Resource(format!("{base}/resource")));
         let oauth = OAuth::sandbox(provider.clone());
-        let redirect_uri: Url = "http://127.0.0.1:9/callback".parse().unwrap();
+        let authorize = |config| {
+            let metadata = oauth.discover(&config, &[]).now_or_never().unwrap()?;
+            let redirect_uri = "http://127.0.0.1:9/callback".parse().unwrap();
+            oauth.authorize(&config, metadata, None, redirect_uri)
+        };
 
         let response = provider.handle(&Method::GET, &external.parse().unwrap());
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let authorization = oauth
-            .authorize(
-                &config("http://127.0.0.1:1337/sandbox/oauth"),
-                None,
-                redirect_uri.clone(),
-            )
-            .unwrap();
-        assert!(
-            authorization
-                .url
-                .starts_with("http://127.0.0.1:1337/sandbox/oauth/authorize?")
-        );
-        let outside = oauth.authorize(&config("https://example.com"), None, redirect_uri);
-        assert!(matches!(outside, Err(AuthenticationError::Invalid(_))));
+        for config in [
+            endpoints("http://127.0.0.1:1337/sandbox/oauth"),
+            resource("http://127.0.0.1:1337/sandbox/oauth"),
+        ] {
+            let authorization = authorize(config).unwrap();
+            assert!(
+                authorization
+                    .url
+                    .starts_with("http://127.0.0.1:1337/sandbox/oauth/authorize?")
+            );
+        }
+        for config in [
+            endpoints("https://example.com"),
+            resource("https://example.com"),
+        ] {
+            let error = authorize(config).err().unwrap();
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+        }
     }
 
     #[test]
