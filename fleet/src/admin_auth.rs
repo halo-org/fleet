@@ -75,6 +75,8 @@ where
     let result = match parts.uri.path() {
         "/health" => health(&parts.method),
         "/session" => session(&token, &parts, body).await,
+        "/oauth/callback" => crate::oauth_api::callback(&fleet, &parts).await,
+        "/oauth/client.json" => crate::oauth_api::client(&fleet, &parts.method),
         _ => match authorize(&token, &parts) {
             Ok(()) => return api::handle(fleet, Request::from_parts(parts, body)).await,
             Err(error) => Err(error),

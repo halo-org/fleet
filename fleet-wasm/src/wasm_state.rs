@@ -188,12 +188,15 @@ impl credentials::HostWithStore<WasmState> for HasSelf<WasmState> {
             }))
     }
 
-    async fn refresh(
+    async fn reject(
         store: &Accessor<WasmState, Self>,
         name: String,
-        rejected: String,
+        token: Option<String>,
+        challenge: Option<String>,
     ) -> Result<bool, String> {
-        credentials(store)?.refresh(&name, &rejected).await
+        credentials(store)?
+            .reject(&name, token.as_deref(), challenge.as_deref())
+            .await
     }
 }
 

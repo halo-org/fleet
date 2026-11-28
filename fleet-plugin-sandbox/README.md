@@ -52,7 +52,10 @@ beyond the command's limit keeps its head and tail.
 
 `account` accepts any API key. With an `oauth` base URL in the provider config,
 it also offers OAuth sign-in through that provider's `authorize` and `token`
-endpoints. Fleet's sandbox serves one at `/sandbox/oauth`.
+endpoints with a registered client, and a `resource` method that signs in to the
+protected resource at `resource` below the base URL. For `resource`, Fleet
+discovers the authorization server, identifies itself and receives the callback.
+Fleet's sandbox serves both at `/sandbox/oauth`.
 
 ## Build
 

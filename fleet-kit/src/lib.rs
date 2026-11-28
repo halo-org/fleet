@@ -24,8 +24,8 @@ pub use self::{
         agent_title,
     },
     authentication::{
-        AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthConfig,
-        OAuthRegistration,
+        AuthenticationKind, AuthenticationMethod, Connection, Credential, Credentials, OAuthClient,
+        OAuthConfig, OAuthEndpoints, OAuthRegisteredClient, OAuthRegistration, OAuthServer,
     },
     blobs::{BlobMetadata, Blobs, BlobsErrorKind, ImageDimensions, NoBlobs},
     extensions::Extension,

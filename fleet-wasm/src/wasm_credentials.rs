@@ -9,10 +9,11 @@ pub struct WasmCredentials(Arc<dyn CredentialsObject>);
 
 trait CredentialsObject: Send + Sync {
     fn get<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<Credential>, String>>;
-    fn refresh<'a>(
+    fn reject<'a>(
         &'a self,
         name: &'a str,
-        rejected: &'a str,
+        token: Option<&'a str>,
+        challenge: Option<&'a str>,
     ) -> BoxFuture<'a, Result<bool, String>>;
 }
 
@@ -26,8 +27,13 @@ impl WasmCredentials {
         self.0.get(name).await
     }
 
-    pub(crate) async fn refresh(&self, name: &str, rejected: &str) -> Result<bool, String> {
-        self.0.refresh(name, rejected).await
+    pub(crate) async fn reject(
+        &self,
+        name: &str,
+        token: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Result<bool, String> {
+        self.0.reject(name, token, challenge).await
     }
 }
 
@@ -42,13 +48,14 @@ impl<C: Credentials + Send + Sync> CredentialsObject for C {
         Box::pin(async move { self.get(name).await.map_err(|error| error.to_string()) })
     }
 
-    fn refresh<'a>(
+    fn reject<'a>(
         &'a self,
         name: &'a str,
-        rejected: &'a str,
+        token: Option<&'a str>,
+        challenge: Option<&'a str>,
     ) -> BoxFuture<'a, Result<bool, String>> {
         Box::pin(async move {
-            self.refresh(name, rejected)
+            self.reject(name, token, challenge)
                 .await
                 .map_err(|error| error.to_string())
         })

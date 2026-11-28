@@ -193,7 +193,8 @@ async fn stream_call(writer: &mut Writer, index: u32, call: ToolCall) -> Option<
 async fn refresh() -> Option<String> {
     match credentials::get(crate::CONNECTION.into()).await {
         Ok(Some(Credential::Oauth(credential))) => {
-            match credentials::refresh(crate::CONNECTION.into(), credential.access_token).await {
+            let token = Some(credential.access_token);
+            match credentials::reject(crate::CONNECTION.into(), token, None).await {
                 Ok(true) => None,
                 Ok(false) => Some("The OAuth token was not refreshed.".into()),
                 Err(error) => Some(format!("Could not refresh the OAuth token: {error}")),

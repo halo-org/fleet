@@ -42,7 +42,8 @@ type SendRequest = Box<
 >;
 
 impl WasmOrigin {
-    fn allows(&self, uri: &Uri) -> bool {
+    /// Returns whether a request to the URI targets this origin.
+    pub fn allows(&self, uri: &Uri) -> bool {
         uri.scheme() == Some(&self.scheme)
             && uri
                 .authority()

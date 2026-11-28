@@ -188,10 +188,11 @@ mod tests {
                 <Host as credentials::HostWithStore<WasmState>>::get(accessor, "key".into())
                     .await
                     .map(drop),
-                <Host as credentials::HostWithStore<WasmState>>::refresh(
+                <Host as credentials::HostWithStore<WasmState>>::reject(
                     accessor,
                     "key".into(),
-                    "token".into(),
+                    Some("token".into()),
+                    None,
                 )
                 .await
                 .map(drop),

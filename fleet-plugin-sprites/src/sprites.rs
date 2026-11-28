@@ -265,7 +265,7 @@ async fn send(request: &Request) -> Result<Response, WorkspacesError> {
     if response.status != 401 {
         return Ok(response);
     }
-    if credentials::refresh(CONNECTION.into(), key)
+    if credentials::reject(CONNECTION.into(), Some(key), None)
         .await
         .map_err(other)?
     {

@@ -8,28 +8,61 @@ interface authentication {
         parameters: list<tuple<string, string>>,
     }
 
-    /// Settings for OAuth authorization with PKCE.
+    /// Endpoints of an authorization server known in advance.
     ///
     /// Endpoints should use HTTPS unless the network is trusted.
-    record oauth-config {
+    record oauth-endpoints {
         /// The authorization endpoint.
         authorization-url: string,
         /// The token endpoint.
         token-url: string,
-        /// The public client ID.
-        client-id: string,
-        /// The registered redirect URI. Port 0 means any port is registered.
-        redirect-uri: string,
-        /// The requested scopes.
-        scopes: list<string>,
-        /// Additional authorization parameters.
-        parameters: list<tuple<string, string>>,
         /// The API resource requested during authorization and renewal.
         %resource: option<string>,
         /// The identity provider's issuer URL.
         issuer: option<string>,
+    }
+
+    /// Where the authorization server comes from.
+    variant oauth-server {
+        /// Endpoints known in advance.
+        endpoints(oauth-endpoints),
+        /// A protected resource. Fleet discovers its authorization server.
+        ///
+        /// Discovered servers must use HTTPS at public addresses unless the
+        /// provider's HTTP grant allows their origin.
+        %resource(string),
+    }
+
+    /// A client registered with the authorization server in advance.
+    record oauth-registered-client {
+        /// The public client ID.
+        client-id: string,
+        /// The registered redirect URI. Port 0 means any port is registered.
+        redirect-uri: string,
         /// Client registration completed during authorization.
         registration: option<oauth-registration>,
+    }
+
+    /// How Fleet is identified to the authorization server.
+    variant oauth-client {
+        /// A client registered in advance.
+        registered(oauth-registered-client),
+        /// Fleet identifies itself. Requires a protected resource server.
+        automatic,
+    }
+
+    /// Settings for OAuth authorization with PKCE.
+    record oauth-config {
+        /// Where the authorization server comes from.
+        server: oauth-server,
+        /// How Fleet is identified to the authorization server.
+        client: oauth-client,
+        /// The requested scopes. Without any, a protected resource's advertised
+        /// scopes are requested. Scopes a service asks for when rejecting a request
+        /// take precedence.
+        scopes: list<string>,
+        /// Additional authorization parameters.
+        parameters: list<tuple<string, string>>,
         /// Scopes that must be granted before credentials can be used.
         required-scopes: list<string>,
     }
@@ -91,8 +124,14 @@ interface credentials {
     /// Returns current credentials, refreshing expired tokens if needed.
     get: async func(name: string) -> result<option<credential>, string>;
 
-    /// Refreshes a rejected access token if it is still current.
-    refresh: async func(name: string, rejected: string) -> result<bool, string>;
+    /// Reports that the service rejected a request.
+    ///
+    /// `token` is the access token the request carried, if any. `challenge` is the value of
+    /// the response's WWW-Authenticate header, if any. Fleet renews a rejected token that is
+    /// still current, and records what the service asks for: sign-in, or further scopes.
+    /// Returns whether to retry with the credentials from get.
+    reject: async func(name: string, token: option<string>, challenge: option<string>)
+        -> result<bool, string>;
 }
 
 /// A component that declares authentication methods.

@@ -1,7 +1,17 @@
-use crate::{AuthenticationError, SandboxOAuth};
+use crate::{
+    AuthenticationError, SandboxOAuth,
+    oauth_client::{AutomaticClient, ClientIdentity, RegisteredClient},
+    oauth_discovery::{ClientSupport, ResourceMetadata, ServerMetadata},
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use core::time::Duration;
-use fleet_kit::OAuthConfig;
+use core::{
+    error::Error,
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
+};
+use fleet_kit::{OAuthClient, OAuthConfig, OAuthEndpoints, OAuthRegistration, OAuthServer};
+use fleet_wasm::WasmOrigin;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation,
     jwk::{JwkSet, KeyOperations, PublicKeyUse},
@@ -12,7 +22,9 @@ use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
 };
-use url::Url;
+use url::{Host, Url};
+
+const RESOURCE_METADATA_MISSING: &str = "protected resource metadata was not found";
 
 #[derive(Clone)]
 pub struct OAuth {
@@ -21,9 +33,63 @@ pub struct OAuth {
 
 #[derive(Clone)]
 enum Transport {
-    Network(reqwest::Client),
+    Network {
+        client: reqwest::Client,
+        public: reqwest::Client,
+    },
     Sandbox(SandboxOAuth),
 }
+
+/// The authorization server of a sign-in.
+#[derive(Clone, Copy)]
+pub enum Server<'a> {
+    /// Endpoints the plugin declared.
+    Declared(&'a OAuthEndpoints),
+    /// A server discovered for a protected resource, with the provider's HTTP grant.
+    Discovered(&'a Discovered, &'a [WasmOrigin]),
+}
+
+/// An authorization server discovered for a protected resource.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Discovered {
+    pub resource: String,
+    pub issuer: String,
+    pub token_endpoint: String,
+    pub revocation_endpoint: Option<String>,
+}
+
+/// What discovery found for a protected resource.
+pub struct Metadata {
+    server: Discovered,
+    authorization_endpoint: Url,
+    scopes: Vec<String>,
+    clients: ClientSupport,
+}
+
+/// The body of a request to an authorization server.
+#[derive(Clone, Copy)]
+pub enum Body<'a> {
+    /// A form.
+    Form(&'a [(&'a str, &'a str)]),
+    /// A JSON document.
+    Json(&'a serde_json::Value),
+}
+
+/// Which servers a request may reach.
+#[derive(Clone, Copy)]
+enum Reach<'a> {
+    /// Servers the plugin declared.
+    Declared,
+    /// Public HTTPS servers and origins in the provider's HTTP grant.
+    Public(&'a [WasmOrigin]),
+}
+
+/// Resolves host names to public addresses only.
+struct PublicResolver;
+
+/// A host name that resolves to no public address.
+#[derive(Debug)]
+struct NonPublicAddress;
 
 #[derive(Debug)]
 pub struct Response {
@@ -31,11 +97,16 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registration {
     pub client_id: String,
     pub subject: Option<String>,
     pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// The redirect URI a dynamically registered client was registered for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -43,7 +114,8 @@ pub struct Tokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
-    pub expires_at: u64,
+    /// When the access token expires, unless the server did not say.
+    pub expires_at: Option<u64>,
     pub scopes: Vec<String>,
 }
 
@@ -53,6 +125,8 @@ pub struct Authorization {
     pub redirect_uri: Url,
     pub verifier: String,
     pub nonce: String,
+    pub scope: Option<String>,
+    pub server: Option<Discovered>,
 }
 
 #[derive(Deserialize)]
@@ -61,8 +135,13 @@ struct TokenResponse {
     token_type: String,
     refresh_token: Option<String>,
     id_token: Option<String>,
-    expires_in: u64,
+    expires_in: Option<u64>,
     scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TokenError {
+    error: String,
 }
 
 #[derive(Deserialize)]
@@ -91,15 +170,59 @@ impl Response {
     }
 }
 
+impl Registration {
+    /// Returns whether the registration was issued by a discovered server, or by none.
+    pub fn issued_by(&self, server: Option<&Discovered>) -> bool {
+        self.issuer.as_deref() == server.map(|server| server.issuer.as_str())
+    }
+}
+
+impl<'a> Server<'a> {
+    /// Returns the issuer expected in authorization responses.
+    pub fn issuer(self) -> Option<&'a str> {
+        match self {
+            Self::Declared(endpoints) => endpoints.issuer.as_deref(),
+            Self::Discovered(server, _) => Some(&server.issuer),
+        }
+    }
+
+    fn token_url(self) -> &'a str {
+        match self {
+            Self::Declared(endpoints) => &endpoints.token_url,
+            Self::Discovered(server, _) => &server.token_endpoint,
+        }
+    }
+
+    fn resource(self) -> Option<&'a str> {
+        match self {
+            Self::Declared(endpoints) => endpoints.resource.as_deref(),
+            Self::Discovered(server, _) => Some(&server.resource),
+        }
+    }
+
+    const fn reach(self) -> Reach<'a> {
+        match self {
+            Self::Declared(_) => Reach::Declared,
+            Self::Discovered(_, origins) => Reach::Public(origins),
+        }
+    }
+}
+
 impl OAuth {
     pub fn new() -> Result<Self, AuthenticationError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
+        let builder = || {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(30))
+        };
+        let client = builder().build().map_err(transport_error)?;
+        let public = builder()
+            .no_proxy()
+            .dns_resolver(PublicResolver)
             .build()
             .map_err(transport_error)?;
         Ok(Self {
-            transport: Transport::Network(client),
+            transport: Transport::Network { client, public },
         })
     }
 
@@ -111,20 +234,118 @@ impl OAuth {
     }
 
     /// Starts an authorization through endpoints this client can reach.
+    ///
+    /// A protected resource's server must be [discovered](Self::discover) first. Scopes a
+    /// service asked for take precedence over the declared scopes, and declared scopes
+    /// over those a resource advertises.
     pub fn authorize(
         &self,
         config: &OAuthConfig,
+        metadata: Option<Metadata>,
+        requested: &[String],
         registration: Option<&Registration>,
         redirect_uri: Url,
     ) -> Result<Authorization, AuthenticationError> {
-        self.endpoint(&config.authorization_url)?;
-        self.endpoint(&config.token_url)?;
-        authorization(config, registration, redirect_uri)
+        let mut parameters = BTreeMap::new();
+        let (url, server) = match (&config.server, metadata) {
+            (OAuthServer::Endpoints(endpoints), None) => {
+                self.endpoint(&endpoints.token_url, Reach::Declared)?;
+                let scopes = if requested.is_empty() {
+                    &config.scopes
+                } else {
+                    requested
+                };
+                parameters.insert("scope".to_owned(), scopes.join(" "));
+                if let Some(resource) = &endpoints.resource {
+                    parameters.insert("resource".into(), resource.clone());
+                }
+                let url = self.endpoint(&endpoints.authorization_url, Reach::Declared)?;
+                (url, None)
+            }
+            (OAuthServer::Resource(resource), Some(metadata)) => {
+                if let Some(scopes) = [requested, &config.scopes, &metadata.scopes]
+                    .into_iter()
+                    .find(|scopes| !scopes.is_empty())
+                {
+                    parameters.insert("scope".into(), scopes.join(" "));
+                }
+                parameters.insert("resource".into(), resource.clone());
+                (metadata.authorization_endpoint, Some(metadata.server))
+            }
+            _ => {
+                return Err(AuthenticationError::Invalid(
+                    "authorization server was not discovered",
+                ));
+            }
+        };
+        let registration =
+            registration.filter(|registration| registration.issued_by(server.as_ref()));
+        let (client_id, initial) = match (&config.client, registration) {
+            (_, Some(registration)) => (&registration.client_id, None),
+            (OAuthClient::Registered(client), None) => {
+                (&client.client_id, client.registration.as_ref())
+            }
+            (OAuthClient::Automatic, None) => {
+                return Err(AuthenticationError::Invalid(
+                    "OAuth client was not identified",
+                ));
+            }
+        };
+        authorization(
+            config,
+            client_id,
+            initial,
+            redirect_uri,
+            url,
+            parameters,
+            server,
+        )
+    }
+
+    /// Identifies Fleet to a discovered server as an automatic client.
+    ///
+    /// A stored dynamic registration is reused for the same issuer and redirect URI.
+    pub async fn identify(
+        &self,
+        client: &AutomaticClient,
+        metadata: &Metadata,
+        stored: Option<&Registration>,
+        origins: &[WasmOrigin],
+    ) -> Result<Registration, AuthenticationError> {
+        let issuer = Some(metadata.server.issuer.clone());
+        let endpoint = match client.identity(&metadata.clients)? {
+            ClientIdentity::Document(client_id) => {
+                return Ok(Registration {
+                    client_id,
+                    issuer,
+                    ..Registration::default()
+                });
+            }
+            ClientIdentity::Registration(endpoint) => endpoint,
+        };
+        let redirect_uri = Some(client.redirect_uri().to_string());
+        if let Some(stored) = stored
+            && stored.issuer == issuer
+            && stored.redirect_uri == redirect_uri
+        {
+            return Ok(stored.clone());
+        }
+        let body = client.registration();
+        let response = self
+            .send(&endpoint, Some(Body::Json(&body)), Reach::Public(origins))
+            .await?;
+        Ok(Registration {
+            client_id: read_json::<RegisteredClient>(&response)?
+                .client_id(client.redirect_uri())?,
+            issuer,
+            redirect_uri,
+            ..Registration::default()
+        })
     }
 
     pub async fn exchange(
         &self,
-        config: &OAuthConfig,
+        server: Server<'_>,
         registration: &mut Registration,
         authorization: &Authorization,
         code: &str,
@@ -136,11 +357,18 @@ impl OAuth {
             ("code_verifier", &authorization.verifier),
             ("code", code),
         ];
-        if let Some(resource) = &config.resource {
+        if let Some(resource) = server.resource() {
             form.push(("resource", resource));
         }
-        let response = self.token(config, &form).await?;
-        if let Some(issuer) = &config.issuer {
+        let mut response = self.token(server, registration, &form).await?;
+        if response.scope.is_none() {
+            response.scope.clone_from(&authorization.scope);
+        }
+        if let Server::Declared(OAuthEndpoints {
+            issuer: Some(issuer),
+            ..
+        }) = server
+        {
             let token = response
                 .id_token
                 .as_deref()
@@ -153,7 +381,7 @@ impl OAuth {
 
     pub async fn refresh(
         &self,
-        config: &OAuthConfig,
+        server: Server<'_>,
         registration: &mut Registration,
         previous: &Tokens,
     ) -> Result<Tokens, AuthenticationError> {
@@ -166,11 +394,16 @@ impl OAuth {
             ("client_id", registration.client_id.as_str()),
             ("refresh_token", refresh_token),
         ];
-        if let Some(resource) = &config.resource {
+        if let Some(resource) = server.resource() {
             form.push(("resource", resource));
         }
-        let response = self.token(config, &form).await?;
-        if let (Some(issuer), Some(token)) = (&config.issuer, &response.id_token) {
+        let response = self.token(server, registration, &form).await?;
+        if let Server::Declared(OAuthEndpoints {
+            issuer: Some(issuer),
+            ..
+        }) = server
+            && let Some(token) = &response.id_token
+        {
             self.verify(issuer, token, registration, None).await?;
         }
         tokens(response, Some(previous))
@@ -178,40 +411,83 @@ impl OAuth {
 
     pub async fn revoke(
         &self,
-        config: &OAuthConfig,
+        server: Server<'_>,
         registration: &Registration,
         tokens: &Tokens,
     ) -> Result<bool, AuthenticationError> {
-        let (Some(issuer), Some(token)) = (&config.issuer, &tokens.refresh_token) else {
+        let url = match server {
+            Server::Declared(endpoints) => {
+                let (Some(issuer), Some(_)) = (&endpoints.issuer, &tokens.refresh_token) else {
+                    return Ok(false);
+                };
+                self.discovery(issuer).await?.revocation_endpoint
+            }
+            Server::Discovered(server, _) => server.revocation_endpoint.clone(),
+        };
+        let Some(url) = url else {
             return Ok(false);
         };
-        let Some(url) = self.discovery(issuer).await?.revocation_endpoint else {
-            return Ok(false);
-        };
+        let (token, hint) = tokens
+            .refresh_token
+            .as_ref()
+            .map_or((&tokens.access_token, "access_token"), |token| {
+                (token, "refresh_token")
+            });
         let form = [
             ("token", token.as_str()),
-            ("token_type_hint", "refresh_token"),
+            ("token_type_hint", hint),
             ("client_id", &registration.client_id),
         ];
-        Ok(self.send(&url, Some(&form)).await?.is_success())
+        Ok(self
+            .send(&url, Some(Body::Form(&form)), server.reach())
+            .await?
+            .is_success())
     }
 
+    /// Requests tokens, reporting a rejected grant or dynamic registration.
     async fn token(
         &self,
-        config: &OAuthConfig,
+        server: Server<'_>,
+        registration: &Registration,
         form: &[(&str, &str)],
     ) -> Result<TokenResponse, AuthenticationError> {
-        read_json(&self.send(&config.token_url, Some(form)).await?)
+        let response = self
+            .send(server.token_url(), Some(Body::Form(form)), server.reach())
+            .await?;
+        if !response.is_success()
+            && let Ok(error) = serde_json::from_slice::<TokenError>(&response.body)
+        {
+            match error.error.as_str() {
+                "invalid_client" if registration.redirect_uri.is_some() => {
+                    return Err(AuthenticationError::ClientRejected);
+                }
+                "invalid_grant" => return Err(AuthenticationError::GrantRejected),
+                _ => {}
+            }
+        }
+        read_json(&response)
     }
 
+    /// Returns whether authorization responses must name the issuer.
+    ///
+    /// Discovered servers always must, since their metadata can give another server's
+    /// authorization endpoint. A declared issuer must when its discovery document
+    /// advertises support.
     pub async fn requires_issuer_parameter(
         &self,
-        issuer: &str,
+        server: Server<'_>,
     ) -> Result<bool, AuthenticationError> {
-        Ok(self
-            .discovery(issuer)
-            .await?
-            .authorization_response_iss_parameter_supported)
+        match server {
+            Server::Declared(OAuthEndpoints {
+                issuer: Some(issuer),
+                ..
+            }) => Ok(self
+                .discovery(issuer)
+                .await?
+                .authorization_response_iss_parameter_supported),
+            Server::Declared(_) => Ok(false),
+            Server::Discovered(..) => Ok(true),
+        }
     }
 
     async fn discovery(&self, issuer: &str) -> Result<Discovery, AuthenticationError> {
@@ -219,40 +495,185 @@ impl OAuth {
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let discovery: Discovery = read_json(&self.send(&url, None).await?)?;
+        let discovery: Discovery = read_json(&self.send(&url, None, Reach::Declared).await?)?;
         if discovery.issuer != issuer {
             return Err(AuthenticationError::Invalid("OpenID issuer does not match"));
         }
         Ok(discovery)
     }
 
-    /// Posts the form, or gets the URL without one.
+    /// Discovers the authorization server of a protected resource.
+    ///
+    /// Resource metadata is read first from the `recorded` URL a service gave. Returns
+    /// nothing for declared endpoints.
+    pub async fn discover(
+        &self,
+        config: &OAuthConfig,
+        origins: &[WasmOrigin],
+        recorded: Option<&str>,
+    ) -> Result<Option<Metadata>, AuthenticationError> {
+        let OAuthServer::Resource(resource) = &config.server else {
+            return Ok(None);
+        };
+        let reach = Reach::Public(origins);
+        let (issuer, scopes) = self.resource_metadata(resource, reach, recorded).await?;
+        let url = self.endpoint(&issuer, reach)?;
+        let (server, authorization_endpoint, clients) = self
+            .metadata(
+                crate::oauth_discovery::server_metadata_urls(&url),
+                reach,
+                "authorization server metadata was not found",
+                "authorization server metadata is invalid",
+                |metadata: ServerMetadata| metadata.server(resource, &issuer),
+            )
+            .await?;
+        self.endpoint(&server.token_endpoint, reach)?;
+        if let Some(url) = &server.revocation_endpoint {
+            self.endpoint(url, reach)?;
+        }
+        Ok(Some(Metadata {
+            server,
+            authorization_endpoint: self.endpoint(&authorization_endpoint, reach)?,
+            scopes,
+            clients,
+        }))
+    }
+
+    /// Returns whether a protected resource publishes valid metadata, or nothing when
+    /// that is unknown.
+    ///
+    /// Metadata is read as for [`discover`](Self::discover), but only from the sandbox's
+    /// provider or origins in the provider's HTTP grant, since nobody asked for the check.
+    pub async fn offers_sign_in(
+        &self,
+        resource: &str,
+        origins: &[WasmOrigin],
+        recorded: Option<&str>,
+    ) -> Option<bool> {
+        let unattended = |url: &str| {
+            matches!(self.transport, Transport::Sandbox(_))
+                || endpoint(url)
+                    .is_ok_and(|url| matches!(crate::oauth::granted(&url, origins), Ok(true)))
+        };
+        if !unattended(resource) {
+            return None;
+        }
+        let recorded = recorded.filter(|url| unattended(url));
+        match self
+            .resource_metadata(resource, Reach::Public(origins), recorded)
+            .await
+        {
+            Ok(_) => Some(true),
+            Err(AuthenticationError::Invalid(RESOURCE_METADATA_MISSING)) => Some(false),
+            Err(_) => None,
+        }
+    }
+
+    /// Reads a protected resource's metadata, returning its first server's issuer and the
+    /// supported scopes.
+    ///
+    /// A document whose issuer this client cannot reach is invalid.
+    async fn resource_metadata(
+        &self,
+        resource: &str,
+        reach: Reach<'_>,
+        recorded: Option<&str>,
+    ) -> Result<(String, Vec<String>), AuthenticationError> {
+        let url = self.endpoint(resource, reach)?;
+        let mut urls = crate::oauth_discovery::resource_metadata_urls(&url);
+        if let Some(recorded) = recorded.and_then(|url| Url::parse(url).ok()) {
+            urls.retain(|url| *url != recorded);
+            urls.insert(0, recorded);
+        }
+        self.metadata(
+            urls,
+            reach,
+            RESOURCE_METADATA_MISSING,
+            "protected resource metadata is invalid",
+            |metadata: ResourceMetadata| {
+                let (issuer, scopes) = metadata.issuer(resource)?;
+                if self.endpoint(&issuer, reach)?.query().is_some() {
+                    return Err(AuthenticationError::Invalid(
+                        "authorization server issuer must not contain a query",
+                    ));
+                }
+                Ok((issuer, scopes))
+            },
+        )
+        .await
+    }
+
+    /// Reads the first metadata document that is valid.
+    ///
+    /// Reports the first failure other than a missing document. Redirects are failures.
+    async fn metadata<T: DeserializeOwned, U>(
+        &self,
+        urls: Vec<Url>,
+        reach: Reach<'_>,
+        missing: &'static str,
+        invalid: &'static str,
+        validate: impl Fn(T) -> Result<U, AuthenticationError>,
+    ) -> Result<U, AuthenticationError> {
+        let mut failure = AuthenticationError::Invalid(missing);
+        for url in urls {
+            let result = match self.send(url.as_str(), None, reach).await {
+                Ok(response) if response.is_success() => serde_json::from_slice(&response.body)
+                    .map_err(|_| AuthenticationError::Invalid(invalid))
+                    .and_then(&validate),
+                Ok(response) if response.status == 404 => {
+                    Err(AuthenticationError::Invalid(missing))
+                }
+                Ok(response) => Err(AuthenticationError::Rejected(response.status)),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(metadata) => return Ok(metadata),
+                Err(error) => {
+                    if matches!(failure, AuthenticationError::Invalid(message) if message == missing)
+                    {
+                        failure = error;
+                    }
+                }
+            }
+        }
+        Err(failure)
+    }
+
+    /// Posts the body, or gets the URL without one.
     async fn send(
         &self,
         url: &str,
-        form: Option<&[(&str, &str)]>,
+        body: Option<Body<'_>>,
+        reach: Reach<'_>,
     ) -> Result<Response, AuthenticationError> {
-        let url = self.endpoint(url)?;
-        let client = match &self.transport {
-            Transport::Network(client) => client,
-            Transport::Sandbox(provider) => return provider.send(&url, form),
+        let url = self.endpoint(url, reach)?;
+        let client = match (&self.transport, reach) {
+            (Transport::Network { public, .. }, Reach::Public(origins))
+                if !crate::oauth::granted(&url, origins)? =>
+            {
+                public
+            }
+            (Transport::Network { client, .. }, _) => client,
+            (Transport::Sandbox(provider), _) => return provider.send(&url, body),
         };
-        let request = match form {
-            Some(form) => client.post(url).form(form),
+        let request = match body {
+            Some(Body::Form(form)) => client.post(url).form(form),
+            Some(Body::Json(value)) => client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(value.to_string()),
             None => client.get(url),
         };
         let mut response = request.send().await.map_err(transport_error)?;
         let status = response.status();
         let mut body = Vec::new();
-        if status.is_success() {
-            while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-                if body.len().saturating_add(chunk.len()) > 1_048_576 {
-                    return Err(AuthenticationError::Invalid(
-                        "OAuth response exceeds the size limit",
-                    ));
-                }
-                body.extend_from_slice(&chunk);
+        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+            if body.len().saturating_add(chunk.len()) > 1_048_576 {
+                return Err(AuthenticationError::Invalid(
+                    "OAuth response exceeds the size limit",
+                ));
             }
+            body.extend_from_slice(&chunk);
         }
         Ok(Response {
             status: status.as_u16(),
@@ -260,14 +681,19 @@ impl OAuth {
         })
     }
 
-    fn endpoint(&self, value: &str) -> Result<Url, AuthenticationError> {
+    fn endpoint(&self, value: &str, reach: Reach<'_>) -> Result<Url, AuthenticationError> {
         let url = endpoint(value)?;
-        if let Transport::Sandbox(provider) = &self.transport {
-            provider.endpoint(&url)?;
+        match (&self.transport, reach) {
+            (Transport::Sandbox(provider), _) => {
+                provider.endpoint(&url)?;
+            }
+            (Transport::Network { .. }, Reach::Public(origins)) => {
+                crate::oauth::granted(&url, origins)?;
+            }
+            (Transport::Network { .. }, Reach::Declared) => {}
         }
         Ok(url)
     }
-
     async fn verify(
         &self,
         issuer: &str,
@@ -276,7 +702,11 @@ impl OAuth {
         nonce: Option<&str>,
     ) -> Result<(), AuthenticationError> {
         let discovery = self.discovery(issuer).await?;
-        let keys: JwkSet = read_json(&self.send(&discovery.jwks_uri, None).await?)?;
+        let keys: JwkSet = read_json(
+            &self
+                .send(&discovery.jwks_uri, None, Reach::Declared)
+                .await?,
+        )?;
         let header = jsonwebtoken::decode_header(token).map_err(identity_error)?;
         if !discovery
             .id_token_signing_alg_values_supported
@@ -357,62 +787,64 @@ impl OAuth {
 
 fn authorization(
     config: &OAuthConfig,
-    registration: Option<&Registration>,
+    client_id: &str,
+    initial: Option<&OAuthRegistration>,
     redirect_uri: Url,
+    mut url: Url,
+    mut parameters: BTreeMap<String, String>,
+    server: Option<Discovered>,
 ) -> Result<Authorization, AuthenticationError> {
-    endpoint(&config.token_url)?;
     let id = random_value()?;
     let verifier = random_value()?;
     let nonce = random_value()?;
-    let mut url = endpoint(&config.authorization_url)?;
-    if url.query().is_some() {
-        return Err(AuthenticationError::Invalid(
-            "OAuth authorization endpoint must not contain a query",
-        ));
-    }
-    let mut parameters = BTreeMap::from([
+    parameters.extend([
         ("response_type".to_owned(), "code".to_owned()),
-        (
-            "client_id".into(),
-            registration
-                .map_or(&config.client_id, |registration| &registration.client_id)
-                .clone(),
-        ),
+        ("client_id".into(), client_id.to_owned()),
         ("redirect_uri".into(), redirect_uri.to_string()),
-        ("scope".into(), config.scopes.join(" ")),
         ("state".into(), id.clone()),
-        ("nonce".into(), nonce.clone()),
         ("code_challenge_method".into(), "S256".into()),
         (
             "code_challenge".into(),
             URL_SAFE_NO_PAD.encode(Sha256::digest(&verifier)),
         ),
     ]);
-    if let Some(resource) = &config.resource {
-        parameters.insert("resource".into(), resource.clone());
+    if server.is_none() {
+        parameters.insert("nonce".into(), nonce.clone());
     }
-    let initial = registration
-        .is_none()
-        .then_some(config.registration.as_ref())
-        .flatten();
     for (name, value) in config.parameters.iter().chain(
         initial
             .into_iter()
             .flat_map(|registration| &registration.parameters),
     ) {
-        if parameters.insert(name.clone(), value.clone()).is_some() {
+        if matches!(name.as_str(), "scope" | "nonce")
+            || parameters.insert(name.clone(), value.clone()).is_some()
+        {
             return Err(AuthenticationError::Invalid(
                 "OAuth parameters contain a reserved or duplicate name",
             ));
         }
     }
+    if url
+        .query_pairs()
+        .any(|(name, _)| parameters.contains_key(name.as_ref()))
+    {
+        return Err(AuthenticationError::Invalid(
+            "OAuth authorization endpoint query contains a parameter Fleet sets",
+        ));
+    }
     url.query_pairs_mut().extend_pairs(parameters);
+    let scope = url
+        .query_pairs()
+        .find(|(name, _)| name == "scope")
+        .map(|(_, scope)| scope.into_owned());
     Ok(Authorization {
         id,
         url: url.into(),
         redirect_uri,
         verifier,
         nonce,
+        scope,
+        server,
     })
 }
 
@@ -462,7 +894,7 @@ fn tokens(
 ) -> Result<Tokens, AuthenticationError> {
     if response.access_token.is_empty()
         || !response.token_type.eq_ignore_ascii_case("bearer")
-        || response.expires_in == 0
+        || response.expires_in == Some(0)
     {
         return Err(AuthenticationError::Invalid("invalid OAuth token response"));
     }
@@ -479,12 +911,15 @@ fn tokens(
         id_token: response
             .id_token
             .or_else(|| previous.and_then(|tokens| tokens.id_token.clone())),
-        expires_at: now().saturating_add(response.expires_in),
+        expires_at: response
+            .expires_in
+            .map(|expires_in| now().saturating_add(expires_in)),
         scopes,
     })
 }
 
-fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
+/// Parses an HTTP or HTTPS URL without credentials or a fragment.
+pub fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
     let url =
         Url::parse(value).map_err(|_| AuthenticationError::Invalid("invalid OAuth endpoint"))?;
     if !matches!(url.scheme(), "http" | "https")
@@ -499,6 +934,87 @@ fn endpoint(value: &str) -> Result<Url, AuthenticationError> {
     }
     Ok(url)
 }
+
+/// Returns whether the provider's HTTP grant allows a discovered URL.
+///
+/// URLs outside the grant must use HTTPS. Their IP address hosts must be public.
+fn granted(url: &Url, origins: &[WasmOrigin]) -> Result<bool, AuthenticationError> {
+    let uri = url
+        .as_str()
+        .parse()
+        .map_err(|_| AuthenticationError::Invalid("invalid OAuth endpoint"))?;
+    if origins.iter().any(|origin| origin.allows(&uri)) {
+        return Ok(true);
+    }
+    if url.scheme() != "https" {
+        return Err(AuthenticationError::Invalid(
+            "discovered OAuth servers must use HTTPS unless the provider's HTTP grant allows them",
+        ));
+    }
+    let address = match url.host() {
+        Some(Host::Ipv4(address)) => Some(IpAddr::V4(address)),
+        Some(Host::Ipv6(address)) => Some(IpAddr::V6(address)),
+        _ => None,
+    };
+    if address.is_some_and(|address| !crate::oauth::public(address)) {
+        return Err(non_public());
+    }
+    Ok(false)
+}
+
+/// Returns whether an address is on the public internet.
+///
+/// Special-purpose IPv4 ranges are not public. IPv6 addresses must be global unicast
+/// outside the IETF protocol assignment and documentation ranges. IPv4-mapped and
+/// NAT64 addresses are judged by their IPv4 address.
+fn public(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => !matches!(
+            address.octets(),
+            [0 | 10 | 127 | 224..=255, ..]
+                | [100, 64..=127, ..]
+                | [169, 254, ..]
+                | [172, 16..=31, ..]
+                | [192, 0, 0 | 2, _]
+                | [192, 168, ..]
+                | [198, 18 | 19, ..]
+                | [198, 51, 100, _]
+                | [203, 0, 113, _]
+        ),
+        IpAddr::V6(address) => match (address.to_ipv4_mapped(), address.segments()) {
+            (Some(address), _) => crate::oauth::public(address.into()),
+            (None, [0x64, 0xff9b, 0, 0, 0, 0, ..]) => {
+                let [.., a, b, c, d] = address.octets();
+                crate::oauth::public(Ipv4Addr::new(a, b, c, d).into())
+            }
+            (None, [0x2001, 0..=0x1ff | 0xdb8, ..] | [0x3fff, 0..=0xfff, ..]) => false,
+            (None, [first, ..]) => first & 0xe000 == 0x2000,
+        },
+    }
+}
+
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0))
+                .await?
+                .filter(|address| crate::oauth::public(address.ip()))
+                .collect();
+            if addresses.is_empty() {
+                return Err(NonPublicAddress.into());
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+impl fmt::Display for NonPublicAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("host resolves to no public address")
+    }
+}
+
+impl Error for NonPublicAddress {}
 
 fn read_json<T: DeserializeOwned>(response: &Response) -> Result<T, AuthenticationError> {
     if !response.is_success() {
@@ -523,7 +1039,20 @@ pub fn now() -> u64 {
 }
 
 fn transport_error(error: reqwest::Error) -> AuthenticationError {
+    let mut source: Option<&(dyn Error + 'static)> = Some(&error);
+    while let Some(error) = source {
+        if error.is::<NonPublicAddress>() {
+            return non_public();
+        }
+        source = error.source();
+    }
     AuthenticationError::source("OAuth request failed", error.without_url())
+}
+
+const fn non_public() -> AuthenticationError {
+    AuthenticationError::Invalid(
+        "discovered OAuth servers must be at public addresses unless the provider's HTTP grant allows them",
+    )
 }
 
 fn identity_error(_: jsonwebtoken::errors::Error) -> AuthenticationError {
@@ -540,7 +1069,7 @@ mod tests {
             access_token: "old".into(),
             refresh_token: Some("refresh".into()),
             id_token: Some("identity".into()),
-            expires_at: 0,
+            expires_at: Some(0),
             scopes: vec!["invoke".into()],
         };
         let response = TokenResponse {
@@ -548,7 +1077,7 @@ mod tests {
             token_type: "Bearer".into(),
             refresh_token: None,
             id_token: None,
-            expires_in: 3600,
+            expires_in: Some(3600),
             scope: None,
         };
         let tokens = tokens(response, Some(&previous)).unwrap();
@@ -557,7 +1086,7 @@ mod tests {
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
         assert_eq!(tokens.id_token.as_deref(), Some("identity"));
         assert_eq!(tokens.scopes, ["invoke"]);
-        assert!(tokens.expires_at > now());
+        assert!(tokens.expires_at.unwrap() > now());
     }
 
     #[test]
@@ -566,7 +1095,7 @@ mod tests {
             access_token: "old".into(),
             refresh_token: Some("old-refresh".into()),
             id_token: None,
-            expires_at: 0,
+            expires_at: Some(0),
             scopes: vec!["invoke".into()],
         };
         let response = TokenResponse {
@@ -574,13 +1103,29 @@ mod tests {
             token_type: "Bearer".into(),
             refresh_token: Some("new-refresh".into()),
             id_token: None,
-            expires_in: 3600,
+            expires_in: Some(3600),
             scope: Some("openid".into()),
         };
         let tokens = tokens(response, Some(&previous)).unwrap();
 
         assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
         assert_eq!(tokens.scopes, ["openid"]);
+    }
+
+    #[test]
+    fn tokens_without_a_lifetime_have_no_known_expiry() {
+        let response = |expires_in| TokenResponse {
+            access_token: "new".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_in,
+            scope: None,
+        };
+
+        assert_eq!(tokens(response(None), None).unwrap().expires_at, None);
+        let error = tokens(response(Some(0)), None).err().unwrap();
+        assert!(matches!(error, AuthenticationError::Invalid(_)));
     }
 
     #[test]
@@ -598,6 +1143,179 @@ mod tests {
             let error = endpoint(url).unwrap_err();
             assert!(matches!(error, AuthenticationError::Invalid(_)));
         }
+    }
+
+    #[test]
+    fn authorization_parameters_cannot_replace_reserved_names() {
+        let server = Discovered {
+            resource: "https://api.example.com/mcp".into(),
+            issuer: "https://auth.example.com".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            revocation_endpoint: None,
+        };
+        let authorize = |parameters: &[(&str, &str)], url: &str| {
+            let config = OAuthConfig {
+                server: OAuthServer::Resource(server.resource.clone()),
+                client: OAuthClient::Automatic,
+                scopes: Vec::new(),
+                parameters: parameters
+                    .iter()
+                    .map(|(name, value)| ((*name).into(), (*value).into()))
+                    .collect(),
+                required_scopes: Vec::new(),
+            };
+            authorization(
+                &config,
+                "fleet",
+                None,
+                "http://127.0.0.1:9/callback".parse().unwrap(),
+                url.parse().unwrap(),
+                BTreeMap::from([("resource".into(), server.resource.clone())]),
+                Some(server.clone()),
+            )
+        };
+
+        let authorization = authorize(
+            &[("prompt", "login")],
+            "https://auth.example.com/authorize?tenant=a&tenant=b&scope=read",
+        )
+        .unwrap();
+        let url = Url::parse(&authorization.url).unwrap();
+        let pairs: Vec<_> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs[..2],
+            [("tenant".into(), "a".into()), ("tenant".into(), "b".into())]
+        );
+        assert!(pairs.contains(&("prompt".into(), "login".into())));
+        assert_eq!(authorization.scope.as_deref(), Some("read"));
+        assert!(pairs.contains(&("state".into(), authorization.id)));
+
+        for name in ["scope", "nonce", "resource", "state"] {
+            let error = authorize(&[(name, "value")], "https://auth.example.com/authorize")
+                .err()
+                .unwrap();
+            assert!(matches!(error, AuthenticationError::Invalid(_)), "{name}");
+        }
+        for query in [
+            "state=value",
+            "resource=value",
+            "client_id=value",
+            "prompt=none",
+        ] {
+            let url = format!("https://auth.example.com/authorize?{query}");
+            let error = authorize(&[("prompt", "login")], &url).err().unwrap();
+            assert!(matches!(error, AuthenticationError::Invalid(_)), "{query}");
+        }
+    }
+
+    #[test]
+    fn addresses_outside_the_public_internet_are_not_public() {
+        for address in [
+            "93.184.215.14",
+            "100.63.255.255",
+            "100.128.0.0",
+            "172.32.0.1",
+            "198.20.0.1",
+            "223.255.255.255",
+            "2606:4700::1111",
+            "2001:4860:4860::8888",
+            "::ffff:93.184.215.14",
+            "64:ff9b::93.184.215.14",
+        ] {
+            assert!(public(address.parse().unwrap()), "{address}");
+        }
+        for address in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "192.0.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "198.51.100.1",
+            "203.0.113.1",
+            "240.0.0.1",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fe80::1",
+            "febf::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:100.64.0.1",
+            "::ffff:0.0.0.0",
+            "64:ff9b::10.0.0.1",
+            "::127.0.0.1",
+            "fdf::1",
+            "fec0::1",
+            "2001:db8::1",
+            "2001::1",
+            "2001:2::1",
+            "3fff::1",
+        ] {
+            assert!(!public(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[test]
+    fn discovered_urls_need_public_https_or_the_grant() {
+        let grant = [
+            "http://127.0.0.1:8080".parse::<WasmOrigin>().unwrap(),
+            "https://10.0.0.1".parse().unwrap(),
+            "http://auth.internal".parse().unwrap(),
+        ];
+        let granted = |url: &str, origins| super::granted(&url.parse().unwrap(), origins);
+
+        assert!(!granted("https://auth.example.com/token", &grant).unwrap());
+        assert!(!granted("https://93.184.215.14/token", &[]).unwrap());
+        for url in [
+            "http://127.0.0.1:8080/token",
+            "https://10.0.0.1/token",
+            "http://auth.internal/token",
+        ] {
+            assert!(granted(url, &grant).unwrap(), "{url}");
+            let error = granted(url, &[]).unwrap_err();
+            assert!(matches!(error, AuthenticationError::Invalid(_)));
+        }
+        for url in [
+            "http://auth.example.com/token",
+            "http://127.0.0.1:8081/token",
+            "https://127.0.0.1:8080/token",
+            "https://10.0.0.2/token",
+            "https://[::1]/token",
+            "https://[::ffff:192.168.0.1]/token",
+            "https://169.254.169.254/latest",
+        ] {
+            let error = granted(url, &grant).unwrap_err();
+            assert!(matches!(error, AuthenticationError::Invalid(_)), "{url}");
+        }
+    }
+
+    #[test]
+    fn hosts_resolving_to_private_addresses_are_refused() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let oauth = OAuth::new().unwrap();
+
+        let error = runtime
+            .block_on(oauth.send("https://localhost:9/token", None, Reach::Public(&[])))
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), non_public().to_string());
     }
 
     #[test]
