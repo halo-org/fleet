@@ -117,11 +117,16 @@ fn is_domain(domain: &str) -> bool {
 }
 
 fn port(uri: &Uri) -> Option<u16> {
-    uri.port_u16().or_else(|| match uri.scheme_str()? {
-        "https" => Some(443),
-        "http" => Some(80),
-        _ => None,
-    })
+    let authority = uri.authority()?;
+    let host_port = authority.as_str().rsplit('@').next()?;
+    match host_port.strip_prefix(authority.host())?.split_once(':') {
+        Some((_, port)) => port.parse().ok(),
+        None => match uri.scheme_str()? {
+            "https" => Some(443),
+            "http" => Some(80),
+            _ => None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -161,10 +166,48 @@ mod tests {
         assert!(allows("https://API.example.com:443/"));
         assert!(!allows("http://api.example.com/"));
         assert!(!allows("https://api.example.com:8443/"));
+        assert!(!allows("https://api.example.com:/"));
+        assert!(!allows("https://api.example.com:abc/"));
+        assert!(!allows("https://api.example.com:65979/"));
+        assert!(!allows("https://api.example.com:[80]:443/"));
+        assert!(allows("https://user:pw@api.example.com/"));
         assert!(!allows("https://example.com/"));
         assert!(!allows("https://api.example.com.evil.com/"));
         assert!(!allows("https://api.example.com./"));
         assert!(!allows("/v1"));
+    }
+
+    #[test]
+    fn origins_reject_invalid_ports() {
+        assert_eq!(
+            "http://[::1]".parse::<WasmOrigin>().unwrap(),
+            "http://[::1]:80".parse().unwrap(),
+        );
+        let origin = "http://[::1]:8080".parse::<WasmOrigin>().unwrap();
+        assert!(origin.allows(&"http://[::1]:8080/".parse().unwrap()));
+        assert!(!origin.allows(&"http://[::1]/".parse().unwrap()));
+        for origin in [
+            "https://api.example.com:",
+            "https://api.example.com:abc",
+            "https://api.example.com:99999",
+            "https://api.example.com:8443x",
+            "https://api.example.com:-1",
+            "https://api.example.com:[80]:443",
+            "https://*.example.com:",
+            "https://*.example.com:abc",
+            "https://*.example.com:99999",
+            "https://*.example.com:8443x",
+            "https://*.example.com:-1",
+            "https://*.example.com:[80]:443",
+            "http://[::1]:",
+            "http://[::1]:abc",
+        ] {
+            let error = origin.parse::<WasmOrigin>().unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("invalid HTTP origin \"{origin}\"")
+            );
+        }
     }
 
     #[test]
