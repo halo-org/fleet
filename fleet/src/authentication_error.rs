@@ -13,6 +13,8 @@ pub enum AuthenticationError {
     Cancelled,
     /// The authorization server rejected a request.
     Rejected(u16),
+    /// The authorization server rejected a dynamically registered client.
+    ClientRejected,
     /// The callback listener could not be started.
     Callback(std::io::Error),
     /// An authentication operation failed.
@@ -33,6 +35,9 @@ impl fmt::Display for AuthenticationError {
             Self::Unauthorized => f.write_str("connection needs authorization"),
             Self::Cancelled => f.write_str("sign-in expired or was cancelled"),
             Self::Rejected(status) => write!(f, "authorization server returned HTTP {status}"),
+            Self::ClientRejected => f.write_str(
+                "authorization server no longer accepts Fleet's client registration; sign in again to register anew",
+            ),
             Self::Callback(_) => f.write_str("could not start sign-in callback listener"),
         }
     }

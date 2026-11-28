@@ -40,17 +40,13 @@ pub enum AuthenticationKind {
 pub struct OAuthConfig {
     /// Where the authorization server comes from.
     pub server: OAuthServer,
-    /// The public client ID.
-    pub client_id: String,
-    /// The registered redirect URI. Port 0 means any port is registered.
-    pub redirect_uri: String,
+    /// How Fleet is identified to the authorization server.
+    pub client: OAuthClient,
     /// The requested scopes. Without any, a protected resource's advertised
     /// scopes are requested.
     pub scopes: Vec<String>,
     /// Additional authorization parameters.
     pub parameters: Vec<(String, String)>,
-    /// Client registration completed during authorization.
-    pub registration: Option<OAuthRegistration>,
     /// Scopes that must be granted before credentials can be used.
     pub required_scopes: Vec<String>,
 }
@@ -80,6 +76,26 @@ pub struct OAuthEndpoints {
     pub resource: Option<String>,
     /// The identity provider's issuer URL.
     pub issuer: Option<String>,
+}
+
+/// How Fleet is identified to the authorization server.
+#[derive(Clone, Debug)]
+pub enum OAuthClient {
+    /// A client registered in advance.
+    Registered(OAuthRegisteredClient),
+    /// Fleet identifies itself. Requires a protected resource server.
+    Automatic,
+}
+
+/// A client registered with the authorization server in advance.
+#[derive(Clone, Debug)]
+pub struct OAuthRegisteredClient {
+    /// The public client ID.
+    pub client_id: String,
+    /// The registered redirect URI. Port 0 means any port is registered.
+    pub redirect_uri: String,
+    /// Client registration completed during authorization.
+    pub registration: Option<OAuthRegistration>,
 }
 
 /// Client registration completed during authorization.

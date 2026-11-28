@@ -1,6 +1,7 @@
 use crate::{
     AuthenticationError, SandboxOAuth,
-    oauth_discovery::{ResourceMetadata, ServerMetadata},
+    oauth_client::{AutomaticClient, ClientIdentity, RegisteredClient},
+    oauth_discovery::{ClientSupport, ResourceMetadata, ServerMetadata},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use core::{
@@ -9,7 +10,7 @@ use core::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
-use fleet_kit::{OAuthConfig, OAuthEndpoints, OAuthServer};
+use fleet_kit::{OAuthClient, OAuthConfig, OAuthEndpoints, OAuthRegistration, OAuthServer};
 use fleet_wasm::WasmOrigin;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation,
@@ -60,6 +61,16 @@ pub struct Metadata {
     server: Discovered,
     authorization_endpoint: Url,
     scopes: Vec<String>,
+    clients: ClientSupport,
+}
+
+/// The body of a request to an authorization server.
+#[derive(Clone, Copy)]
+pub enum Body<'a> {
+    /// A form.
+    Form(&'a [(&'a str, &'a str)]),
+    /// A JSON document.
+    Json(&'a serde_json::Value),
 }
 
 /// Which servers a request may reach.
@@ -84,13 +95,16 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registration {
     pub client_id: String,
     pub subject: Option<String>,
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
+    /// The redirect URI a dynamically registered client was registered for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -121,6 +135,11 @@ struct TokenResponse {
     id_token: Option<String>,
     expires_in: Option<u64>,
     scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TokenError {
+    error: String,
 }
 
 #[derive(Deserialize)]
@@ -253,7 +272,67 @@ impl OAuth {
         };
         let registration =
             registration.filter(|registration| registration.issued_by(server.as_ref()));
-        authorization(config, registration, redirect_uri, url, parameters, server)
+        let (client_id, initial) = match (&config.client, registration) {
+            (_, Some(registration)) => (&registration.client_id, None),
+            (OAuthClient::Registered(client), None) => {
+                (&client.client_id, client.registration.as_ref())
+            }
+            (OAuthClient::Automatic, None) => {
+                return Err(AuthenticationError::Invalid(
+                    "OAuth client was not identified",
+                ));
+            }
+        };
+        authorization(
+            config,
+            client_id,
+            initial,
+            redirect_uri,
+            url,
+            parameters,
+            server,
+        )
+    }
+
+    /// Identifies Fleet to a discovered server as an automatic client.
+    ///
+    /// A stored dynamic registration is reused for the same issuer and redirect URI.
+    pub async fn identify(
+        &self,
+        client: &AutomaticClient,
+        metadata: &Metadata,
+        stored: Option<&Registration>,
+        origins: &[WasmOrigin],
+    ) -> Result<Registration, AuthenticationError> {
+        let issuer = Some(metadata.server.issuer.clone());
+        let endpoint = match client.identity(&metadata.clients)? {
+            ClientIdentity::Document(client_id) => {
+                return Ok(Registration {
+                    client_id,
+                    issuer,
+                    ..Registration::default()
+                });
+            }
+            ClientIdentity::Registration(endpoint) => endpoint,
+        };
+        let redirect_uri = Some(client.redirect_uri().to_string());
+        if let Some(stored) = stored
+            && stored.issuer == issuer
+            && stored.redirect_uri == redirect_uri
+        {
+            return Ok(stored.clone());
+        }
+        let body = client.registration();
+        let response = self
+            .send(&endpoint, Some(Body::Json(&body)), Reach::Public(origins))
+            .await?;
+        Ok(Registration {
+            client_id: read_json::<RegisteredClient>(&response)?
+                .client_id(client.redirect_uri())?,
+            issuer,
+            redirect_uri,
+            ..Registration::default()
+        })
     }
 
     pub async fn exchange(
@@ -273,7 +352,7 @@ impl OAuth {
         if let Some(resource) = server.resource() {
             form.push(("resource", resource));
         }
-        let mut response = self.token(server, &form).await?;
+        let mut response = self.token(server, registration, &form).await?;
         if let Server::Discovered(..) = server
             && response.scope.is_none()
         {
@@ -312,7 +391,7 @@ impl OAuth {
         if let Some(resource) = server.resource() {
             form.push(("resource", resource));
         }
-        let response = self.token(server, &form).await?;
+        let response = self.token(server, registration, &form).await?;
         if let Server::Declared(OAuthEndpoints {
             issuer: Some(issuer),
             ..
@@ -354,21 +433,29 @@ impl OAuth {
             ("client_id", &registration.client_id),
         ];
         Ok(self
-            .send(&url, Some(&form), server.reach())
+            .send(&url, Some(Body::Form(&form)), server.reach())
             .await?
             .is_success())
     }
 
+    /// Requests tokens, reporting a rejected dynamic registration.
     async fn token(
         &self,
         server: Server<'_>,
+        registration: &Registration,
         form: &[(&str, &str)],
     ) -> Result<TokenResponse, AuthenticationError> {
-        read_json(
-            &self
-                .send(server.token_url(), Some(form), server.reach())
-                .await?,
-        )
+        let response = self
+            .send(server.token_url(), Some(Body::Form(form)), server.reach())
+            .await?;
+        if !response.is_success()
+            && registration.redirect_uri.is_some()
+            && serde_json::from_slice::<TokenError>(&response.body)
+                .is_ok_and(|error| error.error == "invalid_client")
+        {
+            return Err(AuthenticationError::ClientRejected);
+        }
+        read_json(&response)
     }
 
     /// Returns whether authorization responses must name the issuer.
@@ -433,7 +520,7 @@ impl OAuth {
                 "authorization server issuer must not contain a query",
             ));
         }
-        let (server, authorization_endpoint) = self
+        let (server, authorization_endpoint, clients) = self
             .metadata(
                 crate::oauth_discovery::server_metadata_urls(&url),
                 reach,
@@ -450,6 +537,7 @@ impl OAuth {
             server,
             authorization_endpoint: self.endpoint(&authorization_endpoint, reach)?,
             scopes,
+            clients,
         }))
     }
 
@@ -489,11 +577,11 @@ impl OAuth {
         Err(failure)
     }
 
-    /// Posts the form, or gets the URL without one.
+    /// Posts the body, or gets the URL without one.
     async fn send(
         &self,
         url: &str,
-        form: Option<&[(&str, &str)]>,
+        body: Option<Body<'_>>,
         reach: Reach<'_>,
     ) -> Result<Response, AuthenticationError> {
         let url = self.endpoint(url, reach)?;
@@ -504,24 +592,26 @@ impl OAuth {
                 public
             }
             (Transport::Network { client, .. }, _) => client,
-            (Transport::Sandbox(provider), _) => return provider.send(&url, form),
+            (Transport::Sandbox(provider), _) => return provider.send(&url, body),
         };
-        let request = match form {
-            Some(form) => client.post(url).form(form),
+        let request = match body {
+            Some(Body::Form(form)) => client.post(url).form(form),
+            Some(Body::Json(value)) => client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(value.to_string()),
             None => client.get(url),
         };
         let mut response = request.send().await.map_err(transport_error)?;
         let status = response.status();
         let mut body = Vec::new();
-        if status.is_success() {
-            while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-                if body.len().saturating_add(chunk.len()) > 1_048_576 {
-                    return Err(AuthenticationError::Invalid(
-                        "OAuth response exceeds the size limit",
-                    ));
-                }
-                body.extend_from_slice(&chunk);
+        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
+            if body.len().saturating_add(chunk.len()) > 1_048_576 {
+                return Err(AuthenticationError::Invalid(
+                    "OAuth response exceeds the size limit",
+                ));
             }
+            body.extend_from_slice(&chunk);
         }
         Ok(Response {
             status: status.as_u16(),
@@ -635,7 +725,8 @@ impl OAuth {
 
 fn authorization(
     config: &OAuthConfig,
-    registration: Option<&Registration>,
+    client_id: &str,
+    initial: Option<&OAuthRegistration>,
     redirect_uri: Url,
     mut url: Url,
     mut parameters: BTreeMap<String, String>,
@@ -646,12 +737,7 @@ fn authorization(
     let nonce = random_value()?;
     parameters.extend([
         ("response_type".to_owned(), "code".to_owned()),
-        (
-            "client_id".into(),
-            registration
-                .map_or(&config.client_id, |registration| &registration.client_id)
-                .clone(),
-        ),
+        ("client_id".into(), client_id.to_owned()),
         ("redirect_uri".into(), redirect_uri.to_string()),
         ("state".into(), id.clone()),
         ("code_challenge_method".into(), "S256".into()),
@@ -663,10 +749,6 @@ fn authorization(
     if server.is_none() {
         parameters.insert("nonce".into(), nonce.clone());
     }
-    let initial = registration
-        .is_none()
-        .then_some(config.registration.as_ref())
-        .flatten();
     for (name, value) in config.parameters.iter().chain(
         initial
             .into_iter()
@@ -1011,18 +1093,17 @@ mod tests {
         let authorize = |parameters: &[(&str, &str)], url: &str| {
             let config = OAuthConfig {
                 server: OAuthServer::Resource(server.resource.clone()),
-                client_id: "fleet".into(),
-                redirect_uri: "http://127.0.0.1:0/callback".into(),
+                client: OAuthClient::Automatic,
                 scopes: Vec::new(),
                 parameters: parameters
                     .iter()
                     .map(|(name, value)| ((*name).into(), (*value).into()))
                     .collect(),
-                registration: None,
                 required_scopes: Vec::new(),
             };
             authorization(
                 &config,
+                "fleet",
                 None,
                 "http://127.0.0.1:9/callback".parse().unwrap(),
                 url.parse().unwrap(),

@@ -199,7 +199,9 @@ pub const fn error_details(
             "callback_unavailable",
             "Could not open the local sign-in callback. Close any other sign-in attempt and retry.",
         ),
-        crate::AuthenticationError::Rejected(_) | crate::AuthenticationError::Other(_, _) => (
+        crate::AuthenticationError::Rejected(_)
+        | crate::AuthenticationError::ClientRejected
+        | crate::AuthenticationError::Other(_, _) => (
             StatusCode::BAD_GATEWAY,
             "authentication_failed",
             "Authentication could not be completed",

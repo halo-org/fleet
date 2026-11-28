@@ -33,21 +33,35 @@ interface authentication {
         %resource(string),
     }
 
-    /// Settings for OAuth authorization with PKCE.
-    record oauth-config {
-        /// Where the authorization server comes from.
-        server: oauth-server,
+    /// A client registered with the authorization server in advance.
+    record oauth-registered-client {
         /// The public client ID.
         client-id: string,
         /// The registered redirect URI. Port 0 means any port is registered.
         redirect-uri: string,
+        /// Client registration completed during authorization.
+        registration: option<oauth-registration>,
+    }
+
+    /// How Fleet is identified to the authorization server.
+    variant oauth-client {
+        /// A client registered in advance.
+        registered(oauth-registered-client),
+        /// Fleet identifies itself. Requires a protected resource server.
+        automatic,
+    }
+
+    /// Settings for OAuth authorization with PKCE.
+    record oauth-config {
+        /// Where the authorization server comes from.
+        server: oauth-server,
+        /// How Fleet is identified to the authorization server.
+        client: oauth-client,
         /// The requested scopes. Without any, a protected resource's advertised
         /// scopes are requested.
         scopes: list<string>,
         /// Additional authorization parameters.
         parameters: list<tuple<string, string>>,
-        /// Client registration completed during authorization.
-        registration: option<oauth-registration>,
         /// Scopes that must be granted before credentials can be used.
         required-scopes: list<string>,
     }

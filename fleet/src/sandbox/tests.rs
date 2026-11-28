@@ -10,7 +10,7 @@ use futures_util::future;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Request, StatusCode, body::Bytes, header};
 use serde_json::{Value, json};
-use std::{path::PathBuf, process::Command, sync::OnceLock};
+use std::{collections::BTreeMap, path::PathBuf, process::Command, sync::OnceLock};
 
 const TOKEN: &str = "sandbox-test-token-0123456789abcdef";
 
@@ -699,7 +699,7 @@ fn sign_in_reaches_plugins_and_refreshes_tokens() {
 }
 
 #[test]
-fn sign_in_discovers_the_resource_server() {
+fn sign_in_discovers_the_resource_server_and_receives_the_callback() {
     run(async |fleet| {
         let connection = "/connections/sandbox:account";
         let credential = json!({ "credential": true });
@@ -711,45 +711,45 @@ fn sign_in_discovers_the_resource_server() {
                 "name": "resource",
                 "title": "Sign in to the resource",
                 "kind": "oauth",
-                "redirect_uri": "http://127.0.0.1:0/callback",
                 "resource": "http://127.0.0.1:1337/sandbox/oauth/resource",
             })
         );
 
-        let authorize =
+        let requested =
             json!({ "method": "resource", "redirect_uri": "http://127.0.0.1:9/callback" });
-        let (status, authorization) = call(
-            fleet,
-            "POST",
-            &format!("{connection}/authorizations"),
-            Some(&authorize),
-        )
-        .await;
+        let authorizations = format!("{connection}/authorizations");
+        let (status, _) = call(fleet, "POST", &authorizations, Some(&requested)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let authorize = json!({ "method": "resource" });
+        let (status, authorization) = call(fleet, "POST", &authorizations, Some(&authorize)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
             authorization["issuer"],
             "http://127.0.0.1:1337/sandbox/oauth"
         );
+        assert_eq!(
+            authorization["redirect_uri"],
+            "http://127.0.0.1:1337/oauth/callback"
+        );
         let url: Url = authorization["url"].as_str().unwrap().parse().unwrap();
-        let browser = Request::get(&url[url::Position::BeforePath..])
-            .body(Full::new(Bytes::new()))
-            .unwrap();
-        let token = AdminToken::new(TOKEN.as_ref()).unwrap();
-        let redirect = crate::admin_auth::handle(token, fleet.clone(), browser)
-            .await
-            .unwrap();
-        let callback = json!({ "url": redirect.headers()[header::LOCATION].to_str().unwrap() });
+        let parameters: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(parameters["client_id"], "sandbox-client-1");
+        assert_eq!(
+            parameters["redirect_uri"],
+            "http://127.0.0.1:1337/oauth/callback"
+        );
+        let callback = browse(fleet, &url).await;
+        let (status, page) = browse_page(fleet, &callback).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("Signed in."));
+        let (status, page) = browse_page(fleet, &callback).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!page.contains("Signed in."));
         let id = authorization["id"].as_str().unwrap();
-        let (status, completed) = call(
-            fleet,
-            "POST",
-            &format!("{connection}/authorizations/{id}/callback"),
-            Some(&callback),
-        )
-        .await;
+        let (status, completed) = call(fleet, "GET", &format!("{authorizations}/{id}"), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(completed["status"], "complete");
-        assert_eq!(completed["issuer"], "http://127.0.0.1:1337/sandbox/oauth");
 
         start(fleet, "assistant", &credential).await;
         assert_eq!(
@@ -767,7 +767,86 @@ fn sign_in_discovers_the_resource_server() {
         assert_eq!(signed_out, json!({ "revocation_confirmed": true }));
         send(fleet, 3, &credential).await;
         assert_eq!(reply(fleet).await, "Not signed in.");
+
+        let (status, authorization) = call(fleet, "POST", &authorizations, Some(&authorize)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let url: Url = authorization["url"].as_str().unwrap().parse().unwrap();
+        let parameters: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(parameters["client_id"], "sandbox-client-1");
+        let pasted = json!({ "url": browse(fleet, &url).await.as_str() });
+        let id = authorization["id"].as_str().unwrap();
+        let (status, completed) = call(
+            fleet,
+            "POST",
+            &format!("{authorizations}/{id}/callback"),
+            Some(&pasted),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(completed["status"], "complete");
+        send(fleet, 4, &credential).await;
+        assert_eq!(
+            reply(fleet).await,
+            "Signed in with OAuth token sandbox-access-3."
+        );
     });
+}
+
+#[test]
+fn shared_client_metadata_documents_identify_fleet_on_loopback() {
+    let shared = "https://fleet.example.org/oauth/client.json";
+    run_with(
+        json!({ "oauth_client_metadata_url": shared }),
+        async |fleet, _| {
+            let authorize = json!({ "method": "resource" });
+            let (status, authorization) = call(
+                fleet,
+                "POST",
+                "/connections/sandbox:account/authorizations",
+                Some(&authorize),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+            let url: Url = authorization["url"].as_str().unwrap().parse().unwrap();
+            let parameters: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(parameters["client_id"], shared);
+            let (status, page) = browse_page(fleet, &browse(fleet, &url).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(page.contains("Signed in."));
+        },
+    );
+}
+
+/// Follows the authorization URL as a browser without the admin token, returning its redirect.
+async fn browse(fleet: &Fleet, url: &Url) -> Url {
+    let request = Request::get(&url[url::Position::BeforePath..])
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let token = AdminToken::new(TOKEN.as_ref()).unwrap();
+    let response = crate::admin_auth::handle(token, fleet.clone(), request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Opens a page on Fleet as a browser without the admin token.
+async fn browse_page(fleet: &Fleet, url: &Url) -> (StatusCode, String) {
+    assert_eq!(url.origin().ascii_serialization(), "http://127.0.0.1:1337");
+    let request = Request::get(&url[url::Position::BeforePath..])
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let token = AdminToken::new(TOKEN.as_ref()).unwrap();
+    let response = crate::admin_auth::handle(token, fleet.clone(), request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
 }
 
 #[test]

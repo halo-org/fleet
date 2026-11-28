@@ -253,17 +253,32 @@ impl WasmProvider {
                                                 fleet_kit::OAuthServer::Resource(resource)
                                             }
                                         },
-                                        client_id: config.client_id,
-                                        redirect_uri: config.redirect_uri,
+                                        client: match config.client {
+                                            auth::OauthClient::Registered(client) => {
+                                                fleet_kit::OAuthClient::Registered(
+                                                    fleet_kit::OAuthRegisteredClient {
+                                                        client_id: client.client_id,
+                                                        redirect_uri: client.redirect_uri,
+                                                        registration: client.registration.map(
+                                                            |registration| {
+                                                                fleet_kit::OAuthRegistration {
+                                                                    client_id_parameter:
+                                                                        registration
+                                                                            .client_id_parameter,
+                                                                    parameters: registration
+                                                                        .parameters,
+                                                                }
+                                                            },
+                                                        ),
+                                                    },
+                                                )
+                                            }
+                                            auth::OauthClient::Automatic => {
+                                                fleet_kit::OAuthClient::Automatic
+                                            }
+                                        },
                                         scopes: config.scopes,
                                         parameters: config.parameters,
-                                        registration: config.registration.map(|registration| {
-                                            fleet_kit::OAuthRegistration {
-                                                client_id_parameter: registration
-                                                    .client_id_parameter,
-                                                parameters: registration.parameters,
-                                            }
-                                        }),
                                         required_scopes: config.required_scopes,
                                     },
                                 ))

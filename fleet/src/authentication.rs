@@ -1,10 +1,12 @@
 use crate::{
     AuthenticationError, CredentialStore, IdleHandler, SandboxOAuth,
     oauth::{Authorization, Discovered, OAuth, Registration, Server, Tokens},
+    oauth_client::AutomaticClient,
 };
 use core::{pin::pin, time::Duration};
 use fleet_kit::{
-    AuthenticationKind, Connection, Credential, Credentials, OAuthConfig, OAuthServer,
+    AuthenticationKind, Connection, Credential, Credentials, OAuthClient, OAuthConfig,
+    OAuthRegisteredClient, OAuthServer,
 };
 use fleet_wasm::WasmOrigin;
 use futures_util::future::{self, Either};
@@ -34,8 +36,10 @@ pub struct ProviderCredentials {
 struct State {
     store: CredentialStore,
     oauth: OAuth,
+    client: Option<AutomaticClient>,
     host_id: String,
     connections: RwLock<BTreeMap<String, Arc<ConnectionState>>>,
+    hosted: std::sync::Mutex<BTreeMap<String, String>>,
     idle_handler: IdleHandler,
 }
 
@@ -56,6 +60,8 @@ struct Session {
 struct Record {
     registrations: BTreeMap<String, Registration>,
     credential: Option<SavedCredential>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    clients: BTreeMap<String, Registration>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -81,6 +87,7 @@ struct Attempt {
     method: String,
     requested: Option<Url>,
     authorization: Authorization,
+    identity: Option<Registration>,
     _cancelled: oneshot::Sender<()>,
 }
 
@@ -88,6 +95,7 @@ struct Attempt {
 pub struct AuthorizationInfo {
     pub id: String,
     pub url: String,
+    pub redirect_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
     pub status: AuthorizationStatus,
@@ -127,13 +135,17 @@ pub struct MethodInfo {
 
 impl Authentication {
     /// Opens protected credential storage.
+    ///
+    /// Without an automatic client, automatic sign-in fails.
     pub async fn open(
         directory: &Path,
+        client: Option<AutomaticClient>,
         idle_handler: IdleHandler,
     ) -> Result<Self, AuthenticationError> {
         Self::new(
             CredentialStore::open(directory)?,
             OAuth::new()?,
+            client,
             idle_handler,
         )
         .await
@@ -142,11 +154,13 @@ impl Authentication {
     /// Keeps credentials in memory and signs in only through the sandbox's OAuth provider.
     pub async fn sandbox(
         provider: SandboxOAuth,
+        client: Option<AutomaticClient>,
         idle_handler: IdleHandler,
     ) -> Result<Self, AuthenticationError> {
         Self::new(
             CredentialStore::memory()?,
             OAuth::sandbox(provider),
+            client,
             idle_handler,
         )
         .await
@@ -155,6 +169,7 @@ impl Authentication {
     async fn new(
         store: CredentialStore,
         oauth: OAuth,
+        client: Option<AutomaticClient>,
         idle_handler: IdleHandler,
     ) -> Result<Self, AuthenticationError> {
         let host_id = if let Some(id) = store.get("host_id")? {
@@ -179,11 +194,18 @@ impl Authentication {
             state: Arc::new(State {
                 store,
                 oauth,
+                client,
                 host_id,
                 connections: RwLock::new(BTreeMap::new()),
+                hosted: std::sync::Mutex::default(),
                 idle_handler,
             }),
         })
+    }
+
+    /// Returns this installation's client ID metadata document, if it has one.
+    pub fn client_metadata(&self) -> Option<serde_json::Value> {
+        self.state.client.as_ref()?.document()
     }
 
     /// Returns this installation's persistent host ID.
@@ -201,7 +223,8 @@ impl Authentication {
 
     /// Registers a provider's connections.
     ///
-    /// The provider's HTTP grant allows discovered servers beyond public HTTPS.
+    /// The provider's HTTP grant allows discovered servers beyond public HTTPS. Automatic
+    /// clients require a protected resource server.
     pub fn register(
         &self,
         namespace: &str,
@@ -227,6 +250,14 @@ impl Authentication {
                 if !valid_name(&method.name) || !names.insert(&method.name) {
                     return Err(AuthenticationError::Invalid(
                         "invalid or duplicate sign-in method",
+                    ));
+                }
+                if let AuthenticationKind::OAuth(config) = &method.kind
+                    && let (OAuthClient::Automatic, OAuthServer::Endpoints(_)) =
+                        (&config.client, &config.server)
+                {
+                    return Err(AuthenticationError::Invalid(
+                        "automatic OAuth clients require a protected resource server",
                     ));
                 }
             }
@@ -298,8 +329,13 @@ impl Authentication {
                             AuthenticationKind::OAuth(_) => "oauth",
                         },
                         redirect_uri: match &method.kind {
+                            AuthenticationKind::OAuth(config) => match &config.client {
+                                OAuthClient::Registered(client) => {
+                                    Some(client.redirect_uri.clone())
+                                }
+                                OAuthClient::Automatic => None,
+                            },
                             AuthenticationKind::ApiKey => None,
-                            AuthenticationKind::OAuth(config) => Some(config.redirect_uri.clone()),
                         },
                         resource: match &method.kind {
                             AuthenticationKind::OAuth(config) => match &config.server {
@@ -319,8 +355,10 @@ impl Authentication {
     ///
     /// A client that receives the callback at a `requested` redirect URI delivers it with
     /// [`callback`](Self::callback). Without one, Fleet also listens at the registered URI.
-    /// A pending attempt with the same method and redirect URI is returned instead.
-    /// A protected resource's server is discovered without blocking the connection.
+    /// Automatic clients take no `requested` URI, since Fleet receives their callback with
+    /// [`hosted_callback`](Self::hosted_callback). A pending attempt with the same method
+    /// and redirect URI is returned instead. A protected resource's server is discovered,
+    /// and an automatic client identified, without blocking the connection.
     pub async fn authorize(
         &self,
         id: &str,
@@ -334,24 +372,50 @@ impl Authentication {
             .ok_or(AuthenticationError::Cancelled)?;
         let connection = self.connection(id)?;
         let config = oauth_config(&connection, method)?;
-        let mut redirect_uri = crate::oauth::redirect_uri(&config.redirect_uri, requested)?;
+        let mut redirect_uri = match (&config.client, requested) {
+            (OAuthClient::Registered(client), _) => {
+                crate::oauth::redirect_uri(&client.redirect_uri, requested)?
+            }
+            (OAuthClient::Automatic, None) => self.automatic_client()?.redirect_uri().clone(),
+            (OAuthClient::Automatic, Some(_)) => {
+                return Err(AuthenticationError::Invalid(
+                    "automatic OAuth clients use Fleet's own redirect URI",
+                ));
+            }
+        };
         let requested = requested.map(|_| redirect_uri.clone());
         let mut session = connection.session.lock().await;
         self.flush(id, &mut session).await?;
         if let Some(info) = pending(&session, method, requested.as_ref()) {
             return Ok(info);
         }
+        let stored = session.record.clients.get(method).cloned();
         drop(session);
         let metadata = self
             .state
             .oauth
             .discover(config, &connection.origins)
             .await?;
+        let identity = match (&config.client, &metadata) {
+            (OAuthClient::Automatic, Some(metadata)) => {
+                let (client, origins) = (self.automatic_client()?, &connection.origins);
+                let identity =
+                    self.state
+                        .oauth
+                        .identify(client, metadata, stored.as_ref(), origins);
+                Some(identity.await?)
+            }
+            _ => None,
+        };
         let mut session = connection.session.lock().await;
+        let identity = identity
+            .map(|identity| session.keep_client(method, stored.as_ref(), identity))
+            .transpose()?;
+        self.flush(id, &mut session).await?;
         if let Some(info) = pending(&session, method, requested.as_ref()) {
             return Ok(info);
         }
-        let listener = if requested.is_none() {
+        let listener = if let (OAuthClient::Registered(_), None) = (&config.client, &requested) {
             Some(crate::oauth_callback::bind(&mut redirect_uri).await?)
         } else {
             None
@@ -359,12 +423,15 @@ impl Authentication {
         let authorization = self.state.oauth.authorize(
             config,
             metadata,
-            session.record.registrations.get(method),
+            identity
+                .as_ref()
+                .or_else(|| session.record.registrations.get(method)),
             redirect_uri,
         )?;
         let info = AuthorizationInfo {
             id: authorization.id.clone(),
             url: authorization.url.clone(),
+            redirect_uri: authorization.redirect_uri.to_string(),
             issuer: authorization
                 .server
                 .as_ref()
@@ -372,6 +439,9 @@ impl Authentication {
             status: AuthorizationStatus::Pending,
             error: None,
         };
+        if identity.is_some() {
+            self.hosted().insert(info.id.clone(), id.to_owned());
+        }
         let callback = listener.map(|listener| (listener, authorization.redirect_uri.clone()));
         let (cancelled, cancellation) = oneshot::channel();
         session.authorization = Some(PendingAuthorization {
@@ -380,6 +450,7 @@ impl Authentication {
                 method: method.to_owned(),
                 requested,
                 authorization,
+                identity,
                 _cancelled: cancelled,
             }),
         });
@@ -427,6 +498,32 @@ impl Authentication {
         Ok(info)
     }
 
+    /// Completes an automatic client's authorization with a callback Fleet received.
+    ///
+    /// Returns nothing unless the callback's state names a pending attempt whose redirect
+    /// URI is Fleet's own. Only such a callback counts as activity.
+    pub async fn hosted_callback(&self, query: Option<&str>) -> Option<AuthorizationInfo> {
+        let (_, state) = form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+            .find(|(name, _)| name == "state")?;
+        let id = self.hosted().get(state.as_ref())?.clone();
+        let redirect_uri = self.state.client.as_ref()?.redirect_uri();
+        let connection = self.connection(&id).ok()?;
+        let mut session = connection.session.lock().await;
+        session
+            .authorization
+            .as_ref()
+            .filter(|pending| pending.info.id == state)
+            .and_then(|pending| pending.attempt.as_ref())
+            .filter(|attempt| attempt.authorization.redirect_uri == *redirect_uri)?;
+        let parameters = crate::oauth_callback::parameters(query, &state).ok()?;
+        let _guard = self.state.idle_handler.track_mutation()?;
+        let info = self
+            .receive(&id, &connection, &mut session, Ok(parameters))
+            .await;
+        drop(session);
+        Some(info)
+    }
+
     async fn wait(
         &self,
         id: &str,
@@ -451,12 +548,16 @@ impl Authentication {
             )
             .await
             {
-                Either::Left(_) => return,
-                Either::Right((Either::Left((Ok(parameters), _)), _)) => parameters,
-                Either::Right(_) => Err(AuthenticationError::Cancelled),
+                Either::Left(_) => None,
+                Either::Right((Either::Left((Ok(parameters), _)), _)) => Some(parameters),
+                Either::Right(_) => Some(Err(AuthenticationError::Cancelled)),
             }
         };
         drop(callback);
+        self.hosted().remove(authorization_id);
+        let Some(parameters) = parameters else {
+            return;
+        };
         let Ok(connection) = self.connection(id) else {
             return;
         };
@@ -535,23 +636,29 @@ impl Authentication {
             .ok_or(AuthenticationError::Invalid(
                 "authorization code is missing",
             ))?;
-        let registration = registration(
-            config,
-            session
+        let registration = match (&config.client, &attempt.identity) {
+            (OAuthClient::Registered(client), _) => registration(
+                client,
+                session
+                    .record
+                    .registrations
+                    .get(&attempt.method)
+                    .filter(|registration| {
+                        registration.issued_by(attempt.authorization.server.as_ref())
+                    }),
+                parameters,
+                attempt.authorization.server.as_ref(),
+            )?,
+            (OAuthClient::Automatic, identity) => identity.clone().ok_or(
+                AuthenticationError::Invalid("OAuth client was not identified"),
+            )?,
+        };
+        if let OAuthClient::Registered(_) = config.client
+            && session
                 .record
-                .registrations
-                .get(&attempt.method)
-                .filter(|registration| {
-                    registration.issued_by(attempt.authorization.server.as_ref())
-                }),
-            parameters,
-            attempt.authorization.server.as_ref(),
-        )?;
-        if session
-            .record
-            .credential
-            .as_ref()
-            .is_none_or(|credential| credential.method != attempt.method)
+                .credential
+                .as_ref()
+                .is_none_or(|credential| credential.method != attempt.method)
         {
             session
                 .record
@@ -561,11 +668,16 @@ impl Authentication {
             self.flush(id, session).await?;
         }
         let mut registration = registration;
-        let tokens = self
+        let result = self
             .state
             .oauth
             .exchange(server, &mut registration, &attempt.authorization, code)
-            .await?;
+            .await;
+        if matches!(result, Err(AuthenticationError::ClientRejected)) {
+            session.reject_client(&attempt.method, &registration);
+            self.flush(id, session).await?;
+        }
+        let tokens = result?;
         let authorized = authorized(config, &tokens);
         session
             .record
@@ -667,6 +779,23 @@ impl Authentication {
         Ok(revoked)
     }
 
+    fn automatic_client(&self) -> Result<&AutomaticClient, AuthenticationError> {
+        self.state
+            .client
+            .as_ref()
+            .ok_or(AuthenticationError::Invalid(
+                "automatic sign-in needs public_url when Fleet listens on port 0",
+            ))
+    }
+
+    /// Returns the connections of pending attempts whose callbacks Fleet receives.
+    fn hosted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
+        self.state
+            .hosted
+            .lock()
+            .expect("hosted attempt lock is not poisoned")
+    }
+
     fn connection(&self, id: &str) -> Result<Arc<ConnectionState>, AuthenticationError> {
         self.state
             .connections
@@ -715,11 +844,16 @@ impl Authentication {
                         .get(&credential.method)
                         .cloned()
                         .ok_or(AuthenticationError::Unauthorized)?;
-                    tokens = self
+                    let result = self
                         .state
                         .oauth
                         .refresh(server, &mut registration, &tokens)
-                        .await?;
+                        .await;
+                    if matches!(result, Err(AuthenticationError::ClientRejected)) {
+                        session.reject_client(&credential.method, &registration);
+                        self.flush(id, &mut session).await?;
+                    }
+                    tokens = result?;
                     session
                         .record
                         .registrations
@@ -741,6 +875,63 @@ impl Authentication {
                     id_token: tokens.id_token,
                 }))
             }
+        }
+    }
+}
+
+impl Session {
+    /// Returns the dynamic registration to use for a method, keeping a new one.
+    ///
+    /// A registration kept for the same issuer and redirect URI takes precedence. Reusing
+    /// the `stored` registration an attempt read before discovery is cancelled if it has
+    /// been discarded since.
+    fn keep_client(
+        &mut self,
+        method: &str,
+        stored: Option<&Registration>,
+        identity: Registration,
+    ) -> Result<Registration, AuthenticationError> {
+        if identity.redirect_uri.is_none() {
+            return Ok(identity);
+        }
+        let kept = self.record.clients.get(method);
+        if stored == Some(&identity) && kept != stored {
+            return Err(AuthenticationError::Cancelled);
+        }
+        if let Some(client) = kept
+            && client.issuer == identity.issuer
+            && client.redirect_uri == identity.redirect_uri
+        {
+            return Ok(client.clone());
+        }
+        self.record
+            .clients
+            .insert(method.to_owned(), identity.clone());
+        self.dirty = true;
+        Ok(identity)
+    }
+
+    /// Discards a dynamic registration that the authorization server rejected, and any
+    /// pending attempt that uses it.
+    fn reject_client(&mut self, method: &str, rejected: &Registration) {
+        let matches = |client: &Registration| {
+            client.client_id == rejected.client_id
+                && client.issuer == rejected.issuer
+                && client.redirect_uri == rejected.redirect_uri
+        };
+        if self.record.clients.get(method).is_some_and(matches) {
+            self.record.clients.remove(method);
+            self.dirty = true;
+        }
+        if self
+            .authorization
+            .as_ref()
+            .and_then(|pending| pending.attempt.as_ref())
+            .is_some_and(|attempt| {
+                attempt.method == method && attempt.identity.as_ref().is_some_and(matches)
+            })
+        {
+            self.authorization = None;
         }
     }
 }
@@ -835,7 +1026,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn registration(
-    config: &OAuthConfig,
+    config: &OAuthRegisteredClient,
     existing: Option<&Registration>,
     parameters: &BTreeMap<String, String>,
     server: Option<&Discovered>,
@@ -885,7 +1076,7 @@ mod tests {
         header,
     };
     use hyper_util::rt::TokioIo;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     type Requests = Arc<std::sync::Mutex<Vec<(String, BTreeMap<String, String>)>>>;
 
@@ -903,6 +1094,17 @@ mod tests {
         }
     }
 
+    fn client() -> OAuthRegisteredClient {
+        OAuthRegisteredClient {
+            client_id: "register".into(),
+            redirect_uri: "http://127.0.0.1:0/callback".into(),
+            registration: Some(OAuthRegistration {
+                client_id_parameter: "client_id".into(),
+                parameters: vec![],
+            }),
+        }
+    }
+
     fn config() -> OAuthConfig {
         OAuthConfig {
             server: OAuthServer::Endpoints(OAuthEndpoints {
@@ -911,29 +1113,45 @@ mod tests {
                 resource: None,
                 issuer: None,
             }),
-            client_id: "register".into(),
-            redirect_uri: "http://127.0.0.1:0/callback".into(),
+            client: OAuthClient::Registered(client()),
             scopes: vec![],
             parameters: vec![],
-            registration: Some(OAuthRegistration {
-                client_id_parameter: "client_id".into(),
-                parameters: vec![],
-            }),
             required_scopes: vec![],
         }
     }
 
     fn resource(name: &str, url: String, scopes: &[&str]) -> AuthenticationMethod {
+        let client = OAuthClient::Registered(OAuthRegisteredClient {
+            client_id: "fleet".into(),
+            redirect_uri: "http://127.0.0.1:0/callback".into(),
+            registration: None,
+        });
+        method(name, OAuthServer::Resource(url), client, scopes)
+    }
+
+    fn automatic(name: &str, url: String) -> AuthenticationMethod {
+        method(
+            name,
+            OAuthServer::Resource(url),
+            OAuthClient::Automatic,
+            &[],
+        )
+    }
+
+    fn method(
+        name: &str,
+        server: OAuthServer,
+        client: OAuthClient,
+        scopes: &[&str],
+    ) -> AuthenticationMethod {
         AuthenticationMethod {
             name: name.into(),
             title: "Sign in".into(),
             kind: AuthenticationKind::OAuth(Box::new(OAuthConfig {
-                server: OAuthServer::Resource(url),
-                client_id: "fleet".into(),
-                redirect_uri: "http://127.0.0.1:0/callback".into(),
+                server,
+                client,
                 scopes: scopes.iter().copied().map(Into::into).collect(),
                 parameters: vec![],
-                registration: None,
                 required_scopes: vec![],
             })),
         }
@@ -973,6 +1191,25 @@ mod tests {
         (origin, requests)
     }
 
+    /// Returns how the automatic client's server `name` lets clients identify themselves.
+    fn clients(origin: &str, name: &str) -> Option<Value> {
+        let register = format!("{origin}/register");
+        Some(match name {
+            "dcr" => json!({ "registration_endpoint": register }),
+            "cimd" => json!({
+                "registration_endpoint": register,
+                "client_id_metadata_document_supported": true,
+            }),
+            "remote" => json!({ "registration_endpoint": "http://localhost:9/register" }),
+            "secret" => json!({ "registration_endpoint": format!("{origin}/secret") }),
+            "rejected" => json!({
+                "registration_endpoint": register,
+                "token_endpoint": format!("{origin}/rejecting"),
+            }),
+            _ => return None,
+        })
+    }
+
     fn respond(origin: &str, target: &str, count: usize) -> Response<Full<Bytes>> {
         let server = |issuer: String, token_path: &str| {
             json!({
@@ -983,6 +1220,25 @@ mod tests {
                 "code_challenge_methods_supported": ["S256"],
             })
         };
+        if let Some((kind, name)) = target
+            .strip_prefix("/.well-known/")
+            .and_then(|path| path.split_once('/'))
+            && let Some(clients) = clients(origin, name)
+        {
+            let body = if kind == "oauth-protected-resource" {
+                json!({
+                    "resource": format!("{origin}/{name}"),
+                    "authorization_servers": [format!("{origin}/{name}")],
+                })
+            } else {
+                let mut metadata = server(format!("{origin}/{name}"), "/token");
+                for (field, value) in clients.as_object().unwrap() {
+                    metadata[field] = value.clone();
+                }
+                metadata
+            };
+            return Response::new(Full::new(body.to_string().into()));
+        }
         let body = match target {
             "/.well-known/oauth-protected-resource/mcp" => json!({
                 "resource": format!("{origin}/mcp"),
@@ -1029,6 +1285,14 @@ mod tests {
                 "token_type": "Bearer",
                 "refresh_token": format!("refresh-{count}"),
             }),
+            "/register" => json!({ "client_id": format!("client-{count}") }),
+            "/secret" => json!({ "client_id": "client", "client_secret": "secret" }),
+            "/rejecting" => {
+                let body = json!({ "error": "invalid_client" }).to_string();
+                let mut response = Response::new(Full::new(body.into()));
+                *response.status_mut() = StatusCode::UNAUTHORIZED;
+                return response;
+            }
             "/failing" => {
                 let body = json!({ "error": "server_error" }).to_string();
                 let mut response = Response::new(Full::new(body.into()));
@@ -1045,14 +1309,18 @@ mod tests {
         Response::new(Full::new(body.to_string().into()))
     }
 
+    fn automatic_client() -> AutomaticClient {
+        AutomaticClient::new("http://127.0.0.1:1337".into(), None)
+    }
+
     async fn memory() -> Authentication {
-        Authentication::new(
-            CredentialStore::memory().unwrap(),
-            OAuth::new().unwrap(),
-            IdleHandler::new(None),
-        )
-        .await
-        .unwrap()
+        open(CredentialStore::memory().unwrap(), Some(automatic_client())).await
+    }
+
+    async fn open(store: CredentialStore, client: Option<AutomaticClient>) -> Authentication {
+        Authentication::new(store, OAuth::new().unwrap(), client, IdleHandler::new(None))
+            .await
+            .unwrap()
     }
 
     fn query(url: &str) -> BTreeMap<String, String> {
@@ -1076,9 +1344,13 @@ mod tests {
 
         runtime.block_on(async {
             let host_id = {
-                let authentication = Authentication::open(&directory, IdleHandler::new(None))
-                    .await
-                    .unwrap();
+                let authentication = Authentication::open(
+                    &directory,
+                    Some(automatic_client()),
+                    IdleHandler::new(None),
+                )
+                .await
+                .unwrap();
                 authentication
                     .register("first", &[], vec![connection()])
                     .unwrap();
@@ -1105,9 +1377,10 @@ mod tests {
 
                 authentication.host_id().to_owned()
             };
-            let authentication = Authentication::open(&directory, IdleHandler::new(None))
-                .await
-                .unwrap();
+            let authentication =
+                Authentication::open(&directory, Some(automatic_client()), IdleHandler::new(None))
+                    .await
+                    .unwrap();
             authentication
                 .register("first", &[], vec![connection()])
                 .unwrap();
@@ -1148,9 +1421,10 @@ mod tests {
         });
 
         runtime.block_on(async {
-            let authentication = Authentication::open(&directory, IdleHandler::new(None))
-                .await
-                .unwrap();
+            let authentication =
+                Authentication::open(&directory, Some(automatic_client()), IdleHandler::new(None))
+                    .await
+                    .unwrap();
             authentication
                 .register("first", &[], vec![definition])
                 .unwrap();
@@ -1181,6 +1455,7 @@ mod tests {
 
             assert_eq!(repeated.id, first.id);
             assert_ne!(second.id, first.id);
+            assert_eq!(first.redirect_uri, "http://127.0.0.1:3000/callback");
 
             let replaced = format!(
                 "http://127.0.0.1:3000/callback?state={}&error=access_denied",
@@ -1226,7 +1501,7 @@ mod tests {
 
     #[test]
     fn registration_requires_an_issued_client_id() {
-        let config = config();
+        let config = client();
         for parameters in [
             BTreeMap::new(),
             BTreeMap::from([("client_id".into(), "register".into())]),
@@ -1243,12 +1518,11 @@ mod tests {
 
     #[test]
     fn registration_preserves_the_selected_account() {
-        let config = config();
+        let config = client();
         let existing = Registration {
             client_id: "issued".into(),
             subject: Some("account".into()),
-            email: None,
-            issuer: None,
+            ..Registration::default()
         };
         let registration =
             super::registration(&config, Some(&existing), &BTreeMap::new(), None).unwrap();
@@ -1547,9 +1821,7 @@ mod tests {
                 },
             });
             store.put("first:account".into(), &record).await.unwrap();
-            let authentication = Authentication::new(store, OAuth::new().unwrap(), IdleHandler::new(None))
-                .await
-                .unwrap();
+            let authentication = open(store, Some(automatic_client())).await;
             let mut definition = connection();
             let mut config = config();
             config.server = OAuthServer::Endpoints(OAuthEndpoints {
@@ -1598,7 +1870,10 @@ mod tests {
                 resource: None,
                 issuer: None,
             });
-            config.registration = None;
+            config.client = OAuthClient::Registered(OAuthRegisteredClient {
+                registration: None,
+                ..client()
+            });
             let mut definition = connection();
             definition.methods = vec![AuthenticationMethod {
                 name: "oauth".into(),
@@ -1674,6 +1949,428 @@ mod tests {
     }
 
     #[test]
+    fn automatic_clients_register_once_and_receive_their_callback() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let authentication = memory().await;
+            let mut definition = connection();
+            definition.methods = vec![automatic("dcr", format!("{origin}/dcr"))];
+            authentication
+                .register("first", &grant, vec![definition])
+                .unwrap();
+            let connections = authentication.connections().await;
+            let first = authentication
+                .authorize("first:account", "dcr", None)
+                .await
+                .unwrap();
+            let parameters = query(&first.url);
+
+            assert_eq!(connections[0].methods[0].redirect_uri, None);
+            assert_eq!(first.redirect_uri, "http://127.0.0.1:1337/oauth/callback");
+            assert_eq!(parameters["client_id"], "client-3");
+            assert_eq!(
+                parameters["redirect_uri"],
+                "http://127.0.0.1:1337/oauth/callback"
+            );
+
+            let callback = format!("state={}&code=granted&iss={origin}/dcr", first.id);
+            let completed = authentication.hosted_callback(Some(&callback)).await;
+            let repeated = authentication.hosted_callback(Some(&callback)).await;
+            let second = authentication
+                .authorize("first:account", "dcr", None)
+                .await
+                .unwrap();
+            let pasted = format!(
+                "http://127.0.0.1:1337/oauth/callback?state={}&code=granted&iss={origin}/dcr",
+                second.id
+            );
+            let pasted = authentication
+                .callback("first:account", &second.id, &pasted)
+                .await
+                .unwrap();
+            let credential = authentication
+                .scope("first")
+                .get("account")
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(completed.unwrap().status, AuthorizationStatus::Complete);
+            assert!(repeated.is_none());
+            assert_eq!(query(&second.url)["client_id"], "client-3");
+            assert_eq!(pasted.status, AuthorizationStatus::Complete);
+            assert!(matches!(credential, Credential::OAuth { access_token, .. } if access_token == "access-7"));
+            let requests = requests.lock().unwrap().clone();
+            let targets: Vec<_> = requests.iter().map(|(target, _)| target.as_str()).collect();
+            assert_eq!(
+                targets,
+                [
+                    "/.well-known/oauth-protected-resource/dcr",
+                    "/.well-known/oauth-authorization-server/dcr",
+                    "/register",
+                    "/token",
+                    "/.well-known/oauth-protected-resource/dcr",
+                    "/.well-known/oauth-authorization-server/dcr",
+                    "/token",
+                ]
+            );
+            assert_eq!(requests[3].1["client_id"], "client-3");
+            assert_eq!(
+                requests[3].1["redirect_uri"],
+                "http://127.0.0.1:1337/oauth/callback"
+            );
+        });
+    }
+
+    #[test]
+    fn dynamic_registrations_belong_to_their_issuer_and_redirect_uri() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, _) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let hosted = "http://127.0.0.1:1337/oauth/callback";
+            let mut client_ids = Vec::new();
+            for (issuer, redirect_uri) in [
+                (format!("{origin}/dcr"), hosted),
+                (format!("{origin}/other"), hosted),
+                (
+                    format!("{origin}/dcr"),
+                    "http://127.0.0.1:1338/oauth/callback",
+                ),
+            ] {
+                let store = CredentialStore::memory().unwrap();
+                let record = json!({
+                    "registrations": {},
+                    "credential": null,
+                    "clients": {
+                        "dcr": {
+                            "client_id": "stored",
+                            "subject": null,
+                            "email": null,
+                            "issuer": issuer,
+                            "redirect_uri": redirect_uri,
+                        },
+                    },
+                });
+                store.put("first:account".into(), &record).await.unwrap();
+                let authentication = open(store, Some(automatic_client())).await;
+                let mut definition = connection();
+                definition.methods = vec![automatic("dcr", format!("{origin}/dcr"))];
+                authentication
+                    .register("first", &grant, vec![definition])
+                    .unwrap();
+                let info = authentication
+                    .authorize("first:account", "dcr", None)
+                    .await
+                    .unwrap();
+                client_ids.push(query(&info.url).remove("client_id").unwrap());
+            }
+
+            assert_eq!(client_ids, ["stored", "client-5", "client-8"]);
+        });
+    }
+
+    #[test]
+    fn metadata_documents_identify_fleet_at_an_https_public_url() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let mut parameters = Vec::new();
+            for public_url in ["https://fleet.example.com", "http://127.0.0.1:1337"] {
+                let client = AutomaticClient::new(public_url.into(), None);
+                let authentication = open(CredentialStore::memory().unwrap(), Some(client)).await;
+                let mut definition = connection();
+                definition.methods = vec![automatic("cimd", format!("{origin}/cimd"))];
+                authentication
+                    .register("first", &grant, vec![definition])
+                    .unwrap();
+                let info = authentication
+                    .authorize("first:account", "cimd", None)
+                    .await
+                    .unwrap();
+                let mut query = query(&info.url);
+                parameters.push((
+                    query.remove("client_id").unwrap(),
+                    query.remove("redirect_uri").unwrap(),
+                ));
+            }
+
+            assert_eq!(
+                parameters,
+                [
+                    (
+                        "https://fleet.example.com/oauth/client.json".into(),
+                        "https://fleet.example.com/oauth/callback".into(),
+                    ),
+                    (
+                        "client-5".into(),
+                        "http://127.0.0.1:1337/oauth/callback".into(),
+                    ),
+                ]
+            );
+            let registrations = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(target, _)| target == "/register")
+                .count();
+            assert_eq!(registrations, 1);
+        });
+    }
+
+    #[test]
+    fn hosted_callbacks_complete_only_pending_automatic_attempts() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let authentication = memory().await;
+            let mut first = connection();
+            first.methods = vec![automatic("dcr", format!("{origin}/dcr"))];
+            let mut second = connection();
+            let endpoints = OAuthServer::Endpoints(OAuthEndpoints {
+                authorization_url: format!("{origin}/authorize"),
+                token_url: format!("{origin}/token"),
+                resource: None,
+                issuer: None,
+            });
+            let client = OAuthClient::Registered(OAuthRegisteredClient {
+                client_id: "fleet".into(),
+                redirect_uri: "http://127.0.0.1:0/oauth/callback".into(),
+                registration: None,
+            });
+            second.methods = vec![method("oauth", endpoints, client, &[])];
+            authentication
+                .register("first", &grant, vec![first])
+                .unwrap();
+            authentication
+                .register("second", &[], vec![second])
+                .unwrap();
+            let automatic = authentication
+                .authorize("first:account", "dcr", None)
+                .await
+                .unwrap();
+            let registered = authentication
+                .authorize(
+                    "second:account",
+                    "oauth",
+                    Some("http://127.0.0.1:1337/oauth/callback"),
+                )
+                .await
+                .unwrap();
+            let activity = authentication.state.idle_handler.last_activity();
+            for query in [
+                None,
+                Some("code=granted".into()),
+                Some("state=unknown&code=granted".into()),
+                Some(format!("state={}&code=granted", registered.id)),
+                Some(format!("state={0}&state={0}&code=granted", automatic.id)),
+            ] {
+                assert!(
+                    authentication
+                        .hosted_callback(query.as_deref())
+                        .await
+                        .is_none()
+                );
+            }
+            let first = authentication
+                .authorization("first:account", &automatic.id)
+                .await
+                .unwrap();
+            let second = authentication
+                .authorization("second:account", &registered.id)
+                .await
+                .unwrap();
+
+            assert_eq!(first.status, AuthorizationStatus::Pending);
+            assert_eq!(second.status, AuthorizationStatus::Pending);
+            assert_eq!(authentication.state.idle_handler.last_activity(), activity);
+
+            let callback = format!("state={}&code=granted&iss={origin}/dcr", automatic.id);
+            let completed = authentication.hosted_callback(Some(&callback)).await;
+            assert_ne!(authentication.state.idle_handler.last_activity(), activity);
+            let expiring = authentication
+                .authorize("first:account", "dcr", None)
+                .await
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::sleep(Duration::from_secs(601)).await;
+            let expired = authentication
+                .authorization("first:account", &expiring.id)
+                .await
+                .unwrap();
+            let callback = format!("state={}&code=granted&iss={origin}/dcr", expiring.id);
+            let late = authentication.hosted_callback(Some(&callback)).await;
+
+            assert_eq!(completed.unwrap().status, AuthorizationStatus::Complete);
+            assert_eq!(expired.status, AuthorizationStatus::Failed);
+            assert!(late.is_none());
+            let tokens = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(target, _)| target == "/token")
+                .count();
+            assert_eq!(tokens, 1);
+        });
+    }
+
+    #[test]
+    fn dynamic_registrations_rejected_at_exchange_are_discarded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, _) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let mut definition = connection();
+            definition.methods = vec![automatic("rejected", format!("{origin}/rejected"))];
+            let authentication = memory().await;
+            authentication
+                .register("first", &grant, vec![definition])
+                .unwrap();
+            let first = authentication
+                .authorize("first:account", "rejected", None)
+                .await
+                .unwrap();
+            let callback = format!("state={}&code=granted&iss={origin}/rejected", first.id);
+            let failed = authentication
+                .hosted_callback(Some(&callback))
+                .await
+                .unwrap();
+            let second = authentication
+                .authorize("first:account", "rejected", None)
+                .await
+                .unwrap();
+
+            assert_eq!(failed.status, AuthorizationStatus::Failed);
+            assert_eq!(
+                failed.error.unwrap(),
+                AuthenticationError::ClientRejected.to_string()
+            );
+            assert_eq!(query(&first.url)["client_id"], "client-3");
+            assert_eq!(query(&second.url)["client_id"], "client-7");
+        });
+    }
+
+    #[test]
+    fn dynamic_registrations_rejected_at_refresh_are_discarded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let mut definition = connection();
+            definition.methods = vec![automatic("rejected", format!("{origin}/rejected"))];
+
+            let mut errors = Vec::new();
+            let client = json!({
+                "client_id": "stored",
+                "subject": null,
+                "email": null,
+                "issuer": format!("{origin}/rejected"),
+                "redirect_uri": "http://127.0.0.1:1337/oauth/callback",
+            });
+            for dynamic in [true, false] {
+                let mut registration = client.clone();
+                if !dynamic {
+                    registration["redirect_uri"] = Value::Null;
+                }
+                let record = json!({
+                    "registrations": { "rejected": registration },
+                    "credential": {
+                        "method": "rejected",
+                        "secret": {
+                            "OAuth": {
+                                "access_token": "saved",
+                                "refresh_token": "saved-refresh",
+                                "id_token": null,
+                                "expires_at": 0,
+                                "scopes": [],
+                            },
+                        },
+                        "server": {
+                            "resource": format!("{origin}/rejected"),
+                            "issuer": format!("{origin}/rejected"),
+                            "token_endpoint": format!("{origin}/rejecting"),
+                            "revocation_endpoint": null,
+                        },
+                    },
+                    "clients": { "rejected": client },
+                });
+                let store = CredentialStore::memory().unwrap();
+                store.put("first:account".into(), &record).await.unwrap();
+                let authentication = open(store, Some(automatic_client())).await;
+                authentication
+                    .register("first", &grant, vec![definition.clone()])
+                    .unwrap();
+                let pending = authentication
+                    .authorize("first:account", "rejected", None)
+                    .await
+                    .unwrap();
+                let error = authentication
+                    .scope("first")
+                    .get("account")
+                    .await
+                    .err()
+                    .unwrap();
+                let info = authentication
+                    .authorize("first:account", "rejected", None)
+                    .await
+                    .unwrap();
+                assert_eq!(query(&pending.url)["client_id"], "stored");
+                assert_eq!(info.id == pending.id, !dynamic);
+                errors.push((error.to_string(), query(&info.url).remove("client_id")));
+            }
+
+            assert_eq!(
+                errors,
+                [
+                    (
+                        AuthenticationError::ClientRejected.to_string(),
+                        Some("client-6".into())
+                    ),
+                    (
+                        "authorization server returned HTTP 401".into(),
+                        Some("stored".into())
+                    ),
+                ]
+            );
+            let registrations = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(target, _)| target == "/register")
+                .count();
+            assert_eq!(registrations, 1);
+        });
+    }
+
+    #[test]
     fn failed_sign_ins_keep_the_credential_registration() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1714,10 +2411,7 @@ mod tests {
                 },
             });
             store.put("first:account".into(), &record).await.unwrap();
-            let authentication =
-                Authentication::new(store, OAuth::new().unwrap(), IdleHandler::new(None))
-                    .await
-                    .unwrap();
+            let authentication = open(store, Some(automatic_client())).await;
             let mut config = config();
             config.server = OAuthServer::Resource(resource.clone());
             let mut definition = connection();
@@ -1764,6 +2458,189 @@ mod tests {
     }
 
     #[test]
+    fn failed_automatic_sign_ins_keep_the_credential_registration() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let issuer = format!("{origin}/rejected");
+            let registration = json!({
+                "client_id": "stored",
+                "subject": null,
+                "email": null,
+                "issuer": issuer,
+                "redirect_uri": "http://127.0.0.1:1338/oauth/callback",
+            });
+            let record = json!({
+                "registrations": { "rejected": registration },
+                "credential": {
+                    "method": "rejected",
+                    "secret": {
+                        "OAuth": {
+                            "access_token": "saved",
+                            "refresh_token": "saved-refresh",
+                            "id_token": null,
+                            "expires_at": 0,
+                            "scopes": [],
+                        },
+                    },
+                    "server": {
+                        "resource": issuer,
+                        "issuer": issuer,
+                        "token_endpoint": format!("{origin}/token"),
+                        "revocation_endpoint": null,
+                    },
+                },
+                "clients": { "rejected": registration },
+            });
+            let store = CredentialStore::memory().unwrap();
+            store.put("first:account".into(), &record).await.unwrap();
+            let authentication = open(store, Some(automatic_client())).await;
+            let mut definition = connection();
+            definition.methods = vec![automatic("rejected", issuer.clone())];
+            authentication
+                .register("first", &grant, vec![definition])
+                .unwrap();
+            let info = authentication
+                .authorize("first:account", "rejected", None)
+                .await
+                .unwrap();
+            let callback = format!("state={}&code=granted&iss={issuer}", info.id);
+            let failed = authentication.hosted_callback(Some(&callback)).await;
+            let credential = authentication
+                .scope("first")
+                .get("account")
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(query(&info.url)["client_id"], "client-3");
+            assert_eq!(failed.unwrap().status, AuthorizationStatus::Failed);
+            assert!(matches!(credential, Credential::OAuth { access_token, .. } if access_token == "access-5"));
+            let requests = requests.lock().unwrap().clone();
+            assert_eq!(requests[4].0, "/token");
+            assert_eq!(requests[4].1["client_id"], "stored");
+        });
+    }
+
+    #[test]
+    fn sessions_keep_one_dynamic_registration_per_binding() {
+        let client = |client_id: &str, issuer: &str| Registration {
+            client_id: client_id.into(),
+            issuer: Some(issuer.into()),
+            redirect_uri: Some("http://127.0.0.1:1337/oauth/callback".into()),
+            ..Registration::default()
+        };
+        let mut session = Session {
+            record: Record::default(),
+            dirty: false,
+            authorization: None,
+        };
+        let kept = [
+            client("first", "https://a.example.com"),
+            client("second", "https://a.example.com"),
+            client("first", "https://b.example.com"),
+        ]
+        .map(|identity| session.keep_client("dcr", None, identity).unwrap());
+
+        assert_eq!(kept.map(|kept| kept.client_id), ["first", "first", "first"]);
+        assert_eq!(
+            session.record.clients["dcr"].issuer.as_deref(),
+            Some("https://b.example.com")
+        );
+
+        session.reject_client("dcr", &client("first", "https://a.example.com"));
+        assert!(session.record.clients.contains_key("dcr"));
+        session.reject_client("dcr", &client("first", "https://b.example.com"));
+        assert!(session.record.clients.is_empty());
+
+        let stored = client("first", "https://b.example.com");
+        let error = session
+            .keep_client("dcr", Some(&stored), stored.clone())
+            .unwrap_err();
+        assert!(matches!(error, AuthenticationError::Cancelled));
+        assert!(session.record.clients.is_empty());
+    }
+
+    #[test]
+    fn automatic_clients_refuse_what_they_cannot_use() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let (origin, requests) = serve().await;
+            let grant = [origin.parse::<WasmOrigin>().unwrap()];
+            let authentication = memory().await;
+            let mut declared = connection();
+            let endpoints = OAuthServer::Endpoints(OAuthEndpoints {
+                authorization_url: format!("{origin}/authorize"),
+                token_url: format!("{origin}/token"),
+                resource: None,
+                issuer: None,
+            });
+            declared.methods = vec![method("oauth", endpoints, OAuthClient::Automatic, &[])];
+            let error = authentication
+                .register("first", &grant, vec![declared])
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "automatic OAuth clients require a protected resource server"
+            );
+
+            let mut definition = connection();
+            definition.methods = vec![
+                automatic("dcr", format!("{origin}/dcr")),
+                automatic("remote", format!("{origin}/remote")),
+                automatic("secret", format!("{origin}/secret")),
+            ];
+            authentication
+                .register("second", &grant, vec![definition.clone()])
+                .unwrap();
+            let unconfigured = open(CredentialStore::memory().unwrap(), None).await;
+            unconfigured
+                .register("second", &grant, vec![definition])
+                .unwrap();
+            let mut errors = Vec::new();
+            for (authentication, method, redirect_uri) in [
+                (&authentication, "dcr", Some("http://127.0.0.1:1337/oauth/callback")),
+                (&authentication, "remote", None),
+                (&authentication, "secret", None),
+                (&unconfigured, "dcr", None),
+            ] {
+                let error = authentication
+                    .authorize("second:account", method, redirect_uri)
+                    .await
+                    .unwrap_err();
+                errors.push(error.to_string());
+            }
+
+            assert_eq!(
+                errors,
+                [
+                    "automatic OAuth clients use Fleet's own redirect URI",
+                    "discovered OAuth servers must use HTTPS unless the provider's HTTP grant allows them",
+                    "authorization server registered a confidential client, which Fleet does not support",
+                    "automatic sign-in needs public_url when Fleet listens on port 0",
+                ]
+            );
+            assert!(
+                !requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(target, _)| target.ends_with("/dcr"))
+            );
+        });
+    }
+
+    #[test]
     fn registrations_belong_to_their_issuer() {
         let server = |issuer: &str| Discovered {
             resource: "https://api.example.com/mcp".into(),
@@ -1773,7 +2650,7 @@ mod tests {
         };
         let parameters = BTreeMap::from([("client_id".into(), "issued".into())]);
         let first = server("https://auth.example.com");
-        let registration = registration(&config(), None, &parameters, Some(&first)).unwrap();
+        let registration = registration(&client(), None, &parameters, Some(&first)).unwrap();
 
         assert!(registration.issued_by(Some(&first)));
         assert!(!registration.issued_by(Some(&server("https://other.example.com"))));

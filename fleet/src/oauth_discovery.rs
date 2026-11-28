@@ -21,6 +21,18 @@ pub struct ServerMetadata {
     revocation_endpoint: Option<String>,
     #[serde(default)]
     code_challenge_methods_supported: Vec<String>,
+    #[serde(default)]
+    client_id_metadata_document_supported: bool,
+    registration_endpoint: Option<String>,
+}
+
+/// How clients can identify themselves to an authorization server.
+#[derive(Clone, Debug, Default)]
+pub struct ClientSupport {
+    /// Whether client IDs can be URLs of client ID metadata documents.
+    pub metadata_documents: bool,
+    /// The dynamic client registration endpoint, defined by RFC 7591.
+    pub registration_endpoint: Option<String>,
 }
 
 impl ResourceMetadata {
@@ -47,7 +59,8 @@ impl ResourceMetadata {
 }
 
 impl ServerMetadata {
-    /// Returns the server for the resource and its authorization endpoint.
+    /// Returns the server for the resource, its authorization endpoint and how clients
+    /// can identify themselves.
     ///
     /// # Errors
     ///
@@ -57,7 +70,7 @@ impl ServerMetadata {
         self,
         resource: &str,
         issuer: &str,
-    ) -> Result<(Discovered, String), AuthenticationError> {
+    ) -> Result<(Discovered, String, ClientSupport), AuthenticationError> {
         if self.issuer != issuer {
             return Err(AuthenticationError::Invalid(
                 "authorization server metadata describes a different issuer",
@@ -85,7 +98,11 @@ impl ServerMetadata {
             token_endpoint,
             revocation_endpoint: self.revocation_endpoint,
         };
-        Ok((server, authorization_endpoint))
+        let clients = ClientSupport {
+            metadata_documents: self.client_id_metadata_document_supported,
+            registration_endpoint: self.registration_endpoint,
+        };
+        Ok((server, authorization_endpoint, clients))
     }
 }
 
@@ -138,7 +155,7 @@ mod tests {
         urls.into_iter().map(String::from).collect()
     }
 
-    fn server(metadata: Value) -> Result<(Discovered, String), AuthenticationError> {
+    fn server(metadata: Value) -> Result<(Discovered, String, ClientSupport), AuthenticationError> {
         serde_json::from_value::<ServerMetadata>(metadata)
             .unwrap()
             .server(
@@ -271,12 +288,14 @@ mod tests {
 
     #[test]
     fn server_metadata_describes_the_issuer_with_pkce() {
-        let (discovered, authorization) = server(json!({
+        let (discovered, authorization, clients) = server(json!({
             "issuer": "https://auth.example.com/tenant",
             "authorization_endpoint": "https://auth.example.com/authorize",
             "token_endpoint": "https://auth.example.com/token",
             "revocation_endpoint": "https://auth.example.com/revoke",
+            "registration_endpoint": "https://auth.example.com/register",
             "code_challenge_methods_supported": ["plain", "S256"],
+            "client_id_metadata_document_supported": true,
         }))
         .unwrap();
 
@@ -288,6 +307,11 @@ mod tests {
             discovered.revocation_endpoint.as_deref(),
             Some("https://auth.example.com/revoke")
         );
+        assert!(clients.metadata_documents);
+        assert_eq!(
+            clients.registration_endpoint.as_deref(),
+            Some("https://auth.example.com/register")
+        );
 
         let valid = json!({
             "issuer": "https://auth.example.com/tenant",
@@ -295,6 +319,10 @@ mod tests {
             "token_endpoint": "https://auth.example.com/token",
             "code_challenge_methods_supported": ["S256"],
         });
+        let (_, _, clients) = server(valid.clone()).unwrap();
+        assert!(!clients.metadata_documents);
+        assert_eq!(clients.registration_endpoint, None);
+
         let without = |field: &str| {
             let mut metadata = valid.clone();
             metadata.as_object_mut().unwrap().remove(field);

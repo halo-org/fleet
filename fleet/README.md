@@ -81,6 +81,20 @@ Restart Fleet after changing plugin or provider configuration.
 agent has been settled this many milliseconds, as described in
 [Workspaces](#workspaces).
 
+`public_url` is the URL at which browsers reach Fleet's HTTP API, such as
+`https://fleet.example.com`, or `https://fleet.example.com/api` when a front end
+serves the API below a path. It uses `http` or `https` with a host and no query,
+fragment or credentials, and a trailing `/` is ignored. It defaults to
+`http://127.0.0.1:` and the `listen` port, which works when the browser runs on
+the same machine. When `listen` uses port 0 there is no default, and automatic
+sign-in fails until `public_url` is set. Fleet still serves its routes at its own
+paths, such as `/oauth/callback`; the URL only determines how they appear to
+browsers and authorization servers.
+
+`oauth_client_metadata_url` names a shared client metadata document for a
+`public_url` on 127.0.0.1, as described in [Clients](#clients). It uses `https`
+with a path and no query, fragment or credentials.
+
 Approve `"workers": true` in a provider's capabilities to let it retain private WASM
 workers between calls. The component must import `fleet:providers/workers@0.0.0`
 and export `fleet:providers/worker@0.0.0` alongside its normal provider interfaces.
@@ -169,11 +183,84 @@ Fleet keeps any query in an authorization endpoint and refuses one that names a
 parameter Fleet or the plugin sets. Tokens issued without a lifetime are refreshed
 only when the plugin reports them rejected.
 
+### Clients
+
+A method also says how Fleet is identified to the authorization server. A
+`registered` client was registered with the server in advance. An `automatic`
+client requires a protected resource, and Fleet identifies itself and receives
+the callback at `<public_url>/oauth/callback`. Every authorization attempt
+reports the `redirect_uri` it uses, so clients can tell whether the browser
+returns to a loopback address. Clients can also paste the final URL into
+`POST /connections/{id}/authorizations/{authorization}/callback`.
+
+A registered client has a client ID and a loopback redirect URI, which
+`GET /connections` reports as the method's `redirect_uri`. Clients can pass their
+own redirect URI matching it, or Fleet listens for the callback on a loopback
+port.
+
+An automatic client's methods report no `redirect_uri`, and clients do not pass
+one. They poll the authorization attempt for the result and can paste the final
+URL when the browser cannot reach `public_url`, such as a loopback URL opened on
+another device. After discovery, Fleet chooses its client ID in this order:
+
+1. When the server advertises `client_id_metadata_document_supported` and
+   `public_url` uses `https`, the client ID is `<public_url>/oauth/client.json`,
+   the URL of Fleet's own client ID metadata document.
+2. When the server advertises it, `oauth_client_metadata_url` is set and the
+   callback is `http://127.0.0.1:<port>/oauth/callback`, the client ID is that
+   shared document's URL.
+3. When the server has a `registration_endpoint`, Fleet registers a public client
+   dynamically (RFC 7591) and keeps its client ID with the connection for that
+   issuer and redirect URI. Later sign-ins reuse the kept registration while its
+   issuer and redirect URI match. A registration that returns a client secret
+   or another token endpoint authentication method, or lists redirect URIs without
+   Fleet's callback, fails, since Fleet supports only public clients at its own
+   callback. When the token endpoint answers `invalid_client` for such a client,
+   Fleet forgets the registration, cancels any attempt that uses it, including one
+   still starting, and fails the operation, so the next sign-in registers again.
+4. Otherwise sign-in fails.
+
+### Callback and metadata document
+
+Fleet serves `GET /oauth/callback` and `GET /oauth/client.json` without the admin
+token, since browsers and authorization servers cannot send it. Authorization
+servers fetch the metadata document themselves. When `public_url` uses `https`
+but they cannot reach it, for example behind a VPN, sign-in to servers that use
+metadata documents fails.
+
+The callback completes only a pending automatic attempt whose ID is the
+callback's `state`, a random value used once, and the code is useless without the
+attempt's PKCE verifier. As for any resource, the callback must also name the
+attempt's issuer. This matters most here, since every automatic sign-in shares the
+callback and a metadata document client ID is the same at every server. The page
+reports only success or failure, reflects nothing from the request and cannot be
+cached. Unknown, expired and used states get the same failure page,
+change nothing and do not keep Fleet from shutting down when idle.
+
+The metadata document depends only on configuration and is served only when
+`public_url` uses `https`:
+
+```json
+{
+  "client_id": "https://fleet.example.com/oauth/client.json",
+  "client_name": "Fleet",
+  "redirect_uris": ["https://fleet.example.com/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
+```
+
+A shared document has the same form, with its own URL as `client_id` and
+`http://127.0.0.1/oauth/callback` as its redirect URI. It relies on the server
+accepting any port for a loopback redirect URI, as RFC 8252 requires.
+
 ### Requests to discovered servers
 
-Requests made for a resource's sign-in do not follow redirects and must use HTTPS
-to a public address unless the provider's `http` capability lists their origin.
-Declared endpoints are not restricted this way.
+Requests made for a resource's sign-in, including dynamic client registration, do
+not follow redirects and must use HTTPS to a public address unless the provider's
+`http` capability lists their origin. Declared endpoints are not restricted this
+way.
 
 Fleet checks the addresses it connects to, including every address a host name
 resolves to, and refuses loopback, private, link-local, shared, multicast and
@@ -206,8 +293,11 @@ endpoint approves every request and redirects back immediately to a callback on
 `token` endpoint stay in process: codes are exchanged with PKCE, and refresh tokens
 rotate. The provider is also the authorization server of the protected resource
 `/sandbox/oauth/resource`, and serves the metadata for discovery in process as
-well. Clients can pass their own redirect URI as usual, or Fleet listens for the
-callback on a loopback port.
+well. It registers clients dynamically and accepts metadata document URLs as
+client IDs without fetching them. Registered clients can pass their own redirect
+URI as usual, or Fleet listens for the callback on a loopback port. Automatic
+clients return to Fleet's `/oauth/callback`. Callbacks for the resource name the
+provider as their issuer.
 
 [`fleet/sandbox`](sandbox) configures the agents, roles, tools and
 [sandbox](../fleet-plugin-sandbox) plugins with two roles that follow scripts

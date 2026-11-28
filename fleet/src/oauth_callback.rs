@@ -131,7 +131,8 @@ fn parse<B>(
     parameters(request.uri().query(), state)
 }
 
-fn parameters(
+/// Reads callback parameters, which must contain the state once.
+pub fn parameters(
     query: Option<&str>,
     state: &str,
 ) -> Result<BTreeMap<String, String>, AuthenticationError> {

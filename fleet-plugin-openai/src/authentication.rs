@@ -2,8 +2,8 @@ use crate::{
     OpenAi,
     bindings::{
         exports::fleet::providers::authentication::{
-            AuthenticationKind, AuthenticationMethod, Connection, Guest, OauthConfig,
-            OauthEndpoints, OauthRegistration, OauthServer,
+            AuthenticationKind, AuthenticationMethod, Connection, Guest, OauthClient, OauthConfig,
+            OauthEndpoints, OauthRegisteredClient, OauthRegistration, OauthServer,
         },
         fleet::providers::credentials::{self, Credential},
     },
@@ -48,8 +48,14 @@ impl Guest for OpenAi {
                         resource: Some("https://api.openai.com/v1".into()),
                         issuer: Some("https://auth.openai.com".into()),
                     }),
-                    client_id: "dynamic_agent_client".into(),
-                    redirect_uri: "http://127.0.0.1:0/auth/callback".into(),
+                    client: OauthClient::Registered(OauthRegisteredClient {
+                        client_id: "dynamic_agent_client".into(),
+                        redirect_uri: "http://127.0.0.1:0/auth/callback".into(),
+                        registration: Some(OauthRegistration {
+                            client_id_parameter: "client_id".into(),
+                            parameters: vec![("agent_name_hint".into(), "Fleet".into())],
+                        }),
+                    }),
                     scopes: [
                         "openid",
                         "profile",
@@ -61,10 +67,6 @@ impl Guest for OpenAi {
                     .map(str::to_owned)
                     .to_vec(),
                     parameters: vec![("ext_agent_host_id".into(), host_id)],
-                    registration: Some(OauthRegistration {
-                        client_id_parameter: "client_id".into(),
-                        parameters: vec![("agent_name_hint".into(), "Fleet".into())],
-                    }),
                     required_scopes: vec!["chatgpt.tokens.use.direct".into()],
                 }),
             }],

@@ -1,7 +1,7 @@
 use crate::{
     AuthenticationError,
     api::{ApiError, ResponseBody},
-    oauth,
+    oauth::{self, Body},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hyper::{Method, Response, StatusCode, Uri, header};
@@ -17,8 +17,10 @@ use url::Url;
 ///
 /// Browsers reach the authorization endpoint through Fleet's HTTP server. Fleet's OAuth
 /// client reaches every endpoint in process. The provider is also the authorization
-/// server of the protected resource at `resource` and publishes metadata for both.
-/// Callbacks for the resource name the issuer.
+/// server of the protected resource at `resource` and publishes metadata for both. It
+/// registers clients dynamically and accepts any other client ID, including metadata
+/// document URLs, without fetching documents. Callbacks for the resource name the
+/// issuer.
 #[derive(Clone)]
 pub struct SandboxOAuth {
     base: Url,
@@ -31,6 +33,7 @@ struct State {
     tokens_issued: u64,
     codes: BTreeMap<String, Grant>,
     refresh_tokens: BTreeMap<String, Access>,
+    clients: Vec<String>,
 }
 
 struct Grant {
@@ -88,12 +91,13 @@ impl SandboxOAuth {
     pub fn send(
         &self,
         url: &Url,
-        form: Option<&[(&str, &str)]>,
+        body: Option<Body<'_>>,
     ) -> Result<oauth::Response, AuthenticationError> {
         let base = self.base.as_str();
-        let (status, body) = match (self.endpoint(url)?.as_str(), form) {
-            ("/token", Some(form)) => self.token(form),
-            ("/revoke", Some(form)) => self.revoke(form),
+        let (status, body) = match (self.endpoint(url)?.as_str(), body) {
+            ("/token", Some(Body::Form(form))) => self.token(form),
+            ("/revoke", Some(Body::Form(form))) => self.revoke(form),
+            ("/register", Some(Body::Json(metadata))) => self.register(metadata),
             ("/.well-known/oauth-protected-resource/resource", None) => (
                 StatusCode::OK,
                 json!({
@@ -109,8 +113,10 @@ impl SandboxOAuth {
                     "authorization_endpoint": format!("{base}/authorize"),
                     "token_endpoint": format!("{base}/token"),
                     "revocation_endpoint": format!("{base}/revoke"),
+                    "registration_endpoint": format!("{base}/register"),
                     "code_challenge_methods_supported": ["S256"],
                     "authorization_response_iss_parameter_supported": true,
+                    "client_id_metadata_document_supported": true,
                 }),
             ),
             _ => (StatusCode::NOT_FOUND, json!({ "error": "not_found" })),
@@ -171,7 +177,7 @@ impl SandboxOAuth {
                     scope: parameter("scope").unwrap_or_default().into(),
                     resource: parameter("resource").map(Into::into),
                 },
-            });
+            })?;
         location.query_pairs_mut().append_pair("code", &code);
         if let Some(value) = parameter("state") {
             location.query_pairs_mut().append_pair("state", value);
@@ -206,6 +212,35 @@ impl SandboxOAuth {
         }
     }
 
+    fn register(&self, metadata: &Value) -> (StatusCode, Value) {
+        let Some(redirect_uri) = metadata["redirect_uris"]
+            .as_array()
+            .and_then(|uris| uris.first())
+            .and_then(Value::as_str)
+            .filter(|uri| crate::oauth::loopback(uri).is_ok())
+        else {
+            return (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "invalid_redirect_uri" }),
+            );
+        };
+        let mut state = self
+            .state
+            .lock()
+            .expect("sandbox OAuth lock is not poisoned");
+        state.clients.push(redirect_uri.into());
+        let client_id = format!("sandbox-client-{}", state.clients.len());
+        drop(state);
+        (
+            StatusCode::CREATED,
+            json!({
+                "client_id": client_id,
+                "redirect_uris": [redirect_uri],
+                "token_endpoint_auth_method": "none",
+            }),
+        )
+    }
+
     fn revoke(&self, form: &[(&str, &str)]) -> (StatusCode, Value) {
         if let Some((_, token)) = form.iter().find(|(name, _)| *name == "token") {
             self.state
@@ -219,11 +254,20 @@ impl SandboxOAuth {
 }
 
 impl State {
-    fn authorize(&mut self, grant: Grant) -> String {
+    /// Issues a code, requiring a registered client's own redirect URI.
+    fn authorize(&mut self, grant: Grant) -> Result<String, &'static str> {
+        let registered = grant
+            .client_id
+            .strip_prefix("sandbox-client-")
+            .and_then(|number| number.parse::<usize>().ok())
+            .and_then(|number| self.clients.get(number.checked_sub(1)?));
+        if registered.is_some_and(|uri| *uri != grant.redirect_uri) {
+            return Err("invalid_request");
+        }
         self.codes_issued = self.codes_issued.saturating_add(1);
         let code = format!("sandbox-code-{}", self.codes_issued);
         self.codes.insert(code.clone(), grant);
-        code
+        Ok(code)
     }
 
     /// Issues tokens for a code or refresh token, returning their number and scope.
@@ -275,7 +319,7 @@ impl State {
 mod tests {
     use super::*;
     use crate::oauth::OAuth;
-    use fleet_kit::{OAuthConfig, OAuthEndpoints, OAuthServer};
+    use fleet_kit::{OAuthClient, OAuthConfig, OAuthEndpoints, OAuthRegisteredClient, OAuthServer};
     use futures_util::FutureExt as _;
 
     fn provider() -> SandboxOAuth {
@@ -304,7 +348,7 @@ mod tests {
 
     fn token(provider: &SandboxOAuth, form: &[(&str, &str)]) -> (u16, Value) {
         let url = "http://127.0.0.1:1337/sandbox/oauth/token".parse().unwrap();
-        let response = provider.send(&url, Some(form)).unwrap();
+        let response = provider.send(&url, Some(Body::Form(form))).unwrap();
         (
             response.status,
             serde_json::from_slice(&response.body).unwrap(),
@@ -359,11 +403,13 @@ mod tests {
                        &code_challenge_method=S256&code_challenge=x";
         let config = |server| OAuthConfig {
             server,
-            client_id: "fleet".into(),
-            redirect_uri: "http://127.0.0.1:0/callback".into(),
+            client: OAuthClient::Registered(OAuthRegisteredClient {
+                client_id: "fleet".into(),
+                redirect_uri: "http://127.0.0.1:0/callback".into(),
+                registration: None,
+            }),
             scopes: Vec::new(),
             parameters: Vec::new(),
-            registration: None,
             required_scopes: Vec::new(),
         };
         let endpoints = |base: &str| {
@@ -422,7 +468,7 @@ mod tests {
             "http://127.0.0.1:1337/other/token",
         ] {
             let error = provider
-                .send(&url.parse().unwrap(), Some(&form))
+                .send(&url.parse().unwrap(), Some(Body::Form(&form)))
                 .unwrap_err();
             assert!(matches!(error, AuthenticationError::Invalid(_)));
         }

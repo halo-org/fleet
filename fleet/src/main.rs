@@ -17,7 +17,9 @@ mod idle_handler;
 mod notification_api;
 mod notifications;
 mod oauth;
+mod oauth_api;
 mod oauth_callback;
+mod oauth_client;
 mod oauth_discovery;
 mod oci;
 mod plugin_roles;
@@ -49,6 +51,7 @@ pub(crate) use self::{
     fleet::{Fleet, FleetError},
     idle_handler::IdleHandler,
     notifications::Notifications,
+    oauth_client::AutomaticClient,
     plugin_roles::PluginRoles,
     plugin_tool_calls::{PluginToolCalls, TaskHandles},
     plugins::{PluginConfig, ProviderConfig},
@@ -139,6 +142,9 @@ async fn start(admin_token: Option<OsString>) -> Result<(), Box<dyn Error + Send
     let fleet = Fleet::new(store.clone(), None);
     let authentication = Authentication::open(
         &data_dir.join("authentication"),
+        config.public_url().map(|public_url| {
+            AutomaticClient::new(public_url, config.oauth_client_metadata_url.as_ref())
+        }),
         fleet.idle_handler().clone(),
     )
     .await?;

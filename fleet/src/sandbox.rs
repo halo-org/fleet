@@ -1,4 +1,4 @@
-use crate::{Authentication, Config, Fleet, RoleDefinition, SandboxOAuth};
+use crate::{Authentication, AutomaticClient, Config, Fleet, RoleDefinition, SandboxOAuth};
 use core::{
     error::Error,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -41,8 +41,11 @@ async fn open_store(
     }
     let provider = SandboxOAuth::new(oauth_base(config.listen));
     let fleet = Fleet::new(store, None);
+    let client = config.public_url().map(|public_url| {
+        AutomaticClient::new(public_url, config.oauth_client_metadata_url.as_ref())
+    });
     let authentication =
-        Authentication::sandbox(provider.clone(), fleet.idle_handler().clone()).await?;
+        Authentication::sandbox(provider.clone(), client, fleet.idle_handler().clone()).await?;
     let providers = crate::plugins::load(&config, directory, None, &authentication, &fleet).await?;
     let fleet = fleet
         .with_authentication(authentication)
