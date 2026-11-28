@@ -1,5 +1,5 @@
 use crate::{
-    WasmState,
+    WasmCapability, WasmState,
     bindings::{blobs, types},
 };
 use core::fmt;
@@ -203,7 +203,11 @@ impl blobs::HostWithStore<WasmState> for HasSelf<WasmState> {
 }
 
 fn host(store: &Accessor<WasmState, HasSelf<WasmState>>) -> Result<WasmBlobs, blobs::BlobsError> {
-    store
-        .with(|mut access| access.get().blobs())
-        .ok_or_else(|| error(&BlobsErrorKind::Denied))
+    store.with(|mut access| {
+        let state = access.get();
+        state.blobs().ok_or_else(|| blobs::BlobsError {
+            kind: blobs::BlobsErrorKind::Denied,
+            message: state.unavailable(WasmCapability::Blobs, &BlobsErrorKind::Denied.to_string()),
+        })
+    })
 }

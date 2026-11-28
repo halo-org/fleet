@@ -1,5 +1,5 @@
 use crate::{
-    WasmState,
+    WasmCapability, WasmState,
     bindings::{types, workspace_access},
 };
 use core::fmt;
@@ -187,13 +187,19 @@ impl workspace_access::HostWithStore<WasmState> for HasSelf<WasmState> {
 fn host(
     store: &Accessor<WasmState, HasSelf<WasmState>>,
 ) -> Result<Arc<dyn AccessObject>, types::WorkspacesError> {
-    store
-        .with(|mut access| access.get().workspace_access())
-        .and_then(|access| access.access)
-        .ok_or_else(|| types::WorkspacesError {
-            kind: types::WorkspacesErrorKind::Other,
-            message: "workspace access is not available in this operation".into(),
-        })
+    store.with(|mut access| {
+        let state = access.get();
+        state
+            .workspace_access()
+            .and_then(|access| access.access)
+            .ok_or_else(|| types::WorkspacesError {
+                kind: types::WorkspacesErrorKind::Other,
+                message: state.unavailable(
+                    WasmCapability::WorkspaceAccess,
+                    "workspace access is not available in this operation",
+                ),
+            })
+    })
 }
 
 fn convert_binding(

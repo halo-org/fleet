@@ -46,7 +46,11 @@ approve the capabilities it may use.
 The provider name is its namespace and credential scope. A model named `example`
 from the `work` provider is addressed as `work:example`.
 
-Capabilities are approved per provider and default to no access. HTTP lists the
+Capabilities are approved per provider and default to no access. A component may
+import every interface Fleet provides, so one plugin can serve providers with
+different approvals. Without approval, Fleet interfaces deny every call, no
+directories are visible and HTTP requests are denied. A component with imports
+Fleet cannot satisfy fails to load. HTTP lists the
 origins that outgoing requests may use, each a scheme, host and optional port.
 Requests to other origins are denied. Credentials enables access to that
 provider's saved credentials.
@@ -97,8 +101,9 @@ daemonize or leave the group. Existing `process.spawn` remains child-only.
 testing clients and changes. It reads `config.json` from the directory in the usual
 format and keeps every store in memory, so each start is fresh. Plugins must be
 local, and providers may use only capabilities provided by Fleet: blobs,
-credentials, workers, roles, agents, tool calls and workspace providers. HTTP,
-filesystem and process access are rejected. Push notifications are unavailable.
+credentials, workers, roles, agents, tool calls and workspace providers. Providers
+approved for HTTP, filesystem or process access are rejected. Plugins that only
+import those interfaces still load. Push notifications are unavailable.
 
 JSON files in the directory's `roles` subdirectory are stored as roles on startup,
 each named after its file. Without `FLEET_ADMIN_TOKEN`, Fleet generates an admin
@@ -141,8 +146,8 @@ platform cache directory and verified before compilation. Missing cached files
 are downloaded from the locked URL. Local components are read directly and are
 not locked.
 
-Changing the lockfile never grants additional capabilities. A provider whose
-component requires an unapproved interface fails to load.
+Changing the lockfile never grants additional capabilities. A component's
+unapproved imports give it no access.
 
 The plugins in this repository are published for each commit on `main`, for example
 `oci://ghcr.io/halo-org/fleet-plugin-tools:<commit>` with the full commit hash.

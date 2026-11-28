@@ -1,5 +1,5 @@
 use crate::{
-    WasmState,
+    WasmCapability, WasmState,
     bindings::{roles, types},
 };
 use core::fmt;
@@ -170,12 +170,13 @@ impl roles::HostWithStore<WasmState> for HasSelf<WasmState> {
 fn host(
     store: &Accessor<WasmState, HasSelf<WasmState>>,
 ) -> Result<WasmAgentRoles, roles::RolesError> {
-    store
-        .with(|mut access| access.get().roles())
-        .ok_or_else(|| roles::RolesError {
+    store.with(|mut access| {
+        let state = access.get();
+        state.roles().ok_or_else(|| roles::RolesError {
             kind: roles::RolesErrorKind::Other,
-            message: "roles are not available".into(),
+            message: state.unavailable(WasmCapability::Roles, "roles are not available"),
         })
+    })
 }
 
 fn writable(

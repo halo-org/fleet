@@ -1,4 +1,4 @@
-use crate::{WasmState, bindings::tool_calls};
+use crate::{WasmCapability, WasmState, bindings::tool_calls};
 use core::fmt;
 use fleet_core::{AgentId, ToolCallId};
 use fleet_kit::{Revision, TaskStatus, ToolCalls, ToolCallsErrorKind, ToolCallsState};
@@ -107,13 +107,19 @@ impl tool_calls::HostWithStore<WasmState> for HasSelf<WasmState> {
 fn host(
     store: &Accessor<WasmState, HasSelf<WasmState>>,
 ) -> Result<Arc<dyn ToolCallsObject>, tool_calls::ToolCallsError> {
-    store
-        .with(|mut access| access.get().tool_calls())
-        .and_then(|host| host.access)
-        .ok_or_else(|| tool_calls::ToolCallsError {
-            kind: tool_calls::ToolCallsErrorKind::Other,
-            message: "tool calls are not available in this operation".into(),
-        })
+    store.with(|mut access| {
+        let state = access.get();
+        state
+            .tool_calls()
+            .and_then(|host| host.access)
+            .ok_or_else(|| tool_calls::ToolCallsError {
+                kind: tool_calls::ToolCallsErrorKind::Other,
+                message: state.unavailable(
+                    WasmCapability::ToolCalls,
+                    "tool calls are not available in this operation",
+                ),
+            })
+    })
 }
 
 fn error(error: &impl fleet_core::Error<ToolCallsErrorKind>) -> tool_calls::ToolCallsError {

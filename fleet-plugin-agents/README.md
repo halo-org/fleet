@@ -25,8 +25,8 @@ Neither tool steers the child.
 declared as the call's task handle. A call whose name is already used by an
 earlier call the model can see, or by another call in the same response, returns
 an error without starting an agent. Calls made before `task` existed still run
-without a name. The plugin imports tool call access even when only
-`oneshot_agent` is used, so approve `tool_calls` for each of its providers.
+without a name. `oneshot_agent_async` checks its task through tool call access,
+so approve `tool_calls` for providers that offer it. Without it, those calls fail.
 
 The driving tool call owns execution until its result is durably committed or
 it is interrupted. Ending a parent turn, retrying a call or dropping an attempt

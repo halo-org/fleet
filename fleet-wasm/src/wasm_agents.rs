@@ -1,5 +1,5 @@
 use crate::{
-    WasmState,
+    WasmCapability, WasmState,
     bindings::{agents, types},
 };
 use core::{fmt, num::NonZeroUsize};
@@ -187,11 +187,12 @@ impl agents::HostWithStore<WasmState> for HasSelf<WasmState> {
         role: types::Configured,
         extensions: String,
     ) -> Result<types::AgentId, agents::AgentsError> {
+        let host = host(store)?;
         let role = Configured {
             name: role.name.into(),
             config: object(&role.config)?,
         };
-        host(store)?.create(key, role, object(&extensions)?).await
+        host.create(key, role, object(&extensions)?).await
     }
 
     async fn send(
@@ -213,10 +214,18 @@ impl agents::HostWithStore<WasmState> for HasSelf<WasmState> {
 fn host(
     store: &Accessor<WasmState, HasSelf<WasmState>>,
 ) -> Result<Arc<dyn AgentsObject>, agents::AgentsError> {
-    store
-        .with(|mut access| access.get().agents())
-        .and_then(|host| host.access)
-        .ok_or_else(|| other("agents are not available in this operation".into()))
+    store.with(|mut access| {
+        let state = access.get();
+        state.agents().and_then(|host| host.access).ok_or_else(|| {
+            state.require(WasmCapability::Agents).map_or_else(
+                |message| agents::AgentsError {
+                    kind: agents::AgentsErrorKind::AccessDenied,
+                    message,
+                },
+                |()| other("agents are not available in this operation".into()),
+            )
+        })
+    })
 }
 
 fn object(value: &str) -> Result<JsonObject, agents::AgentsError> {

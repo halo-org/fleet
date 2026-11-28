@@ -1,6 +1,6 @@
 use crate::{
-    WasmAgents, WasmBlobs, WasmCredentials, WasmOrigins, WasmToolCalls, WasmWorkers,
-    WasmWorkspaceAccess,
+    WasmAgents, WasmBlobs, WasmCapability, WasmCredentials, WasmOrigins, WasmToolCalls,
+    WasmWorkers, WasmWorkspaceAccess,
     bindings::{configuration, credentials},
     wasm_roles::WasmAgentRoles,
 };
@@ -22,6 +22,7 @@ pub struct WasmEnvironment {
     pub agents: Option<WasmAgents>,
     pub workspace_access: Option<WasmWorkspaceAccess>,
     pub tool_calls: Option<WasmToolCalls>,
+    pub granted: Arc<[WasmCapability]>,
 }
 
 pub struct WasmState {
@@ -37,6 +38,7 @@ pub struct WasmState {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     origins: WasmOrigins,
+    granted: Arc<[WasmCapability]>,
     table: ResourceTable,
 }
 
@@ -50,6 +52,7 @@ impl WasmState {
             agents,
             workspace_access,
             tool_calls,
+            granted,
         } = environment;
         let mut wasi = WasiCtx::default();
         *wasi.filesystem() = filesystem;
@@ -67,6 +70,7 @@ impl WasmState {
             wasi,
             http: WasiHttpCtx::new(),
             origins,
+            granted,
             table: ResourceTable::new(),
         }
     }
@@ -128,6 +132,19 @@ impl WasmState {
         self.workspace_access = access;
     }
 
+    pub fn require(&self, capability: WasmCapability) -> Result<(), String> {
+        if self.granted.contains(&capability) {
+            Ok(())
+        } else {
+            Err(capability.denial())
+        }
+    }
+
+    pub fn unavailable(&self, capability: WasmCapability, message: &str) -> String {
+        self.require(capability)
+            .map_or_else(|denial| denial, |()| message.into())
+    }
+
     pub const fn table(&mut self) -> &mut ResourceTable {
         &mut self.table
     }
@@ -146,9 +163,7 @@ impl credentials::HostWithStore<WasmState> for HasSelf<WasmState> {
         store: &Accessor<WasmState, Self>,
         name: String,
     ) -> Result<Option<credentials::Credential>, String> {
-        let credentials = store
-            .with(|mut access| access.get().credentials.clone())
-            .ok_or("credentials are not available")?;
+        let credentials = credentials(store)?;
         Ok(credentials
             .get(&name)
             .await?
@@ -169,11 +184,17 @@ impl credentials::HostWithStore<WasmState> for HasSelf<WasmState> {
         name: String,
         rejected: String,
     ) -> Result<bool, String> {
-        let credentials = store
-            .with(|mut access| access.get().credentials.clone())
-            .ok_or("credentials are not available")?;
-        credentials.refresh(&name, &rejected).await
+        credentials(store)?.refresh(&name, &rejected).await
     }
+}
+
+fn credentials(store: &Accessor<WasmState, HasSelf<WasmState>>) -> Result<WasmCredentials, String> {
+    store.with(|mut access| {
+        let state = access.get();
+        state.credentials.clone().ok_or_else(|| {
+            state.unavailable(WasmCapability::Credentials, "credentials are not available")
+        })
+    })
 }
 
 impl WasiView for WasmState {

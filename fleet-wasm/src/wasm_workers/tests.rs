@@ -141,12 +141,32 @@ fn fresh_calls_share_private_workers_and_stream_with_backpressure() {
 }
 
 #[test]
+fn providers_without_the_grant_load_but_cannot_connect() {
+    let wasm = Wasm::new().unwrap();
+    let component = component(&wasm);
+    let denied = wasm
+        .provider(&component, &JsonObject::new(), WasmCapabilities::default())
+        .unwrap();
+    let denied = registry(denied);
+    let granted = registry(provider(&wasm, &component));
+
+    run(async {
+        let error = denied
+            .render(&context(JsonObject::new()), &JsonObject::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "this provider was not granted workers");
+        let reply = echo(&granted, "ready").await;
+        assert_eq!(reply, "1:{\"text\":\"ready\"}");
+        granted.shutdown().await;
+    });
+}
+
+#[test]
 fn failed_startup_and_conflicting_initialization_are_reported() {
     let wasm = Wasm::new().unwrap();
     let component = component(&wasm);
     let provider = registry(provider(&wasm, &component));
-    let denied = wasm.provider(&component, &JsonObject::new(), WasmCapabilities::default());
-    assert!(denied.is_err());
 
     run(async {
         let failed = context(json!({ "fail": true }).as_object().unwrap().clone());

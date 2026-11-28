@@ -1,6 +1,6 @@
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::wasm_process_group::ProcessGroup;
-use crate::{WasmState, bindings::process};
+use crate::{WasmCapability, WasmState, bindings::process};
 use bytes::BytesMut;
 use core::{
     cfg_select,
@@ -159,6 +159,9 @@ impl process::HostWithStore<WasmState> for HasSelf<WasmState> {
         mut store: Access<WasmState, Self>,
         command: process::Command,
     ) -> wasmtime::Result<Result<Resource<WasmProcess>, String>> {
+        if let Err(error) = store.get().require(WasmCapability::Process) {
+            return Ok(Err(error));
+        }
         match WasmProcess::spawn(command) {
             Ok(process) => Ok(Ok(store.get().table().push(process)?)),
             Err(error) => Ok(Err(error.to_string())),
@@ -169,6 +172,9 @@ impl process::HostWithStore<WasmState> for HasSelf<WasmState> {
         mut store: Access<WasmState, Self>,
         command: process::Command,
     ) -> wasmtime::Result<Result<Resource<WasmProcess>, String>> {
+        if let Err(error) = store.get().require(WasmCapability::Process) {
+            return Ok(Err(error));
+        }
         match WasmProcess::spawn_group(command) {
             Ok(process) => Ok(Ok(store.get().table().push(process)?)),
             Err(error) => Ok(Err(error.to_string())),
@@ -388,8 +394,10 @@ where
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use core::time::Duration;
+    use crate::WasmEnvironment;
+    use core::{assert_matches, time::Duration};
     use futures_util::future::{join, join4};
+    use std::fs;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn command(script: &str) -> process::Command {
@@ -412,6 +420,78 @@ mod tests {
                     .await
                     .expect("process completes");
             });
+    }
+
+    #[test]
+    fn spawning_requires_the_process_grant() {
+        let path = std::env::temp_dir().join(format!("fleet-process-{}", std::process::id()));
+        drop(fs::remove_file(&path));
+        let mut command = command("echo spawned >> \"$1\"");
+        command
+            .args
+            .extend(["sh".into(), path.to_str().unwrap().into()]);
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model_async(true);
+        let engine = wasmtime::Engine::new(&config).unwrap();
+        let store = |granted: &[WasmCapability]| {
+            let environment = WasmEnvironment {
+                granted: granted.into(),
+                ..WasmEnvironment::default()
+            };
+            WasmState::new(environment, None).into_store(&engine)
+        };
+
+        run(async {
+            store(&[WasmCapability::Credentials])
+                .run_concurrent(async |accessor| {
+                    let spawned = accessor.with(|access| {
+                        <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn(
+                            access,
+                            command.clone(),
+                        )
+                    });
+                    let error = spawned.unwrap().unwrap_err();
+                    assert_eq!(error, "this provider was not granted process");
+
+                    let spawned = accessor.with(|access| {
+                        <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn_group(
+                            access,
+                            command.clone(),
+                        )
+                    });
+                    let error = spawned.unwrap().unwrap_err();
+                    assert_eq!(error, "this provider was not granted process");
+                })
+                .await
+                .unwrap();
+
+            store(&[WasmCapability::Process])
+                .run_concurrent(async |accessor| {
+                    let child = accessor
+                        .with(|access| {
+                            <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn(
+                                access,
+                                command.clone(),
+                            )
+                        })
+                        .unwrap()
+                        .unwrap();
+                    let exit =
+                        <HasSelf<WasmState> as process::HostChildWithStore<WasmState>>::wait(
+                            accessor, child,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_matches!(exit, process::ExitStatus::Code(0));
+                })
+                .await
+                .unwrap();
+        });
+
+        let output = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(output, "spawned\n");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
-use fleet_core::{Configured, JsonObject, TurnEnd};
+use fleet_core::{Configured, JsonObject, ToolContext, Tools as _, TurnEnd};
 use fleet_kit::{TurnEndEvent, WorkspaceContext, Workspaces, WorkspacesErrorKind};
 use futures_util::future;
 use http_body_util::{BodyExt as _, Full};
@@ -38,8 +38,9 @@ fn build() -> PathBuf {
             "--config",
             "profile.dev.opt-level=1",
         ])
-        .args(["-p", "fleet-plugin-agents", "-p", "fleet-plugin-roles"])
-        .args(["-p", "fleet-plugin-sandbox", "-p", "fleet-plugin-tasks"])
+        .args(["-p", "fleet-plugin-agents", "-p", "fleet-plugin-host"])
+        .args(["-p", "fleet-plugin-roles", "-p", "fleet-plugin-sandbox"])
+        .args(["-p", "fleet-plugin-sprites", "-p", "fleet-plugin-tasks"])
         .args(["-p", "fleet-plugin-tools"])
         .arg("--target-dir")
         .arg(&target)
@@ -757,13 +758,69 @@ fn providers_of_one_plugin_have_their_own_capabilities() {
                     "unapproved": { "plugin": "roles" },
                 },
             });
-
-            let error = open(serde_json::from_value(config).unwrap(), &directory())
+            let (_fleet, providers) = open(serde_json::from_value(config).unwrap(), &directory())
                 .await
-                .err()
                 .unwrap();
+            let context = |name: &str| ToolContext {
+                tool: Configured {
+                    name: name.into(),
+                    config: JsonObject::new(),
+                },
+                agent_id: 1.into(),
+                call_id: "call".into(),
+                role_extensions: JsonObject::new(),
+            };
 
-            assert_eq!(error.to_string(), "could not load provider unapproved");
+            let output = providers
+                .execute(&context("roles:list_roles"), false, &JsonObject::new())
+                .await
+                .unwrap();
+            let error = providers
+                .execute(&context("unapproved:list_roles"), false, &JsonObject::new())
+                .await
+                .unwrap_err();
+
+            assert!(!output.is_error);
+            assert_eq!(
+                error.to_string(),
+                "failed to list roles: this provider was not granted roles"
+            );
+        });
+}
+
+#[test]
+fn plugins_load_without_outside_access_they_import() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let path = |plugin: &str| {
+                let path = plugins().join(format!("fleet_plugin_{plugin}.wasm"));
+                json!({ "path": path })
+            };
+            let config = json!({
+                "plugins": { "host": path("host"), "sprites": path("sprites") },
+                "providers": {
+                    "host": { "plugin": "host" },
+                    "sprites": { "plugin": "sprites" },
+                },
+            });
+            let (_fleet, providers) = open(serde_json::from_value(config).unwrap(), &directory())
+                .await
+                .unwrap();
+            let context = WorkspaceContext {
+                workspace: Configured {
+                    name: "host:default".into(),
+                    config: json!({ "cwd": "/" }).as_object().unwrap().clone(),
+                },
+                agent_id: 1.into(),
+                id: 1.into(),
+            };
+
+            let error = providers.open(&context).await.unwrap_err();
+
+            assert_eq!(error.to_string(), "no filesystem mount covers /");
         });
 }
 
