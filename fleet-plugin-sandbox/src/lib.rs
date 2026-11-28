@@ -12,7 +12,7 @@ mod workspaces;
 pub(crate) use self::{
     bindings::{
         exports::fleet::providers::models::{ModelsError, ModelsErrorKind},
-        fleet::providers::types::{
+        fleet::common::types::{
             ContentBlock, ModelCompaction, ModelInput, ModelOutput, ModelProvenance,
             WorkspacesError, WorkspacesErrorKind,
         },

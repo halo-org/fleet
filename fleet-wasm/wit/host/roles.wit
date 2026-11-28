@@ -1,9 +1,11 @@
+package fleet:host@0.0.0;
+
 /// Reads, writes and deletes stored roles.
 ///
 /// Agents look up their role on each turn, so edits apply to agents already using it.
 /// The host scopes idempotency keys to the calling agent.
 interface roles {
-    use types.{json-object, configured};
+    use fleet:common/types@0.0.0.{json-object, configured};
 
     /// Where a role parameter overrides.
     variant role-parameter-target {

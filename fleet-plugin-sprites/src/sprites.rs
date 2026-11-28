@@ -1,6 +1,6 @@
 use crate::{WorkspacesError, WorkspacesErrorKind, bindings, config::HOME};
 use bindings::{
-    fleet::providers::credentials,
+    fleet::host::credentials,
     wasi::http::{
         client,
         types::{ErrorCode, Fields, Method, Request as HttpRequest, RequestOptions, Scheme},

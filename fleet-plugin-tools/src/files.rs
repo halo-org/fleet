@@ -129,7 +129,7 @@ pub async fn read(
     validate_path(&input.path)?;
     let limit = config.read_limit.unwrap_or(65_536);
     let bytes =
-        crate::workspace_access::read(workspace, input.path.clone(), limit.max(BLOB_LIMIT)).await?;
+        crate::workspace::read(workspace, input.path.clone(), limit.max(BLOB_LIMIT)).await?;
     if let Some(media_type) = image_type(&bytes) {
         let id = blob_id(context.agent_id, media_type, &bytes);
         let info = blobs::put(id, media_type.into(), bytes).await?;
@@ -172,7 +172,7 @@ pub async fn write(
         _ => return Err(Error::Input("Supply either content or blob.".into())),
     };
     let length = content.len();
-    crate::workspace_access::write(
+    crate::workspace::write(
         workspace,
         types::WorkspaceWrite {
             path: input.path.clone(),
@@ -199,7 +199,7 @@ pub async fn edit(
     if is_retry {
         return Err(unsafe_retry());
     }
-    let original = crate::workspace_access::read(
+    let original = crate::workspace::read(
         workspace.clone(),
         input.path.clone(),
         config.read_limit.unwrap_or(65_536),
@@ -208,7 +208,7 @@ pub async fn edit(
     let text = core::str::from_utf8(&original)
         .map_err(|_| Error::Input("The file is not valid UTF-8.".into()))?;
     let updated = apply_edits(text, &input.edits)?;
-    crate::workspace_access::write(
+    crate::workspace::write(
         workspace,
         types::WorkspaceWrite {
             path: input.path.clone(),

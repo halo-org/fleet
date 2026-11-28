@@ -1,3 +1,5 @@
+package fleet:providers@0.0.0;
+
 /// Provides workspace environments.
 ///
 /// Environment identity survives provider restarts. Contexts with the same workspace and ID share
@@ -6,7 +8,7 @@
 /// Paths use / separators. Relative paths start in the workspace directory.
 /// Absolute paths refer to the workspace environment. Access is controlled by the provider.
 interface workspaces {
-    use types.{
+    use fleet:common/types@0.0.0.{
         workspace, workspace-context, workspace-write, workspace-command, workspace-output,
         workspaces-error,
     };
@@ -57,6 +59,6 @@ interface workspaces {
 
 /// A component that provides workspaces.
 world workspace-provider {
-    import configuration;
+    import fleet:host/configuration@0.0.0;
     export workspaces;
 }

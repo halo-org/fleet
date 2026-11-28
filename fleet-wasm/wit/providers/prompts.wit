@@ -1,6 +1,8 @@
+package fleet:providers@0.0.0;
+
 /// Provides access to prompts.
 interface prompts {
-    use types.{json-object, prompt, prompt-name, prompt-context, prompt-response};
+    use fleet:common/types@0.0.0.{json-object, prompt, prompt-name, prompt-context, prompt-response};
 
     /// Returns the prompt with the given name.
     get: async func(name: prompt-name) -> result<option<prompt>, string>;
@@ -14,6 +16,6 @@ interface prompts {
 
 /// A component that provides prompts.
 world prompt-provider {
-    import configuration;
+    import fleet:host/configuration@0.0.0;
     export prompts;
 }

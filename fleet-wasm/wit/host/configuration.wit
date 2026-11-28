@@ -1,6 +1,8 @@
+package fleet:host@0.0.0;
+
 /// Configuration supplied by the host.
 interface configuration {
-    use types.{json-object};
+    use fleet:common/types@0.0.0.{json-object};
 
     /// Returns the provider's configuration.
     get: func() -> json-object;

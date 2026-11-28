@@ -1,3 +1,5 @@
+package fleet:host@0.0.0;
+
 /// Private workers owned by this configured provider.
 ///
 /// Workers run another instance of the same component. They are not separate providers.
@@ -63,27 +65,7 @@ interface workers {
     connect: async func(key: string, initialization: list<u8>) -> result<connection, string>;
 }
 
-/// The private worker entrypoint of a provider component.
-interface worker {
-    use workers.{listener};
-
-    /// Runs until retired, stopped or failed.
-    ///
-    /// Keep processing I/O and connections between provider calls. Idle retirement is
-    /// the worker's policy. Listener closure requests shutdown; the host allows five
-    /// seconds for cleanup before dropping the instance. Returning closes all connections.
-    /// Workers have a 64 MiB limit per linear memory. No state survives host shutdown.
-    run: async func(initialization: list<u8>, incoming: listener) -> result<_, string>;
-}
-
 /// A component using private workers.
 world worker-host {
     import workers;
-}
-
-/// A component that can run private workers.
-world worker-provider {
-    import configuration;
-    import workers;
-    export worker;
 }

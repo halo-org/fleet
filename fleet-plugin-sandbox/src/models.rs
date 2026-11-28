@@ -4,13 +4,11 @@ use crate::{
     bindings::{
         self,
         exports::fleet::providers::models::Guest,
-        fleet::providers::{
-            credentials::{self, Credential},
-            types::{
-                Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelReasoning,
-                ModelResponse, ModelResponseChunk, ModelUsage, ToolCall,
-            },
+        fleet::common::types::{
+            Model, ModelCompactionResponse, ModelContext, ModelContinuation, ModelReasoning,
+            ModelResponse, ModelResponseChunk, ModelUsage, ToolCall,
         },
+        fleet::host::credentials::{self, Credential},
         wasi::{clocks::monotonic_clock, random::random},
     },
     script::Step,

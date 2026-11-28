@@ -113,7 +113,7 @@ impl Wasm {
                     .component
                     .component_type()
                     .imports(&self.engine)
-                    .any(|(name, _)| name == "fleet:providers/workers@0.0.0")
+                    .any(|(name, _)| name == "fleet:host/workers@0.0.0")
             {
                 return Err(WasmError::provider(
                     "component imports workers but does not export worker".into(),

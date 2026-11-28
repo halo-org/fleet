@@ -2,7 +2,7 @@ use crate::{
     CapturedOutput, WorkspaceCommand, WorkspaceExit, WorkspaceOutput, WorkspacesError,
     WorkspacesErrorKind, bindings,
 };
-use bindings::{fleet::providers::process, wasi::clocks::monotonic_clock};
+use bindings::{fleet::host::process, wasi::clocks::monotonic_clock};
 use futures_util::future::{self, Either};
 use std::collections::VecDeque;
 use wit_bindgen::{StreamReader, StreamResult};

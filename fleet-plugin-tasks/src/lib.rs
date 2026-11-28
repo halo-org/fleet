@@ -4,9 +4,9 @@ mod bindings;
 
 pub(crate) use self::bindings::{
     exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
-    fleet::providers::{
-        tool_calls::{self, TaskStatus, ToolCallsError, ToolCallsErrorKind, ToolCallsState},
-        types::{ContentBlock, Tool, ToolContext, ToolOutput},
+    fleet::common::types::{ContentBlock, Tool, ToolContext, ToolOutput},
+    fleet::host::tool_calls::{
+        self, TaskStatus, ToolCallsError, ToolCallsErrorKind, ToolCallsState,
     },
 };
 use serde::Deserialize;
@@ -299,7 +299,7 @@ bindings::export!(Tasks with_types_in bindings);
 mod tests {
     use super::*;
 
-    use crate::bindings::fleet::providers::tool_calls::MessageCounts;
+    use crate::bindings::fleet::host::tool_calls::MessageCounts;
 
     fn state(statuses: &[(&str, TaskStatus)], messages: MessageCounts) -> ToolCallsState {
         ToolCallsState {

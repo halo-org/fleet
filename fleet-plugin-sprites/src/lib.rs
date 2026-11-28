@@ -8,7 +8,7 @@ mod sprites;
 mod workspaces;
 
 pub(crate) use self::{
-    bindings::fleet::providers::types::{
+    bindings::fleet::common::types::{
         CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit, WorkspaceId,
         WorkspaceOutput, WorkspaceWrite, WorkspacesError, WorkspacesErrorKind,
     },

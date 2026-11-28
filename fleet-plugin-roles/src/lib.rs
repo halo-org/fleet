@@ -8,10 +8,8 @@ mod role;
 pub(crate) use self::{
     bindings::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
-        fleet::providers::{
-            roles::{self, RolesError, RolesErrorKind},
-            types::{Configured, ContentBlock, Tool, ToolContext, ToolOutput},
-        },
+        fleet::common::types::{Configured, ContentBlock, Tool, ToolContext, ToolOutput},
+        fleet::host::roles::{self, RolesError, RolesErrorKind},
     },
     config::Config,
     edit::TextEdit,

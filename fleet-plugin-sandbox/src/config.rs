@@ -1,4 +1,4 @@
-use crate::bindings::fleet::providers::configuration;
+use crate::bindings::fleet::host::configuration;
 use serde::Deserialize;
 
 /// The provider config.

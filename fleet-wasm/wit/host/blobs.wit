@@ -1,6 +1,8 @@
+package fleet:host@0.0.0;
+
 /// Access to immutable blobs. IDs do not confer authorization.
 interface blobs {
-    use types.{blob-id};
+    use fleet:common/types@0.0.0.{blob-id};
 
     record image-dimensions {
         width: u32,

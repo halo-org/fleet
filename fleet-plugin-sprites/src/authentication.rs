@@ -4,7 +4,7 @@ use crate::{
         exports::fleet::providers::authentication::{
             AuthenticationKind, AuthenticationMethod, Connection, Guest,
         },
-        fleet::providers::credentials::{self, Credential},
+        fleet::host::credentials::{self, Credential},
     },
     config::ProviderConfig,
 };

@@ -8,13 +8,13 @@ mod files;
 pub(crate) use self::{
     bindings::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
-        fleet::providers::{
+        fleet::common::types::{
+            self, AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput, WorkspacesError,
+            WorkspacesErrorKind,
+        },
+        fleet::host::{
             blobs::{self, BlobsError, BlobsErrorKind},
-            types::{
-                self, AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput,
-                WorkspacesError, WorkspacesErrorKind,
-            },
-            workspace_access::{self, WorkspaceBinding},
+            workspace::{self, WorkspaceBinding},
         },
     },
     config::Config,
@@ -51,7 +51,7 @@ impl Guest for Tools {
             return Ok(error_output("The tool is not available."));
         }
         let config = Config::load(&context)?;
-        let workspace = match workspace_access::open().await {
+        let workspace = match workspace::open().await {
             Ok(workspace) => workspace,
             Err(error) => match error.kind {
                 WorkspacesErrorKind::NotFound | WorkspacesErrorKind::InvalidConfiguration => {
