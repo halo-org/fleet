@@ -1,4 +1,4 @@
-use crate::{Config, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding, workspaces};
+use crate::{Config, Error, Tool, ToolContext, ToolOutput, WorkspaceBinding, types};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -59,7 +59,7 @@ pub async fn execute(
         )));
     }
     let shell = config.shell.as_deref().unwrap_or("bash");
-    let command = workspaces::WorkspaceCommand {
+    let command = types::WorkspaceCommand {
         id: format!(
             "{:016x}{:016x}:{}",
             context.agent_id.high, context.agent_id.low, context.call_id,
@@ -82,28 +82,28 @@ pub async fn execute(
     Ok(render(&result))
 }
 
-fn render(result: &workspaces::WorkspaceOutput) -> ToolOutput {
+fn render(result: &types::WorkspaceOutput) -> ToolOutput {
     let mut text = String::new();
     push_output(&mut text, &result.stdout);
     push_output(&mut text, &result.stderr);
     match result.exit {
-        workspaces::WorkspaceExit::Code(0) => {}
-        workspaces::WorkspaceExit::Code(code) => {
+        types::WorkspaceExit::Code(0) => {}
+        types::WorkspaceExit::Code(code) => {
             push_line(&mut text, &format!("[exit status {code}]"));
         }
-        workspaces::WorkspaceExit::Terminated => push_line(&mut text, "[terminated]"),
-        workspaces::WorkspaceExit::TimedOut => push_line(&mut text, "[timed out]"),
+        types::WorkspaceExit::Terminated => push_line(&mut text, "[terminated]"),
+        types::WorkspaceExit::TimedOut => push_line(&mut text, "[timed out]"),
     }
     if text.is_empty() {
         text.push_str("The command completed with no output.");
     }
     ToolOutput {
-        is_error: !matches!(result.exit, workspaces::WorkspaceExit::Code(0)),
+        is_error: !matches!(result.exit, types::WorkspaceExit::Code(0)),
         ..crate::success_output(text)
     }
 }
 
-fn push_output(text: &mut String, output: &workspaces::CapturedOutput) {
+fn push_output(text: &mut String, output: &types::CapturedOutput) {
     if output.omitted == 0 {
         text.push_str(&String::from_utf8_lossy(&output.head));
         return;
@@ -149,14 +149,14 @@ mod tests {
 
     #[test]
     fn render_marks_omitted_output_and_reports_failure() {
-        let result = workspaces::WorkspaceOutput {
-            exit: workspaces::WorkspaceExit::Code(1),
-            stdout: workspaces::CapturedOutput {
+        let result = types::WorkspaceOutput {
+            exit: types::WorkspaceExit::Code(1),
+            stdout: types::CapturedOutput {
                 head: "start é".as_bytes()[..7].to_vec(),
                 omitted: 1024,
                 tail: "é end\n".as_bytes()[1..].to_vec(),
             },
-            stderr: workspaces::CapturedOutput {
+            stderr: types::CapturedOutput {
                 head: b"err".to_vec(),
                 omitted: 0,
                 tail: Vec::new(),

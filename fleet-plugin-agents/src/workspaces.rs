@@ -6,7 +6,7 @@ use crate::{
         },
         fleet::providers::{
             agents,
-            workspaces::{Workspace, WorkspacesError, WorkspacesErrorKind},
+            types::{Workspace, WorkspacesError, WorkspacesErrorKind},
         },
     },
 };

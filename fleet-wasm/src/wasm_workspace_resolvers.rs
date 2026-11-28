@@ -54,7 +54,7 @@ impl WasmWorkspaceResolvers {
             .await
             .flatten()
             .map_err(WasmError::runtime)?
-            .map_err(WasmError::from_workspace_host)?;
+            .map_err(WasmError::from_workspace)?;
         workspace
             .map(|workspace| {
                 Ok(Workspace {
@@ -100,7 +100,7 @@ impl WasmWorkspaceResolvers {
             .await
             .flatten()
             .map_err(WasmError::runtime)?
-            .map_err(WasmError::from_workspace_host)?;
+            .map_err(WasmError::from_workspace)?;
         Ok(WorkspaceResolution {
             source: match resolution.source {
                 workspace_resolvers::WorkspaceSource::Agent(agent) => {

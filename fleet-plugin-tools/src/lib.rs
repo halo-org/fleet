@@ -10,9 +10,11 @@ pub(crate) use self::{
         exports::fleet::providers::tools::{Guest, ToolsError, ToolsErrorKind},
         fleet::providers::{
             blobs::{self, BlobsError, BlobsErrorKind},
-            types::{AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput},
+            types::{
+                self, AgentId, BlobId, ContentBlock, Tool, ToolContext, ToolOutput,
+                WorkspacesError, WorkspacesErrorKind,
+            },
             workspace_access::{self, WorkspaceBinding},
-            workspaces::{self, WorkspacesError, WorkspacesErrorKind},
         },
     },
     config::Config,

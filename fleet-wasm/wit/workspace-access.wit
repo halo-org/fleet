@@ -1,7 +1,6 @@
 /// Selects workspace sources without file or process access.
 interface workspace-resolvers {
-    use types.{agent-id, configured};
-    use workspaces.{workspace, workspace-id, workspaces-error};
+    use types.{agent-id, configured, workspace, workspace-id, workspaces-error};
 
     /// A live role reference or a concrete environment.
     variant workspace-source {
@@ -25,7 +24,9 @@ interface workspace-resolvers {
 
 /// Workspace access scoped to an acting agent.
 interface workspace-access {
-    use workspaces.{workspace-context, workspace-write, workspace-command, workspace-output, workspaces-error};
+    use types.{
+        workspace-context, workspace-write, workspace-command, workspace-output, workspaces-error,
+    };
 
     /// An opened environment and its relative directory view.
     record workspace-binding {

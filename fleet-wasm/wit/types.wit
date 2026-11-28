@@ -318,4 +318,126 @@ interface types {
         /// Image content stored as an immutable blob.
         image(blob-id),
     }
+
+    // === Workspaces ===
+
+    /// The metadata of a workspace.
+    record workspace {
+        /// The name that uniquely identifies this workspace.
+        name: string,
+        /// Additional data not interpreted by kit.
+        extensions: json-object,
+    }
+
+    /// The ID of a workspace environment.
+    record workspace-id {
+        /// The most significant 64 bits.
+        high: u64,
+        /// The least significant 64 bits.
+        low: u64,
+    }
+
+    /// A workspace environment and its configuration.
+    ///
+    /// Retain the workspace and ID to reopen the environment or share it with another agent.
+    record workspace-context {
+        /// The workspace name and config.
+        workspace: configured,
+        /// The ID of the agent using the environment.
+        agent-id: agent-id,
+        /// The ID of the environment.
+        id: workspace-id,
+    }
+
+    /// A file to create or replace in a workspace.
+    record workspace-write {
+        /// The file path in the workspace environment.
+        path: string,
+        /// The new contents.
+        content: list<u8>,
+        /// The expected contents, or none to replace any contents.
+        expected: option<list<u8>>,
+        /// Whether to create missing parent directories.
+        create-parents: bool,
+    }
+
+    /// A program to run in a workspace.
+    record workspace-command {
+        /// The ID of this execution, unique within the workspace.
+        id: string,
+        /// The program to execute.
+        program: string,
+        /// The arguments passed to the program.
+        args: list<string>,
+        /// Environment variables to set for this execution.
+        env: list<tuple<string, string>>,
+        /// The working directory, or none for the workspace directory.
+        cwd: option<string>,
+        /// The bytes sent to standard input before closing it.
+        stdin: list<u8>,
+        /// The maximum execution time in milliseconds.
+        timeout-ms: u64,
+        /// The maximum bytes to retain from each output stream.
+        ///
+        /// Longer streams retain their first and last halves of the limit.
+        output-limit: u64,
+    }
+
+    /// How a workspace command ended.
+    variant workspace-exit {
+        /// The program exited with this code.
+        code(s32),
+        /// The program was terminated without an exit code.
+        terminated,
+        /// The program exceeded its time limit and was terminated.
+        timed-out,
+    }
+
+    /// The result of running a workspace command.
+    record workspace-output {
+        /// How the program ended.
+        exit: workspace-exit,
+        /// The captured standard output.
+        stdout: captured-output,
+        /// The captured standard error.
+        stderr: captured-output,
+    }
+
+    /// Output captured from a stream.
+    ///
+    /// The stream consists of head, then omitted bytes, then tail.
+    record captured-output {
+        /// The first bytes of the stream.
+        head: list<u8>,
+        /// The number of bytes left out between the head and tail.
+        omitted: u64,
+        /// The last bytes of the stream. This is empty when no bytes were omitted.
+        tail: list<u8>,
+    }
+
+    /// The kind of error returned by a workspace provider.
+    enum workspaces-error-kind {
+        /// The workspace or environment does not exist.
+        not-found,
+        /// The workspace configuration is invalid.
+        invalid-configuration,
+        /// The file does not exist.
+        file-not-found,
+        /// The file exceeds the read limit.
+        file-too-large,
+        /// The file does not match its expected contents.
+        file-changed,
+        /// Retrying the command risks repeating effects of an earlier attempt.
+        unsafe-to-retry,
+        /// An error not covered by any other kind.
+        other,
+    }
+
+    /// An error returned by a workspace provider.
+    record workspaces-error {
+        /// The kind of error.
+        kind: workspaces-error-kind,
+        /// A description of the error.
+        message: string,
+    }
 }

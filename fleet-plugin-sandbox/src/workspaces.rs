@@ -1,8 +1,11 @@
 use crate::{
     Sandbox, WorkspacesError, WorkspacesErrorKind,
-    bindings::exports::fleet::providers::workspaces::{
-        CapturedOutput, Guest, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
-        WorkspaceOutput, WorkspaceWrite,
+    bindings::{
+        exports::fleet::providers::workspaces::Guest,
+        fleet::providers::types::{
+            CapturedOutput, Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceExit,
+            WorkspaceOutput, WorkspaceWrite,
+        },
     },
     files::{self, Reply, Request},
 };

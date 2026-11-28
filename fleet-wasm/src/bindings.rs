@@ -120,7 +120,6 @@ pub mod workspace_resolvers {
         with: {
             "fleet:providers/configuration": super::configuration,
             "fleet:providers/types": super::types,
-            "fleet:providers/workspaces": super::workspace_access_host::fleet::providers::workspaces,
         },
     });
 }

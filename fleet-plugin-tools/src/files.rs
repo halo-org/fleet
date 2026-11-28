@@ -1,6 +1,6 @@
 use crate::{
     AgentId, BlobId, BlobsErrorKind, Config, ContentBlock, Error, Tool, ToolContext, ToolOutput,
-    WorkspaceBinding, WorkspacesError, WorkspacesErrorKind, blobs, workspaces,
+    WorkspaceBinding, WorkspacesError, WorkspacesErrorKind, blobs, types,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -174,7 +174,7 @@ pub async fn write(
     let length = content.len();
     crate::workspace_access::write(
         workspace,
-        workspaces::WorkspaceWrite {
+        types::WorkspaceWrite {
             path: input.path.clone(),
             content,
             expected: None,
@@ -210,7 +210,7 @@ pub async fn edit(
     let updated = apply_edits(text, &input.edits)?;
     crate::workspace_access::write(
         workspace,
-        workspaces::WorkspaceWrite {
+        types::WorkspaceWrite {
             path: input.path.clone(),
             content: updated.into_bytes(),
             expected: Some(original),

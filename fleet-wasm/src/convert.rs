@@ -1,7 +1,4 @@
-use crate::{
-    WasmError,
-    bindings::{types, workspaces::exports::fleet::providers::workspaces},
-};
+use crate::{WasmError, bindings::types};
 use fleet_core::{
     AgentId, ContentBlock, JsonObject, Model, ModelCompaction, ModelCompactionResponse,
     ModelContext, ModelContinuation, ModelInput, ModelOutput, ModelProvenance,
@@ -503,10 +500,10 @@ impl From<types::ContentBlock> for ContentBlock {
     }
 }
 
-impl TryFrom<workspaces::Workspace> for Workspace {
+impl TryFrom<types::Workspace> for Workspace {
     type Error = WasmError;
 
-    fn try_from(value: workspaces::Workspace) -> Result<Self, Self::Error> {
+    fn try_from(value: types::Workspace) -> Result<Self, Self::Error> {
         Ok(Self {
             name: value.name.into(),
             extensions: serde_json::from_str(&value.extensions)?,
@@ -514,7 +511,7 @@ impl TryFrom<workspaces::Workspace> for Workspace {
     }
 }
 
-impl From<WorkspaceId> for workspaces::WorkspaceId {
+impl From<WorkspaceId> for types::WorkspaceId {
     fn from(id: WorkspaceId) -> Self {
         let id = u128::from(id);
         Self {
@@ -524,7 +521,7 @@ impl From<WorkspaceId> for workspaces::WorkspaceId {
     }
 }
 
-impl workspaces::WorkspaceContext {
+impl types::WorkspaceContext {
     pub(crate) fn new(name: &str, value: &WorkspaceContext) -> Self {
         Self {
             workspace: types::Configured {
@@ -537,7 +534,7 @@ impl workspaces::WorkspaceContext {
     }
 }
 
-impl From<&WorkspaceWrite> for workspaces::WorkspaceWrite {
+impl From<&WorkspaceWrite> for types::WorkspaceWrite {
     fn from(value: &WorkspaceWrite) -> Self {
         Self {
             path: value.path.clone(),
@@ -548,7 +545,7 @@ impl From<&WorkspaceWrite> for workspaces::WorkspaceWrite {
     }
 }
 
-impl From<&WorkspaceCommand> for workspaces::WorkspaceCommand {
+impl From<&WorkspaceCommand> for types::WorkspaceCommand {
     fn from(value: &WorkspaceCommand) -> Self {
         Self {
             id: value.id.clone(),
@@ -567,13 +564,13 @@ impl From<&WorkspaceCommand> for workspaces::WorkspaceCommand {
     }
 }
 
-impl From<workspaces::WorkspaceOutput> for WorkspaceOutput {
-    fn from(value: workspaces::WorkspaceOutput) -> Self {
+impl From<types::WorkspaceOutput> for WorkspaceOutput {
+    fn from(value: types::WorkspaceOutput) -> Self {
         Self {
             exit: match value.exit {
-                workspaces::WorkspaceExit::Code(code) => WorkspaceExit::Code(code),
-                workspaces::WorkspaceExit::Terminated => WorkspaceExit::Terminated,
-                workspaces::WorkspaceExit::TimedOut => WorkspaceExit::TimedOut,
+                types::WorkspaceExit::Code(code) => WorkspaceExit::Code(code),
+                types::WorkspaceExit::Terminated => WorkspaceExit::Terminated,
+                types::WorkspaceExit::TimedOut => WorkspaceExit::TimedOut,
             },
             stdout: value.stdout.into(),
             stderr: value.stderr.into(),
@@ -581,8 +578,8 @@ impl From<workspaces::WorkspaceOutput> for WorkspaceOutput {
     }
 }
 
-impl From<workspaces::CapturedOutput> for CapturedOutput {
-    fn from(value: workspaces::CapturedOutput) -> Self {
+impl From<types::CapturedOutput> for CapturedOutput {
+    fn from(value: types::CapturedOutput) -> Self {
         Self {
             head: value.head,
             omitted: value.omitted,
@@ -611,7 +608,7 @@ mod tests {
                 },
             },
         });
-        let workspace = workspaces::Workspace {
+        let workspace = types::Workspace {
             name: "local".into(),
             extensions: extensions.to_string(),
         };
@@ -633,7 +630,7 @@ mod tests {
             id: u128::MAX.into(),
         };
 
-        let context = workspaces::WorkspaceContext::new("local", &context);
+        let context = types::WorkspaceContext::new("local", &context);
         let config: JsonObject = serde_json::from_str(&context.workspace.config).unwrap();
 
         assert_eq!(context.workspace.name, "local");
