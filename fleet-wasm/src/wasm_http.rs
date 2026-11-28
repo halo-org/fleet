@@ -11,13 +11,14 @@ use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 ///
 /// Parses from `scheme://host` with an optional `:port` and an optional trailing `/`,
 /// such as `https://api.example.com`. The scheme is `http` or `https`. The host is a
-/// domain name of ASCII letters, digits, hyphens and underscores without a trailing
-/// dot, an IPv4 address or an IPv6 address in brackets. Ports are decimal numbers from
-/// 1 to 65535 without leading zeros. Omitted ports match the scheme's default port.
-/// A host starting with `*.`, such as `https://*.example.com`, matches subdomains
-/// at any depth but not the domain itself. Its domain must end in a label starting
-/// with a letter, so it never matches an IP address. Hosts are compared as text,
-/// ignoring ASCII case.
+/// domain name, an IPv4 address or an IPv6 address in brackets. A domain name has
+/// labels of ASCII letters, digits, hyphens and underscores, ends in a label starting
+/// with a letter and has no trailing dot. Ports are decimal numbers from 1 to 65535
+/// without leading zeros. Omitted ports match the scheme's default port. A host
+/// starting with `*.`, such as `https://*.example.com`, matches subdomains at any
+/// depth but not the domain itself. Hosts are compared as text, ignoring ASCII case.
+/// Requests with userinfo or a host that is not a domain name or IP address match
+/// no origin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WasmOrigin {
     scheme: Scheme,
@@ -45,9 +46,8 @@ impl WasmOrigin {
         uri.scheme() == Some(&self.scheme)
             && uri
                 .authority()
-                .and_then(|authority| {
-                    host_port(authority.as_str().rsplit('@').next()?, &self.scheme)
-                })
+                .and_then(|authority| host_port(authority.as_str(), &self.scheme))
+                .filter(|&(host, _)| is_host(host))
                 .is_some_and(|(host, port)| self.allows_host(host) && port == self.port)
     }
 
@@ -75,7 +75,10 @@ impl FromStr for WasmOrigin {
             .ok_or_else(invalid)?;
         let authority = authority.strip_suffix('/').unwrap_or(authority);
         let (host, port) = host_port(authority, &scheme)
-            .filter(|&(host, _)| is_host(host))
+            .filter(|&(host, _)| {
+                host.strip_prefix("*.")
+                    .map_or_else(|| is_host(host), is_domain)
+            })
             .ok_or_else(invalid)?;
         Ok(Self {
             scheme,
@@ -134,21 +137,17 @@ fn parse_port(port: &str) -> Option<u16> {
 }
 
 fn is_host(host: &str) -> bool {
-    if let Some(domain) = host.strip_prefix("*.") {
-        return is_domain(domain)
-            && last_label(domain).starts_with(|c: char| c.is_ascii_alphabetic());
-    }
     if let Some(address) = host.strip_prefix('[') {
         return address
             .strip_suffix(']')
             .is_some_and(|address| address.parse::<Ipv6Addr>().is_ok());
     }
-    host.parse::<Ipv4Addr>().is_ok()
-        || (is_domain(host) && !last_label(host).bytes().all(|byte| byte.is_ascii_digit()))
+    host.parse::<Ipv4Addr>().is_ok() || is_domain(host)
 }
 
 fn is_domain(domain: &str) -> bool {
     domain.len() <= 253
+        && last_label(domain).starts_with(|c: char| c.is_ascii_alphabetic())
         && domain.split('.').all(|label| {
             (1..=63).contains(&label.len())
                 && !label.starts_with('-')
@@ -208,10 +207,15 @@ mod tests {
         let label = format!("https://{}.example.com", "a".repeat(63));
         let domain = format!("https://{}a", "a.".repeat(126));
         for (origin, parsed) in [
+            ("https://example.com", "https://example.com:443"),
             ("https://api.example.com", "https://api.example.com:443"),
             ("https://api.example.com/", "https://api.example.com:443"),
+            ("https://a1.b2.c3", "https://a1.b2.c3:443"),
+            ("https://3com.example", "https://3com.example:443"),
+            ("http://localhost", "http://localhost:80"),
             ("HtTpS://API.Example.io:8443", "https://api.example.io:8443"),
             ("http://localhost:1", "http://localhost:1"),
+            ("http://my_host", "http://my_host:80"),
             ("http://my_api.internal:80", "http://my_api.internal:80"),
             ("https://x-1.example.com", "https://x-1.example.com:443"),
             (&label, &format!("{label}:443")),
@@ -249,6 +253,11 @@ mod tests {
             "https://api%2e.example.com",
             "https://bücher.example",
             "https://example.123",
+            "https://example.1a",
+            "https://example._x",
+            "http://3com",
+            "http://0x7f",
+            "https://foo.0x7f",
             "http://1234",
             "http://1.2.3",
             "http://999.1.1.1",
@@ -286,11 +295,26 @@ mod tests {
         assert!(!allows("https://api.example.com:abc/"));
         assert!(!allows("https://api.example.com:65979/"));
         assert!(!allows("https://api.example.com:[80]:443/"));
-        assert!(allows("https://user:pw@api.example.com/"));
+        assert!(!allows("https://user:pw@api.example.com/"));
         assert!(!allows("https://example.com/"));
         assert!(!allows("https://api.example.com.evil.com/"));
         assert!(!allows("https://api.example.com./"));
         assert!(!allows("/v1"));
+    }
+
+    #[test]
+    fn origins_deny_requests_with_userinfo() {
+        for origin in ["https://api.example.com", "https://*.example.com"] {
+            let origin = origin.parse::<WasmOrigin>().unwrap();
+            let allows = |uri: &str| origin.allows(&uri.parse().unwrap());
+
+            assert!(allows("https://api.example.com/?name=a@b"));
+            assert!(!allows("https://user@api.example.com/"));
+            assert!(!allows("https://user:pw@api.example.com/"));
+            assert!(!allows("https://@api.example.com/"));
+            assert!(!allows("https://user%40x@api.example.com/"));
+            assert!(!allows("https://user@api.example.com:443/"));
+        }
     }
 
     #[test]
@@ -371,6 +395,11 @@ mod tests {
             "https://*.example.*",
             "https://*.0.0.1",
             "https://*.example.1com",
+            "https://*.example.1a",
+            "https://*.example._x",
+            "https://*.3com",
+            "https://*.0x7f",
+            "https://*.foo.0x7f",
             "https://*.example.com.",
             "https://*.example.com:844*",
             "https://*.example.com/#*",
@@ -393,6 +422,7 @@ mod tests {
 
         assert!(allows("https://api.example.com/v1"));
         assert!(allows("https://a.b.EXAMPLE.com/"));
+        assert!(allows(&format!("https://{}.example.com/", "a".repeat(63))));
         assert!(!allows("https://example.com/"));
         assert!(!allows("https://badexample.com/"));
         assert!(!allows("https://api.example.com.evil.net/"));
@@ -400,6 +430,32 @@ mod tests {
         assert!(!allows("https://127.0.0.1/"));
         assert!(!allows("http://api.example.com/"));
         assert!(!allows("https://api.example.com:8443/"));
+    }
+
+    #[test]
+    fn wildcard_origins_deny_invalid_subdomains() {
+        let origin = "https://*.example.com".parse::<WasmOrigin>().unwrap();
+        let label = format!("https://{}.example.com/", "a".repeat(64));
+        let domain = format!("https://{}example.com/", "a.".repeat(122));
+
+        for uri in [
+            "https://a..example.com/",
+            "https://-a.example.com/",
+            "https://a-.example.com/",
+            "https://a.-b.example.com/",
+            &label,
+            &domain,
+            "https://*.example.com/",
+            "https://a.*.example.com/",
+            "https://a!b.example.com/",
+            "https://a~b.example.com/",
+            "https://a=b.example.com/",
+            "https://a,b.example.com/",
+            "https://a[b].example.com/",
+            "https://[a].example.com/",
+        ] {
+            assert!(!origin.allows(&uri.parse().unwrap()), "{uri}");
+        }
     }
 
     #[test]
