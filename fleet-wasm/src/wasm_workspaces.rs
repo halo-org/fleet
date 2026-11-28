@@ -1,6 +1,6 @@
 use crate::{
     WasmEnvironment, WasmError, WasmState, WasmWorkers,
-    bindings::workspaces::{WorkspaceProviderPre, exports::fleet::providers::workspaces},
+    bindings::{types, workspaces::WorkspaceProviderPre},
 };
 use fleet_kit::{Workspace, WorkspaceCommand, WorkspaceContext, WorkspaceOutput, WorkspaceWrite};
 use wasmtime::{Store, component::InstancePre};
@@ -68,7 +68,7 @@ impl WasmWorkspaces {
             .run_concurrent(async |accessor| {
                 instance
                     .fleet_providers_workspaces()
-                    .call_open(accessor, workspaces::WorkspaceContext::new(name, context))
+                    .call_open(accessor, types::WorkspaceContext::new(name, context))
                     .await
             })
             .await
@@ -92,7 +92,7 @@ impl WasmWorkspaces {
             .run_concurrent(async |accessor| {
                 instance
                     .fleet_providers_workspaces()
-                    .call_release(accessor, workspaces::WorkspaceContext::new(name, context))
+                    .call_release(accessor, types::WorkspaceContext::new(name, context))
                     .await
             })
             .await
@@ -120,7 +120,7 @@ impl WasmWorkspaces {
                     .fleet_providers_workspaces()
                     .call_read(
                         accessor,
-                        workspaces::WorkspaceContext::new(name, context),
+                        types::WorkspaceContext::new(name, context),
                         path.into(),
                         limit,
                     )
@@ -150,7 +150,7 @@ impl WasmWorkspaces {
                     .fleet_providers_workspaces()
                     .call_write(
                         accessor,
-                        workspaces::WorkspaceContext::new(name, context),
+                        types::WorkspaceContext::new(name, context),
                         file.into(),
                     )
                     .await
@@ -180,7 +180,7 @@ impl WasmWorkspaces {
                     .fleet_providers_workspaces()
                     .call_exec(
                         accessor,
-                        workspaces::WorkspaceContext::new(name, context),
+                        types::WorkspaceContext::new(name, context),
                         is_retry,
                         command.into(),
                     )

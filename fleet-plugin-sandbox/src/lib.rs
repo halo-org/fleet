@@ -11,12 +11,10 @@ mod workspaces;
 
 pub(crate) use self::{
     bindings::{
-        exports::fleet::providers::{
-            models::{ModelsError, ModelsErrorKind},
-            workspaces::{WorkspacesError, WorkspacesErrorKind},
-        },
+        exports::fleet::providers::models::{ModelsError, ModelsErrorKind},
         fleet::providers::types::{
             ContentBlock, ModelCompaction, ModelInput, ModelOutput, ModelProvenance,
+            WorkspacesError, WorkspacesErrorKind,
         },
     },
     config::Config,

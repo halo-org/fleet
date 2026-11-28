@@ -1,6 +1,6 @@
 use crate::{
     WasmState,
-    bindings::{types, workspace_access, workspace_access_host::fleet::providers::workspaces},
+    bindings::{types, workspace_access},
 };
 use core::fmt;
 use fleet_core::{AgentId, Configured};
@@ -22,24 +22,24 @@ pub struct WasmWorkspaceAccess {
 trait AccessObject: Send + Sync {
     fn open(
         &self,
-    ) -> BoxFuture<'_, Result<workspace_access::WorkspaceBinding, workspaces::WorkspacesError>>;
+    ) -> BoxFuture<'_, Result<workspace_access::WorkspaceBinding, types::WorkspacesError>>;
     fn read(
         &self,
         binding: workspace_access::WorkspaceBinding,
         path: String,
         limit: u64,
-    ) -> BoxFuture<'_, Result<Vec<u8>, workspaces::WorkspacesError>>;
+    ) -> BoxFuture<'_, Result<Vec<u8>, types::WorkspacesError>>;
     fn write(
         &self,
         binding: workspace_access::WorkspaceBinding,
-        file: workspaces::WorkspaceWrite,
-    ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>>;
+        file: types::WorkspaceWrite,
+    ) -> BoxFuture<'_, Result<(), types::WorkspacesError>>;
     fn exec(
         &self,
         binding: workspace_access::WorkspaceBinding,
         is_retry: bool,
-        command: workspaces::WorkspaceCommand,
-    ) -> BoxFuture<'_, Result<workspaces::WorkspaceOutput, workspaces::WorkspacesError>>;
+        command: types::WorkspaceCommand,
+    ) -> BoxFuture<'_, Result<types::WorkspaceOutput, types::WorkspacesError>>;
 }
 
 impl WasmWorkspaceAccess {
@@ -71,21 +71,20 @@ impl fmt::Debug for WasmWorkspaceAccess {
 impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
     fn open(
         &self,
-    ) -> BoxFuture<'_, Result<workspace_access::WorkspaceBinding, workspaces::WorkspacesError>>
-    {
+    ) -> BoxFuture<'_, Result<workspace_access::WorkspaceBinding, types::WorkspacesError>> {
         Box::pin(async move {
             let binding = WorkspaceAccess::open(self)
                 .await
                 .map_err(|source| error(&source))?;
             let id = u128::from(binding.context.id);
             Ok(workspace_access::WorkspaceBinding {
-                context: workspaces::WorkspaceContext {
+                context: types::WorkspaceContext {
                     workspace: types::Configured {
                         name: binding.context.workspace.name.into(),
                         config: crate::convert::json(&binding.context.workspace.config),
                     },
                     agent_id: binding.context.agent_id.into(),
-                    id: workspaces::WorkspaceId {
+                    id: types::WorkspaceId {
                         high: u64::try_from(id >> 64).expect("high bits fit"),
                         low: u64::try_from(id & u128::from(u64::MAX)).expect("low bits fit"),
                     },
@@ -100,7 +99,7 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
         binding: workspace_access::WorkspaceBinding,
         path: String,
         limit: u64,
-    ) -> BoxFuture<'_, Result<Vec<u8>, workspaces::WorkspacesError>> {
+    ) -> BoxFuture<'_, Result<Vec<u8>, types::WorkspacesError>> {
         Box::pin(async move {
             WorkspaceAccess::read(self, &convert_binding(binding)?, &path, limit)
                 .await
@@ -111,8 +110,8 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
     fn write(
         &self,
         binding: workspace_access::WorkspaceBinding,
-        file: workspaces::WorkspaceWrite,
-    ) -> BoxFuture<'_, Result<(), workspaces::WorkspacesError>> {
+        file: types::WorkspaceWrite,
+    ) -> BoxFuture<'_, Result<(), types::WorkspacesError>> {
         Box::pin(async move {
             let file = fleet_kit::WorkspaceWrite {
                 path: file.path,
@@ -130,8 +129,8 @@ impl<W: WorkspaceAccess + Send + Sync> AccessObject for W {
         &self,
         binding: workspace_access::WorkspaceBinding,
         is_retry: bool,
-        command: workspaces::WorkspaceCommand,
-    ) -> BoxFuture<'_, Result<workspaces::WorkspaceOutput, workspaces::WorkspacesError>> {
+        command: types::WorkspaceCommand,
+    ) -> BoxFuture<'_, Result<types::WorkspaceOutput, types::WorkspacesError>> {
         Box::pin(async move {
             let command = fleet_kit::WorkspaceCommand {
                 id: command.id,
@@ -157,7 +156,7 @@ impl workspace_access::Host for WasmState {}
 impl workspace_access::HostWithStore<WasmState> for HasSelf<WasmState> {
     async fn open(
         store: &Accessor<WasmState, Self>,
-    ) -> Result<workspace_access::WorkspaceBinding, workspaces::WorkspacesError> {
+    ) -> Result<workspace_access::WorkspaceBinding, types::WorkspacesError> {
         host(store)?.open().await
     }
     async fn read(
@@ -165,41 +164,41 @@ impl workspace_access::HostWithStore<WasmState> for HasSelf<WasmState> {
         binding: workspace_access::WorkspaceBinding,
         path: String,
         limit: u64,
-    ) -> Result<Vec<u8>, workspaces::WorkspacesError> {
+    ) -> Result<Vec<u8>, types::WorkspacesError> {
         host(store)?.read(binding, path, limit).await
     }
     async fn write(
         store: &Accessor<WasmState, Self>,
         binding: workspace_access::WorkspaceBinding,
-        file: workspaces::WorkspaceWrite,
-    ) -> Result<(), workspaces::WorkspacesError> {
+        file: types::WorkspaceWrite,
+    ) -> Result<(), types::WorkspacesError> {
         host(store)?.write(binding, file).await
     }
     async fn exec(
         store: &Accessor<WasmState, Self>,
         binding: workspace_access::WorkspaceBinding,
         is_retry: bool,
-        command: workspaces::WorkspaceCommand,
-    ) -> Result<workspaces::WorkspaceOutput, workspaces::WorkspacesError> {
+        command: types::WorkspaceCommand,
+    ) -> Result<types::WorkspaceOutput, types::WorkspacesError> {
         host(store)?.exec(binding, is_retry, command).await
     }
 }
 
 fn host(
     store: &Accessor<WasmState, HasSelf<WasmState>>,
-) -> Result<Arc<dyn AccessObject>, workspaces::WorkspacesError> {
+) -> Result<Arc<dyn AccessObject>, types::WorkspacesError> {
     store
         .with(|mut access| access.get().workspace_access())
         .and_then(|access| access.access)
-        .ok_or_else(|| workspaces::WorkspacesError {
-            kind: workspaces::WorkspacesErrorKind::Other,
+        .ok_or_else(|| types::WorkspacesError {
+            kind: types::WorkspacesErrorKind::Other,
             message: "workspace access is not available in this operation".into(),
         })
 }
 
 fn convert_binding(
     binding: workspace_access::WorkspaceBinding,
-) -> Result<WorkspaceBinding, workspaces::WorkspacesError> {
+) -> Result<WorkspaceBinding, types::WorkspacesError> {
     Ok(WorkspaceBinding {
         context: convert_context(binding.context)?,
         directory: binding.directory,
@@ -207,8 +206,8 @@ fn convert_binding(
 }
 
 fn convert_context(
-    context: workspaces::WorkspaceContext,
-) -> Result<WorkspaceContext, workspaces::WorkspacesError> {
+    context: types::WorkspaceContext,
+) -> Result<WorkspaceContext, types::WorkspacesError> {
     Ok(WorkspaceContext {
         workspace: Configured {
             name: context.workspace.name.into(),
@@ -220,31 +219,31 @@ fn convert_context(
     })
 }
 
-fn convert_output(output: WorkspaceOutput) -> workspaces::WorkspaceOutput {
-    let captured = |output: CapturedOutput| workspaces::CapturedOutput {
+fn convert_output(output: WorkspaceOutput) -> types::WorkspaceOutput {
+    let captured = |output: CapturedOutput| types::CapturedOutput {
         head: output.head,
         omitted: output.omitted,
         tail: output.tail,
     };
-    workspaces::WorkspaceOutput {
+    types::WorkspaceOutput {
         exit: match output.exit {
-            WorkspaceExit::Code(code) => workspaces::WorkspaceExit::Code(code),
-            WorkspaceExit::Terminated => workspaces::WorkspaceExit::Terminated,
-            WorkspaceExit::TimedOut => workspaces::WorkspaceExit::TimedOut,
+            WorkspaceExit::Code(code) => types::WorkspaceExit::Code(code),
+            WorkspaceExit::Terminated => types::WorkspaceExit::Terminated,
+            WorkspaceExit::TimedOut => types::WorkspaceExit::TimedOut,
         },
         stdout: captured(output.stdout),
         stderr: captured(output.stderr),
     }
 }
 
-fn json_error(error: &serde_json::Error) -> workspaces::WorkspacesError {
-    workspaces::WorkspacesError {
-        kind: workspaces::WorkspacesErrorKind::InvalidConfiguration,
+fn json_error(error: &serde_json::Error) -> types::WorkspacesError {
+    types::WorkspacesError {
+        kind: types::WorkspacesErrorKind::InvalidConfiguration,
         message: error.to_string(),
     }
 }
 
-fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> workspaces::WorkspacesError {
+fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> types::WorkspacesError {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(error) = source {
@@ -252,17 +251,17 @@ fn error(error: &impl fleet_core::Error<WorkspacesErrorKind>) -> workspaces::Wor
         message.push_str(&error.to_string());
         source = error.source();
     }
-    workspaces::WorkspacesError {
+    types::WorkspacesError {
         kind: match error.kind() {
-            WorkspacesErrorKind::NotFound => workspaces::WorkspacesErrorKind::NotFound,
+            WorkspacesErrorKind::NotFound => types::WorkspacesErrorKind::NotFound,
             WorkspacesErrorKind::InvalidConfiguration => {
-                workspaces::WorkspacesErrorKind::InvalidConfiguration
+                types::WorkspacesErrorKind::InvalidConfiguration
             }
-            WorkspacesErrorKind::FileNotFound => workspaces::WorkspacesErrorKind::FileNotFound,
-            WorkspacesErrorKind::FileTooLarge => workspaces::WorkspacesErrorKind::FileTooLarge,
-            WorkspacesErrorKind::FileChanged => workspaces::WorkspacesErrorKind::FileChanged,
-            WorkspacesErrorKind::UnsafeToRetry => workspaces::WorkspacesErrorKind::UnsafeToRetry,
-            WorkspacesErrorKind::Other => workspaces::WorkspacesErrorKind::Other,
+            WorkspacesErrorKind::FileNotFound => types::WorkspacesErrorKind::FileNotFound,
+            WorkspacesErrorKind::FileTooLarge => types::WorkspacesErrorKind::FileTooLarge,
+            WorkspacesErrorKind::FileChanged => types::WorkspacesErrorKind::FileChanged,
+            WorkspacesErrorKind::UnsafeToRetry => types::WorkspacesErrorKind::UnsafeToRetry,
+            WorkspacesErrorKind::Other => types::WorkspacesErrorKind::Other,
         },
         message,
     }

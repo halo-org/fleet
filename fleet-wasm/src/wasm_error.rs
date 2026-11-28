@@ -1,6 +1,5 @@
 use crate::bindings::{
-    models::exports::fleet::providers::models, tools::exports::fleet::providers::tools,
-    workspaces::exports::fleet::providers::workspaces,
+    models::exports::fleet::providers::models, tools::exports::fleet::providers::tools, types,
 };
 use core::fmt;
 use fleet_core::{ModelName, ModelsErrorKind, PromptName, ToolName, ToolsErrorKind};
@@ -109,41 +108,18 @@ impl WasmError {
         })
     }
 
-    pub(crate) fn from_workspace(error: workspaces::WorkspacesError) -> Self {
+    pub(crate) fn from_workspace(error: types::WorkspacesError) -> Self {
         Self(Kind::Workspace {
             kind: match error.kind {
-                workspaces::WorkspacesErrorKind::NotFound => WorkspacesErrorKind::NotFound,
-                workspaces::WorkspacesErrorKind::InvalidConfiguration => {
+                types::WorkspacesErrorKind::NotFound => WorkspacesErrorKind::NotFound,
+                types::WorkspacesErrorKind::InvalidConfiguration => {
                     WorkspacesErrorKind::InvalidConfiguration
                 }
-                workspaces::WorkspacesErrorKind::FileNotFound => WorkspacesErrorKind::FileNotFound,
-                workspaces::WorkspacesErrorKind::FileTooLarge => WorkspacesErrorKind::FileTooLarge,
-                workspaces::WorkspacesErrorKind::FileChanged => WorkspacesErrorKind::FileChanged,
-                workspaces::WorkspacesErrorKind::UnsafeToRetry => {
-                    WorkspacesErrorKind::UnsafeToRetry
-                }
-                workspaces::WorkspacesErrorKind::Other => WorkspacesErrorKind::Other,
-            },
-            message: error.message,
-        })
-    }
-
-    pub(crate) fn from_workspace_host(
-        error: crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesError,
-    ) -> Self {
-        Self(Kind::Workspace {
-            kind: match error.kind {
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::NotFound => WorkspacesErrorKind::NotFound,
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::InvalidConfiguration => {
-                    WorkspacesErrorKind::InvalidConfiguration
-                }
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::FileNotFound => WorkspacesErrorKind::FileNotFound,
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::FileTooLarge => WorkspacesErrorKind::FileTooLarge,
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::FileChanged => WorkspacesErrorKind::FileChanged,
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::UnsafeToRetry => {
-                    WorkspacesErrorKind::UnsafeToRetry
-                }
-                crate::bindings::workspace_access_host::fleet::providers::workspaces::WorkspacesErrorKind::Other => WorkspacesErrorKind::Other,
+                types::WorkspacesErrorKind::FileNotFound => WorkspacesErrorKind::FileNotFound,
+                types::WorkspacesErrorKind::FileTooLarge => WorkspacesErrorKind::FileTooLarge,
+                types::WorkspacesErrorKind::FileChanged => WorkspacesErrorKind::FileChanged,
+                types::WorkspacesErrorKind::UnsafeToRetry => WorkspacesErrorKind::UnsafeToRetry,
+                types::WorkspacesErrorKind::Other => WorkspacesErrorKind::Other,
             },
             message: error.message,
         })
@@ -254,8 +230,8 @@ mod tests {
 
     #[test]
     fn workspace_errors_preserve_retry_safety() {
-        let error = WasmError::from_workspace(workspaces::WorkspacesError {
-            kind: workspaces::WorkspacesErrorKind::UnsafeToRetry,
+        let error = WasmError::from_workspace(types::WorkspacesError {
+            kind: types::WorkspacesErrorKind::UnsafeToRetry,
             message: "The command may still be running".into(),
         });
         let kind: WorkspacesErrorKind = error.kind();
