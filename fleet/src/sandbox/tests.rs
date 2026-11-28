@@ -721,6 +721,10 @@ fn plugins_reaching_outside_fleet_are_rejected() {
                     "provider local uses process",
                 ),
                 (
+                    provider(json!({ "process": [{ "program": "true" }] })),
+                    "provider local uses process",
+                ),
+                (
                     provider(json!({ "http": ["https://example.com"] })),
                     "provider local uses HTTP",
                 ),

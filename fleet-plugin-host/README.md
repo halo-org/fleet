@@ -61,7 +61,8 @@ and its files are kept.
 Relative file paths and command working directories start in the workspace directory.
 Absolute paths and `..` are supported within the granted filesystem mounts.
 WASI resolves file paths and rejects symlinks with absolute targets.
-Commands run with the host process's permissions.
+Commands run with the host process's permissions. The plugin runs whatever
+commands agents request, so it needs `"process": true` rather than a list of commands.
 File writes replace the destination atomically. Commands enforce the requested
 timeout and retain the start and end of each stream within the output limit
 while draining the rest. Retried commands return `UnsafeToRetry` because an earlier attempt may

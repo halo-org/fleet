@@ -9,7 +9,7 @@
 
 use fleet_core::{Configured, JsonObject};
 use fleet_kit::{WorkspaceCommand, WorkspaceContext, WorkspaceExit, Workspaces as _};
-use fleet_wasm::{Wasm, WasmCapabilities, WasmMount, WasmRegistry};
+use fleet_wasm::{Wasm, WasmCapabilities, WasmCommand, WasmMount, WasmProcessAccess, WasmRegistry};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -59,7 +59,18 @@ fn commands_require_the_process_grant() {
     let wasm = Wasm::new().unwrap();
     let component = wasm.compile(&module()).unwrap();
     let mut registry = WasmRegistry::new();
-    for (name, process) in [("granted", true), ("denied", false)] {
+    let listed = WasmCommand {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "echo listed >> ran".into()],
+        cwd: Some(directory.to_str().unwrap().into()),
+        inherit_env: true,
+        env: Vec::new(),
+    };
+    for (name, process) in [
+        ("granted", WasmProcessAccess::Any),
+        ("denied", WasmProcessAccess::None),
+        ("listed", WasmProcessAccess::Commands(vec![listed])),
+    ] {
         let state = directory.join(name);
         fs::create_dir_all(&state).unwrap();
         let capabilities = WasmCapabilities {
@@ -107,7 +118,7 @@ fn commands_require_the_process_grant() {
         .build()
         .unwrap()
         .block_on(async {
-            for name in ["denied", "granted"] {
+            for name in ["denied", "granted", "listed"] {
                 registry.open(&context(name)).await.unwrap();
             }
             let error = registry
@@ -120,9 +131,22 @@ fn commands_require_the_process_grant() {
                 .await
                 .unwrap();
             assert_eq!(output.exit, WorkspaceExit::Code(0));
+            let error = registry
+                .exec(&context("listed"), false, &command("unlisted"))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "this provider was not granted the command /bin/sh"
+            );
+            let output = registry
+                .exec(&context("listed"), false, &command("listed"))
+                .await
+                .unwrap();
+            assert_eq!(output.exit, WorkspaceExit::Code(0));
         });
 
     let ran = fs::read_to_string(directory.join("ran")).unwrap();
     fs::remove_dir_all(&directory).unwrap();
-    assert_eq!(ran, "granted\n");
+    assert_eq!(ran, "granted\nlisted\n");
 }

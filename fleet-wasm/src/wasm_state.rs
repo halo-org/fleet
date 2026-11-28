@@ -1,7 +1,7 @@
 use crate::{
-    WasmAgents, WasmBlobs, WasmCapability, WasmCredentials, WasmOrigins, WasmToolCalls,
-    WasmWorkers, WasmWorkspaceAccess,
-    bindings::{configuration, credentials},
+    WasmAgents, WasmBlobs, WasmCapability, WasmCredentials, WasmOrigins, WasmProcessAccess,
+    WasmToolCalls, WasmWorkers, WasmWorkspaceAccess,
+    bindings::{configuration, credentials, process},
     wasm_roles::WasmAgentRoles,
 };
 use std::sync::Arc;
@@ -18,6 +18,7 @@ pub struct WasmEnvironment {
     pub config: Arc<str>,
     pub filesystem: WasiFilesystemCtx,
     pub origins: WasmOrigins,
+    pub process: Arc<WasmProcessAccess>,
     pub credentials: Option<WasmCredentials>,
     pub agents: Option<WasmAgents>,
     pub workspace_access: Option<WasmWorkspaceAccess>,
@@ -38,6 +39,7 @@ pub struct WasmState {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     origins: WasmOrigins,
+    process: Arc<WasmProcessAccess>,
     granted: Arc<[WasmCapability]>,
     table: ResourceTable,
 }
@@ -48,6 +50,7 @@ impl WasmState {
             config,
             filesystem,
             origins,
+            process,
             credentials,
             agents,
             workspace_access,
@@ -70,6 +73,7 @@ impl WasmState {
             wasi,
             http: WasiHttpCtx::new(),
             origins,
+            process,
             granted,
             table: ResourceTable::new(),
         }
@@ -138,6 +142,11 @@ impl WasmState {
         } else {
             Err(capability.denial())
         }
+    }
+
+    pub fn require_command(&self, command: &process::Command) -> Result<(), String> {
+        self.require(WasmCapability::Process)?;
+        self.process.require(command)
     }
 
     pub fn unavailable(&self, capability: WasmCapability, message: &str) -> String {

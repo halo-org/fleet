@@ -1,6 +1,6 @@
 use crate::{
-    WasmAgents, WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmRoles, WasmToolCalls,
-    WasmWorkspaceAccess,
+    WasmAgents, WasmBlobs, WasmCredentials, WasmError, WasmOrigin, WasmProcessAccess, WasmRoles,
+    WasmToolCalls, WasmWorkspaceAccess,
 };
 use core::{fmt, mem};
 use std::{path::PathBuf, sync::Arc};
@@ -21,8 +21,8 @@ pub struct WasmCapabilities {
     pub http: Vec<WasmOrigin>,
     /// Directories available to the provider.
     pub filesystem: Vec<WasmMount>,
-    /// Whether programs can run with host permissions outside the WASI sandbox.
-    pub process: bool,
+    /// Programs that can run with host permissions outside the WASI sandbox.
+    pub process: WasmProcessAccess,
     /// Credentials available to this provider.
     pub credentials: Option<WasmCredentials>,
     /// Roles available to tool calls.
@@ -71,7 +71,7 @@ impl WasmCapabilities {
         match capability {
             WasmCapability::Blobs => self.blobs.is_some(),
             WasmCapability::Workers => self.workers,
-            WasmCapability::Process => self.process,
+            WasmCapability::Process => self.process.grants(),
             WasmCapability::Credentials => self.credentials.is_some(),
             WasmCapability::Roles => self.roles.is_some(),
             WasmCapability::WorkspaceAccess => self.workspace_access.is_some(),

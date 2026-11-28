@@ -29,6 +29,75 @@ use wasmtime::{
     },
 };
 
+// === Access ===
+
+/// Programs a WebAssembly provider may run on the host.
+///
+/// Defaults to none. Programs run with host permissions outside the WASI sandbox.
+#[derive(Clone, Debug, Default)]
+pub enum WasmProcessAccess {
+    /// No programs.
+    #[default]
+    None,
+    /// Any program.
+    Any,
+    /// Only commands matching one of these exactly. An empty list allows none.
+    Commands(Vec<WasmCommand>),
+}
+
+/// A command a WebAssembly provider may run.
+///
+/// A request matches when its program, arguments and working directory are equal,
+/// every variable it sets or removes is listed and it inherits the host environment
+/// only if allowed. Paths are compared as strings without resolution.
+#[derive(Clone, Debug)]
+pub struct WasmCommand {
+    /// The executable name or host path.
+    pub program: String,
+    /// The exact arguments.
+    pub args: Vec<String>,
+    /// The host working directory, or none to inherit it.
+    pub cwd: Option<String>,
+    /// Whether the command may inherit the host environment.
+    pub inherit_env: bool,
+    /// Names of environment variables the command may set or remove.
+    pub env: Vec<String>,
+}
+
+impl WasmProcessAccess {
+    pub(crate) const fn grants(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Any => true,
+            Self::Commands(commands) => !commands.is_empty(),
+        }
+    }
+
+    pub(crate) fn require(&self, command: &process::Command) -> Result<(), String> {
+        match self {
+            Self::Any => Ok(()),
+            Self::Commands(commands) if commands.iter().any(|allowed| allowed.allows(command)) => {
+                Ok(())
+            }
+            Self::Commands(commands) if !commands.is_empty() => Err(format!(
+                "this provider was not granted the command {}",
+                command.program
+            )),
+            Self::None | Self::Commands(_) => Err(WasmCapability::Process.denial()),
+        }
+    }
+}
+
+impl WasmCommand {
+    fn allows(&self, command: &process::Command) -> bool {
+        command.program == self.program
+            && command.args == self.args
+            && command.cwd == self.cwd
+            && (self.inherit_env || !command.inherit_env)
+            && command.env.iter().all(|(name, _)| self.env.contains(name))
+    }
+}
+
 // === Processes ===
 
 pub struct WasmProcess {
@@ -159,7 +228,7 @@ impl process::HostWithStore<WasmState> for HasSelf<WasmState> {
         mut store: Access<WasmState, Self>,
         command: process::Command,
     ) -> wasmtime::Result<Result<Resource<WasmProcess>, String>> {
-        if let Err(error) = store.get().require(WasmCapability::Process) {
+        if let Err(error) = store.get().require_command(&command) {
             return Ok(Err(error));
         }
         match WasmProcess::spawn(command) {
@@ -172,7 +241,7 @@ impl process::HostWithStore<WasmState> for HasSelf<WasmState> {
         mut store: Access<WasmState, Self>,
         command: process::Command,
     ) -> wasmtime::Result<Result<Resource<WasmProcess>, String>> {
-        if let Err(error) = store.get().require(WasmCapability::Process) {
+        if let Err(error) = store.get().require_command(&command) {
             return Ok(Err(error));
         }
         match WasmProcess::spawn_group(command) {
@@ -394,7 +463,7 @@ where
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::WasmEnvironment;
+    use crate::{WasmCapabilities, WasmEnvironment};
     use core::{assert_matches, time::Duration};
     use futures_util::future::{join, join4};
     use std::fs;
@@ -422,76 +491,134 @@ mod tests {
             });
     }
 
-    #[test]
-    fn spawning_requires_the_process_grant() {
-        let path = std::env::temp_dir().join(format!("fleet-process-{}", std::process::id()));
-        drop(fs::remove_file(&path));
-        let mut command = command("echo spawned >> \"$1\"");
-        command
-            .args
-            .extend(["sh".into(), path.to_str().unwrap().into()]);
+    async fn spawn(process: WasmProcessAccess, command: &process::Command) -> Result<(), String> {
+        let capabilities = WasmCapabilities {
+            process,
+            ..WasmCapabilities::default()
+        };
+        let environment = WasmEnvironment {
+            granted: capabilities.granted(),
+            process: capabilities.process.into(),
+            ..WasmEnvironment::default()
+        };
         let mut config = wasmtime::Config::new();
         config.wasm_component_model_async(true);
-        let engine = wasmtime::Engine::new(&config).unwrap();
-        let store = |granted: &[WasmCapability]| {
-            let environment = WasmEnvironment {
-                granted: granted.into(),
-                ..WasmEnvironment::default()
-            };
-            WasmState::new(environment, None).into_store(&engine)
+        let engine = wasmtime::Engine::new(&config).expect("engine is available");
+        let results = WasmState::new(environment, None)
+            .into_store(&engine)
+            .run_concurrent(async |accessor| {
+                let mut results = Vec::new();
+                for spawn in [
+                    <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn,
+                    <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn_group,
+                ] {
+                    let spawned = accessor.with(|access| spawn(access, command.clone()));
+                    results.push(match spawned.expect("spawning does not trap") {
+                        Ok(child) => {
+                            let exit = <HasSelf<WasmState> as process::HostChildWithStore<
+                                WasmState,
+                            >>::wait(accessor, child)
+                            .await
+                            .expect("waiting does not trap")
+                            .expect("process exits");
+                            assert_matches!(exit, process::ExitStatus::Code(0));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    });
+                }
+                results
+            })
+            .await
+            .expect("store runs");
+        let [spawned, grouped] = results.try_into().expect("both spawns ran");
+        if spawned.is_err() || cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(grouped, spawned);
+        }
+        spawned
+    }
+
+    #[test]
+    fn spawning_requires_a_matching_grant() {
+        let path = std::env::temp_dir().join(format!("fleet-process-{}", std::process::id()));
+        drop(fs::remove_file(&path));
+        let mut requested = command("echo spawned >> \"$1\"");
+        requested
+            .args
+            .extend(["sh".into(), path.to_str().unwrap().into()]);
+        requested.inherit_env = false;
+        requested.env = vec![("SECRET".into(), Some("hidden".into()))];
+        let allowed = WasmCommand {
+            program: "/bin/sh".into(),
+            args: requested.args.clone(),
+            cwd: None,
+            inherit_env: false,
+            env: vec!["SECRET".into()],
+        };
+        let at = |cwd: &str| WasmCommand {
+            cwd: Some(cwd.into()),
+            ..allowed.clone()
+        };
+        let with = |change: fn(&mut process::Command)| {
+            let mut command = requested.clone();
+            change(&mut command);
+            command
         };
 
         run(async {
-            store(&[WasmCapability::Credentials])
-                .run_concurrent(async |accessor| {
-                    let spawned = accessor.with(|access| {
-                        <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn(
-                            access,
-                            command.clone(),
-                        )
-                    });
-                    let error = spawned.unwrap().unwrap_err();
-                    assert_eq!(error, "this provider was not granted process");
-
-                    let spawned = accessor.with(|access| {
-                        <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn_group(
-                            access,
-                            command.clone(),
-                        )
-                    });
-                    let error = spawned.unwrap().unwrap_err();
-                    assert_eq!(error, "this provider was not granted process");
-                })
-                .await
-                .unwrap();
-
-            store(&[WasmCapability::Process])
-                .run_concurrent(async |accessor| {
-                    let child = accessor
-                        .with(|access| {
-                            <HasSelf<WasmState> as process::HostWithStore<WasmState>>::spawn(
-                                access,
-                                command.clone(),
-                            )
-                        })
-                        .unwrap()
-                        .unwrap();
-                    let exit =
-                        <HasSelf<WasmState> as process::HostChildWithStore<WasmState>>::wait(
-                            accessor, child,
-                        )
+            for process in [WasmProcessAccess::None, WasmProcessAccess::Commands(vec![])] {
+                assert_eq!(
+                    spawn(process, &requested).await.unwrap_err(),
+                    "this provider was not granted process"
+                );
+            }
+            assert_eq!(
+                spawn(WasmProcessAccess::Commands(vec![at("/")]), &requested)
+                    .await
+                    .unwrap_err(),
+                "this provider was not granted the command /bin/sh"
+            );
+            let denied = async |allowed: WasmCommand, command: process::Command| {
+                assert_eq!(
+                    spawn(WasmProcessAccess::Commands(vec![allowed]), &command)
                         .await
-                        .unwrap()
-                        .unwrap();
-                    assert_matches!(exit, process::ExitStatus::Code(0));
-                })
-                .await
-                .unwrap();
+                        .unwrap_err(),
+                    format!(
+                        "this provider was not granted the command {}",
+                        command.program
+                    )
+                );
+            };
+            for command in [
+                with(|command| command.program = "sh".into()),
+                with(|command| command.args.push("-x".into())),
+                with(|command| drop(command.args.pop())),
+                with(|command| command.args.swap(2, 3)),
+                with(|command| command.env.push(("OTHER".into(), Some("hidden".into())))),
+                with(|command| command.env.push(("OTHER".into(), None))),
+                with(|command| command.inherit_env = true),
+                with(|command| command.cwd = Some("/".into())),
+            ] {
+                denied(allowed.clone(), command).await;
+            }
+            denied(at("/tmp"), with(|command| command.cwd = Some("/".into()))).await;
+            assert!(!path.exists());
+
+            let inheriting = WasmCommand {
+                inherit_env: true,
+                ..allowed.clone()
+            };
+            for process in [
+                WasmProcessAccess::Any,
+                WasmProcessAccess::Commands(vec![allowed.clone()]),
+                WasmProcessAccess::Commands(vec![inheriting]),
+                WasmProcessAccess::Commands(vec![at("/"), allowed.clone()]),
+            ] {
+                spawn(process, &requested).await.unwrap();
+            }
         });
 
-        let output = fs::read_to_string(&path).unwrap();
         fs::remove_file(&path).unwrap();
-        assert_eq!(output, "spawned\n");
     }
 
     #[test]
