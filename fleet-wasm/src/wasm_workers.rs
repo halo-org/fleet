@@ -1,5 +1,5 @@
 use crate::{
-    WasmEnvironment, WasmError, WasmState,
+    WasmCapability, WasmEnvironment, WasmError, WasmState,
     bindings::{worker::WorkerProviderPre, workers},
     wasm_worker_connection::{ConnectionState, WasmWorkerConnection},
 };
@@ -430,9 +430,18 @@ impl workers::HostWithStore<WasmState> for HasSelf<WasmState> {
         key: String,
         initialization: Vec<u8>,
     ) -> wasmtime::Result<Result<Resource<WasmWorkerConnection>, String>> {
-        let workers = store.with(|mut access| access.get().workers());
-        let Some(workers) = workers else {
-            return Ok(Err("workers are not available in this instance".into()));
+        let workers = store.with(|mut access| {
+            let state = access.get();
+            state.workers().ok_or_else(|| {
+                state.unavailable(
+                    WasmCapability::Workers,
+                    "workers are not available in this instance",
+                )
+            })
+        });
+        let workers = match workers {
+            Ok(workers) => workers,
+            Err(error) => return Ok(Err(error)),
         };
         match workers.connect(key, initialization).await {
             Ok(connection) => {

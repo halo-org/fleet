@@ -9,7 +9,10 @@
 //! reused across providers. Ordinary calls use fresh guest state and pooled resources.
 //! Registries route `namespace:item` names to configured providers. Provider config
 //! is available through the `configuration` import and is separate from call config.
-//! WASI 0.3 capabilities are configured per provider. WASI operations require
+//! WASI 0.3 capabilities are configured per provider. Components may import every
+//! host interface. Fleet interface calls without the matching [`WasmCapabilities`]
+//! grant are denied, and imports the host cannot satisfy fail when a provider is
+//! configured. WASI operations require
 //! a Tokio runtime with I/O and time enabled, as do host processes.
 //! Clocks and randomness are available. The guest does not inherit environment
 //! variables or standard streams, and raw sockets are unavailable. Outgoing HTTP
@@ -27,8 +30,8 @@
 //!
 //! # Private workers
 //!
-//! With [`WasmCapabilities::workers`] enabled, a component can import
-//! `fleet:providers/workers` and export `fleet:providers/worker` alongside its ordinary
+//! With [`WasmCapabilities::workers`] enabled, a component that imports
+//! `fleet:providers/workers` must export `fleet:providers/worker` alongside its ordinary
 //! provider interfaces. `connect` starts or reuses a worker instance by a private key.
 //! Clones of a configured provider share workers; separately configured providers do not.
 //! Other plugins continue to use the ordinary provider interfaces, not worker identities.
@@ -127,6 +130,7 @@ pub use self::{
 };
 
 pub(crate) use self::{
+    wasm_capabilities::WasmCapability,
     wasm_http::WasmOrigins,
     wasm_models::WasmModels,
     wasm_prompts::WasmPrompts,

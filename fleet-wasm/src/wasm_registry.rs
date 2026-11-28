@@ -106,6 +106,7 @@ impl WasmProvider {
         let instance = linker
             .instantiate_pre(component)
             .map_err(WasmError::runtime)?;
+        let granted = capabilities.granted();
         let environment = WasmEnvironment {
             config: serde_json::to_string(config)?.into(),
             filesystem: capabilities.open_filesystem()?,
@@ -114,6 +115,7 @@ impl WasmProvider {
             agents: capabilities.agents,
             workspace_access: capabilities.workspace_access,
             tool_calls: capabilities.tool_calls,
+            granted,
         };
         let blob_host = capabilities.blobs;
         let roles = capabilities.roles;

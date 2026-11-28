@@ -102,6 +102,8 @@ fn port(uri: &Uri) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::assert_matches;
+    use futures_util::FutureExt as _;
 
     #[test]
     fn origins_parse_from_urls_without_paths() {
@@ -137,5 +139,22 @@ mod tests {
         assert!(!allows("https://example.com/"));
         assert!(!allows("https://api.example.com.evil.com/"));
         assert!(!allows("/v1"));
+    }
+
+    #[test]
+    fn requests_are_denied_without_origins() {
+        let request = Request::get("https://api.example.com/")
+            .body(WasiBody::default())
+            .unwrap();
+
+        let response =
+            WasmOrigins::default().send_request(request, None, Box::new(async { Ok(()) }));
+        let error = Box::into_pin(response)
+            .now_or_never()
+            .unwrap()
+            .err()
+            .unwrap();
+
+        assert_matches!(error, Error::HttpRequestDenied);
     }
 }

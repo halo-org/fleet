@@ -1,6 +1,9 @@
 use crate::{
     WasmCapabilities, WasmError, WasmProvider, WasmState,
-    bindings::{agents, blobs, configuration, credentials, process, roles, tool_calls, workers},
+    bindings::{
+        agents, blobs, configuration, credentials, process, roles, tool_calls, workers,
+        workspace_access,
+    },
 };
 use fleet_core::JsonObject;
 use std::sync::Mutex;
@@ -34,7 +37,7 @@ impl Wasm {
         config.wasm_component_model_async(true);
         config.allocation_strategy(InstanceAllocationStrategy::pooling());
         let engine = Engine::new(&config).map_err(WasmError::runtime)?;
-        let linker = Self::base_linker(&engine)?;
+        let linker = Self::linker(&engine)?;
 
         Ok(Self {
             engine,
@@ -104,7 +107,6 @@ impl Wasm {
         config: &JsonObject,
         capabilities: WasmCapabilities,
     ) -> Result<WasmProvider, WasmError> {
-        let linker = Self::linker(self.linker.clone(), &capabilities)?;
         let worker = if capabilities.workers {
             if component.worker.is_none()
                 && component
@@ -121,7 +123,7 @@ impl Wasm {
                 .worker
                 .as_ref()
                 .map(|worker| {
-                    Self::linker(Self::base_linker(worker.engine())?, &capabilities)?
+                    Self::linker(worker.engine())?
                         .instantiate_pre(worker)
                         .map_err(WasmError::runtime)
                 })
@@ -129,65 +131,40 @@ impl Wasm {
         } else {
             None
         };
-        WasmProvider::new(&component.component, &linker, worker, config, capabilities)
+        WasmProvider::new(
+            &component.component,
+            &self.linker,
+            worker,
+            config,
+            capabilities,
+        )
     }
 
-    fn base_linker(engine: &Engine) -> Result<Linker<WasmState>, WasmError> {
+    fn linker(engine: &Engine) -> Result<Linker<WasmState>, WasmError> {
         let mut linker = Linker::new(engine);
         configuration::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::cli::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::clocks::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
         wasmtime_wasi::p3::random::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
-        Ok(linker)
-    }
-
-    fn linker(
-        mut linker: Linker<WasmState>,
-        capabilities: &WasmCapabilities,
-    ) -> Result<Linker<WasmState>, WasmError> {
-        if !capabilities.filesystem.is_empty() {
-            wasmtime_wasi::p3::filesystem::add_to_linker(&mut linker)
-                .map_err(WasmError::runtime)?;
-        }
-        if !capabilities.http.is_empty() {
-            wasmtime_wasi_http::p3::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
-        }
-        if capabilities.workers {
-            workers::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.process {
-            process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.credentials.is_some() {
-            credentials::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.blobs.is_some() {
-            blobs::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.workspace_access.is_some() {
-            crate::bindings::workspace_access::add_to_linker::<_, HasSelf<_>>(
-                &mut linker,
-                |state| state,
-            )
+        wasmtime_wasi::p3::filesystem::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker).map_err(WasmError::runtime)?;
+        workers::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(WasmError::runtime)?;
-        }
-        if capabilities.roles.is_some() {
-            roles::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.agents.is_some() {
-            agents::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
-        if capabilities.tool_calls.is_some() {
-            tool_calls::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-                .map_err(WasmError::runtime)?;
-        }
+        process::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        credentials::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        blobs::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        workspace_access::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        roles::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        agents::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
+        tool_calls::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(WasmError::runtime)?;
         Ok(linker)
     }
 }
