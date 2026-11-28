@@ -17,7 +17,8 @@
 //! Clocks and randomness are available. The guest does not inherit environment
 //! variables or standard streams, and raw sockets are unavailable. Outgoing HTTP
 //! requests are denied unless they target an approved [`WasmOrigin`].
-//! The process capability runs host programs outside the WASI sandbox.
+//! The process capability runs host programs outside the WASI sandbox, either any
+//! program or only the exact commands listed in [`WasmProcessAccess`].
 //! Blob imports delegate through [`WasmBlobs`]. Model calls can
 //! read only their input's blob references and cannot write. Tool access is supplied by an
 //! agent-scoped factory. A plugin must declare the `fleet:providers/blobs` import to use it.
@@ -123,6 +124,7 @@ pub use self::{
     wasm_credentials::WasmCredentials,
     wasm_error::WasmError,
     wasm_http::WasmOrigin,
+    wasm_process::{WasmCommand, WasmProcessAccess},
     wasm_registry::{WasmProvider, WasmRegistry},
     wasm_roles::WasmRoles,
     wasm_tool_calls::WasmToolCalls,

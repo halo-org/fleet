@@ -93,6 +93,38 @@ not survive a restart. See `fleet-wasm/wit/workers.wit` for the connection contr
 and resource limits. Ordinary calls run without fuel instrumentation; worker
 execution uses a separately compiled variant that yields for bounded shutdown.
 
+Approve `"process": true` to let a provider run any program on the host, outside
+the WASI sandbox. A list of commands instead allows only those commands:
+
+```json
+{
+  "process": [
+    {
+      "program": "npx",
+      "args": ["-y", "@example/mcp-server@1.2.3"],
+      "env": ["EXAMPLE_API_KEY"],
+      "inherit_env": true,
+      "cwd": "/srv/example"
+    }
+  ]
+}
+```
+
+A request runs only if an entry has the same program, the same arguments in the
+same order and the same working directory. Matching is exact: strings are compared
+without resolving paths, and an entry without `cwd` matches only requests without
+one. `args` defaults to none. The provider may set or remove only the environment
+variables named in `env`, with any values. Each name in `env` must start with an
+ASCII letter or underscore and contain only ASCII letters, digits or underscores.
+The provider may inherit Fleet's environment only if `inherit_env` is true, which
+defaults to false. An empty list allows nothing.
+
+A command list pins what may be launched, but the program still runs with Fleet's
+host permissions. A bare program name is found through the environment. Listing
+variables that affect program loading or lookup, such as `PATH` or `LD_PRELOAD`,
+in `env`, or allowing an interpreter or package runner with arguments that fetch
+unpinned code, undoes the pin.
+
 Providers with process access can use `process.spawn-group` for SDKs or helpers
 that launch descendants. On Linux and macOS, resource drop and forced worker
 shutdown terminate processes remaining in that group. Waiting for the leader

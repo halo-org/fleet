@@ -111,6 +111,7 @@ impl WasmProvider {
             config: serde_json::to_string(config)?.into(),
             filesystem: capabilities.open_filesystem()?,
             origins: WasmOrigins::new(capabilities.http),
+            process: capabilities.process.into(),
             credentials: capabilities.credentials,
             agents: capabilities.agents,
             workspace_access: capabilities.workspace_access,

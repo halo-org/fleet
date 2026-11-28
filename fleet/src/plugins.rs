@@ -2,8 +2,9 @@ use crate::{Authentication, Config, Fleet, PluginRoles, PluginToolCalls, TaskHan
 use core::{error::Error, fmt, time::Duration};
 use fleet_core::JsonObject;
 use fleet_wasm::{
-    Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCredentials, WasmError, WasmMount,
-    WasmOrigin, WasmProvider, WasmRegistry, WasmRoles, WasmToolCalls, WasmWorkspaceAccess,
+    Wasm, WasmAgents, WasmBlobs, WasmCapabilities, WasmCommand, WasmCredentials, WasmMount,
+    WasmOrigin, WasmProcessAccess, WasmProvider, WasmRegistry, WasmRoles, WasmToolCalls,
+    WasmWorkspaceAccess,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -66,7 +67,7 @@ pub struct ProviderCapabilities {
     #[serde(default)]
     filesystem: Vec<PluginMount>,
     #[serde(default)]
-    process: bool,
+    process: ProcessCapability,
     #[serde(default)]
     workers: bool,
     #[serde(default)]
@@ -79,6 +80,26 @@ pub struct ProviderCapabilities {
     agents: bool,
     #[serde(default)]
     tool_calls: bool,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged, expecting = "process takes a boolean or a list of commands")]
+enum ProcessCapability {
+    Enabled(bool),
+    Commands(Vec<ProcessCommand>),
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ProcessCommand {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default)]
+    inherit_env: bool,
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,10 +115,59 @@ enum RolePermission {
     Read,
 }
 
+impl ProcessCapability {
+    const fn grants(&self) -> bool {
+        match self {
+            Self::Enabled(enabled) => *enabled,
+            Self::Commands(commands) => !commands.is_empty(),
+        }
+    }
+
+    fn access(&self) -> io::Result<WasmProcessAccess> {
+        match self {
+            Self::Enabled(false) => Ok(WasmProcessAccess::None),
+            Self::Enabled(true) => Ok(WasmProcessAccess::Any),
+            Self::Commands(commands) => commands
+                .iter()
+                .map(ProcessCommand::command)
+                .collect::<io::Result<_>>()
+                .map(WasmProcessAccess::Commands),
+        }
+    }
+}
+
+impl Default for ProcessCapability {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
+}
+
+impl ProcessCommand {
+    fn command(&self) -> io::Result<WasmCommand> {
+        if let Some(name) = self.env.iter().find(|name| !is_env_name(name)) {
+            return Err(io::Error::other(format!(
+                "invalid environment variable name {name:?}"
+            )));
+        }
+        Ok(WasmCommand {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            cwd: self.cwd.clone(),
+            inherit_env: self.inherit_env,
+            env: self.env.clone(),
+        })
+    }
+}
+
 impl Default for RoleCapability {
     fn default() -> Self {
         Self::Enabled(false)
     }
+}
+
+fn is_env_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,7 +194,7 @@ struct LockedPlugin {
 #[derive(Debug)]
 struct LoadError {
     target: String,
-    source: WasmError,
+    source: Box<dyn Error + Send + Sync>,
 }
 
 // === Loading ===
@@ -176,7 +246,7 @@ pub async fn load(
         };
         let component = wasm.compile(&bytes).map_err(|source| LoadError {
             target: format!("plugin {name}"),
-            source,
+            source: source.into(),
         })?;
         components.insert(name, component);
     }
@@ -213,7 +283,7 @@ pub async fn load(
             .provider(component, &provider.config, capabilities)
             .map_err(|source| LoadError {
                 target: format!("provider {name}"),
-                source,
+                source: source.into(),
             })?;
         authentication.register(name, provider.connections(authentication.host_id()).await?)?;
         loaded.insert(name, provider);
@@ -236,7 +306,7 @@ fn capabilities_for(
     name: &str,
     directory: &Path,
     authentication: &Authentication,
-) -> Result<WasmCapabilities, WasmError> {
+) -> Result<WasmCapabilities, Box<dyn Error + Send + Sync>> {
     let http = capabilities
         .http
         .iter()
@@ -270,7 +340,7 @@ fn capabilities_for(
                 read_only: mount.read_only,
             })
             .collect(),
-        process: capabilities.process,
+        process: capabilities.process.access()?,
         workers: capabilities.workers,
         credentials: capabilities
             .credentials
@@ -307,7 +377,7 @@ impl ProviderConfig {
             Some("HTTP")
         } else if !self.capabilities.filesystem.is_empty() {
             Some("filesystem")
-        } else if self.capabilities.process {
+        } else if self.capabilities.process.grants() {
             Some("process")
         } else {
             None
@@ -465,7 +535,7 @@ impl fmt::Display for LoadError {
 
 impl Error for LoadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.source)
+        Some(&*self.source)
     }
 }
 
@@ -508,6 +578,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::assert_matches;
     use serde_json::json;
 
     #[test]
@@ -584,6 +655,113 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.is_data());
+    }
+
+    #[test]
+    fn process_takes_a_boolean_or_exact_commands() {
+        let process = |capabilities| {
+            serde_json::from_value::<ProviderConfig>(json!({
+                "plugin": "host",
+                "capabilities": capabilities,
+            }))
+            .map(|provider| provider.capabilities.process)
+        };
+
+        assert_eq!(
+            process(json!({})).unwrap(),
+            ProcessCapability::Enabled(false)
+        );
+        assert_eq!(
+            process(json!({ "process": false })).unwrap(),
+            ProcessCapability::Enabled(false)
+        );
+        assert_eq!(
+            process(json!({ "process": true })).unwrap(),
+            ProcessCapability::Enabled(true)
+        );
+        assert_eq!(
+            process(json!({
+                "process": [
+                    {
+                        "program": "npx",
+                    },
+                    {
+                        "program": "npx",
+                        "args": ["-y", "@example/mcp-server"],
+                        "env": ["EXAMPLE_API_KEY"],
+                        "inherit_env": true,
+                        "cwd": "/srv/example",
+                    },
+                ],
+            }))
+            .unwrap(),
+            ProcessCapability::Commands(vec![
+                ProcessCommand {
+                    program: "npx".into(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    inherit_env: false,
+                    cwd: None,
+                },
+                ProcessCommand {
+                    program: "npx".into(),
+                    args: vec!["-y".into(), "@example/mcp-server".into()],
+                    env: vec!["EXAMPLE_API_KEY".into()],
+                    inherit_env: true,
+                    cwd: Some("/srv/example".into()),
+                },
+            ])
+        );
+        for command in [
+            json!({ "args": [] }),
+            json!({ "program": "npx", "envs": [] }),
+        ] {
+            let error = process(json!({ "process": [command] })).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "process takes a boolean or a list of commands"
+            );
+        }
+    }
+
+    #[test]
+    fn process_env_names_are_letters_digits_and_underscores() {
+        let access = |name| {
+            serde_json::from_value::<ProviderConfig>(json!({
+                "plugin": "host",
+                "capabilities": {
+                    "process": [
+                        {
+                            "program": "npx",
+                            "env": [name],
+                        },
+                    ],
+                },
+            }))
+            .unwrap()
+            .capabilities
+            .process
+            .access()
+        };
+
+        for name in ["A", "_A", "API_KEY", "a1"] {
+            let process = access(name).unwrap();
+            assert_matches!(
+                process,
+                WasmProcessAccess::Commands(commands) if commands[0].env == [name]
+            );
+        }
+        for name in ["DEMO=prefix", "", "1ABC", "A-B", "A.B", "A B", "Ä"] {
+            let error = access(name).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("invalid environment variable name {name:?}")
+            );
+        }
+        assert_eq!(
+            access("A\0B").unwrap_err().to_string(),
+            r#"invalid environment variable name "A\0B""#
+        );
     }
 
     #[test]
